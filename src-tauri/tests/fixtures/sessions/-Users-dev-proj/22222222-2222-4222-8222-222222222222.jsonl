@@ -1,0 +1,7 @@
+{"type":"user","uuid":"u1","isSidechain":false,"cwd":"/Users/dev/proj","version":"2.1.319","userType":"external","sessionId":"22222222-2222-4222-8222-222222222222","timestamp":"2026-11-11T10:00:01.000Z","message":{"role":"user","content":"Primo prompt"}}
+{"type":"future-thing"}
+{"type":"assistant","uuid":"a1","isSidechain":false,"cwd":"/Users/dev/proj","version":"2.1.319","userType":"external","sessionId":"22222222-2222-4222-8222-222222222222","timestamp":"2026-11-11T10:00:02.000Z","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"Risposta"}]}}
+{"type":"user","uuid":"u2","isSidechain":false,"cwd":"/Users/dev/proj","version":"2.1.319","userType":"external","sessionId":"22222222-2222-4222-8222-222222222222","timesta
+{"type":"user","uuid":"u3","isSidechain":false,"cwd":"/Users/dev/proj","version":"2.1.319","userType":"external","sessionId":"22222222-2222-4222-8222-222222222222","timestamp":"2026-11-11T10:00:03.000Z","message":{"role":"user","content":"Secondo prompt"}}
+not json at all
+{"type":"user","uuid":"u4","isSidechain":false,"cwd":"/Users/dev/proj","version":"2.1.319","userType":"external","sessionId":"22222222-2222-4222-8222-222222222222","timestamp":"2026-11-11T10:00:04.000Z","message":{"role":"user","content":"Terzo prompt tronco

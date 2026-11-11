@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use crate::claude::Conversation;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
@@ -62,6 +63,31 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+const CONV_SELECT: &str = "SELECT session_id, project_id, cwd, title, prev_title, title_changed_at, title_locked, summary,
+  status, owned, archived, last_activity, turn_count, model, permission_mode, context_used_pct FROM conversations";
+
+fn row_to_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
+    Ok(Conversation {
+        session_id: r.get(0)?,
+        project_id: r.get(1)?,
+        cwd: r.get(2)?,
+        title: r.get(3)?,
+        prev_title: r.get(4)?,
+        title_changed_at: r.get(5)?,
+        title_locked: r.get(6)?,
+        summary: r.get(7)?,
+        status: r.get(8)?,
+        owned: r.get(9)?,
+        archived: r.get(10)?,
+        last_activity: r.get(11)?,
+        turn_count: r.get(12)?,
+        model: r.get(13)?,
+        permission_mode: r.get(14)?,
+        context_used_pct: r.get(15)?,
+        maybe_open_elsewhere: false,
+    })
 }
 
 fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<(String, String, String)> {
@@ -146,6 +172,56 @@ impl Store {
             .map_err(err)?;
         let rows = stmt.query_map([], row_to_project).map_err(err)?;
         rows.map(|r| build_project(r.map_err(err)?)).collect()
+    }
+
+    /// Inserisce una sessione nuova (owned=false, idle, permessi dal default) oppure aggiorna SOLO
+    /// cwd, last_activity e turn_count di una già nota: titolo, archiviazione, letto/non letto restano.
+    pub fn upsert_synced_conversation(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        cwd: &str,
+        title: &str,
+        last_activity: i64,
+        turn_count: i64,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let mode: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'default_permission_mode'", [], |r| r.get(0))
+            .optional()
+            .map_err(err)?
+            .unwrap_or_default();
+        conn.execute(
+            "INSERT INTO conversations(session_id, project_id, cwd, title, last_activity, turn_count, permission_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(session_id) DO UPDATE SET
+               cwd = excluded.cwd, last_activity = excluded.last_activity, turn_count = excluded.turn_count",
+            params![session_id, project_id, cwd, title, last_activity, turn_count, mode],
+        )
+        .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn get_conversation(&self, session_id: &str) -> Result<Option<Conversation>> {
+        self.conn()
+            .query_row(&format!("{CONV_SELECT} WHERE session_id = ?1"), [session_id], row_to_conversation)
+            .optional()
+            .map_err(err)
+    }
+
+    /// Più recenti per primi.
+    pub fn list_conversations(&self, project_id: &str) -> Result<Vec<Conversation>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!("{CONV_SELECT} WHERE project_id = ?1 ORDER BY last_activity DESC, session_id"))
+            .map_err(err)?;
+        let rows = stmt.query_map([project_id], row_to_conversation).map_err(err)?;
+        rows.map(|r| r.map_err(err)).collect()
+    }
+
+    #[cfg(test)]
+    pub fn exec_for_test(&self, sql: &str, arg: &str) {
+        self.conn().execute(sql, [arg]).unwrap();
     }
 
     pub fn setting_get(&self, key: &str) -> Result<Option<String>> {

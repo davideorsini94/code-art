@@ -1,3 +1,4 @@
+mod claude;
 mod fs_tree;
 mod projects;
 mod pty;
@@ -12,6 +13,7 @@ pub fn run() {
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
+        .manage(claude::sessions::SessionWatchers::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
@@ -47,6 +49,8 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            claude::sessions::conv_list,
+            claude::sessions::conv_history,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

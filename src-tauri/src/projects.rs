@@ -126,6 +126,7 @@ pub fn show_project_window(app: &AppHandle, project: &Project) -> Result<()> {
     }
     store.set_open_flag(&project.id, true)?;
     crate::fs_tree::watch_project(app, project);
+    crate::claude::sessions::watch_project(app, project);
     if let Some(w) = app.get_webview_window(WELCOME_LABEL) {
         let _ = w.close();
     }
@@ -178,6 +179,7 @@ pub fn mark_quitting(app: &AppHandle) {
 pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
         crate::fs_tree::unwatch_project(app, id);
+        crate::claude::sessions::unwatch_project(app, id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
     let quitting = app.state::<Quitting>().0.load(Ordering::SeqCst);
@@ -299,6 +301,7 @@ pub fn project_rename(app: AppHandle, store: State<Store>, id: String, name: Str
 pub fn project_add_folder(app: AppHandle, store: State<Store>, id: String, path: String) -> Result<Project> {
     let p = add_folder(&store, &id, &path)?;
     crate::fs_tree::watch_project(&app, &p);
+    crate::claude::sessions::watch_project(&app, &p);
     Ok(p)
 }
 
@@ -306,6 +309,7 @@ pub fn project_add_folder(app: AppHandle, store: State<Store>, id: String, path:
 pub fn project_relocate(app: AppHandle, store: State<Store>, id: String, old: String, new: String) -> Result<Project> {
     let p = relocate(&store, &id, &old, &new)?;
     crate::fs_tree::watch_project(&app, &p);
+    crate::claude::sessions::watch_project(&app, &p);
     Ok(p)
 }
 

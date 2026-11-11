@@ -34,3 +34,8 @@ export const ptySpawn = (cwd: string, cols: number, rows: number) => invoke<{ id
 export const ptyWrite = (id: number, data: string) => invoke<void>('pty_write', { id, data })
 export const ptyResize = (id: number, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
 export const ptyKill = (id: number) => invoke<void>('pty_kill', { id })
+
+// ---- conversazioni ----
+import type { ChatItem, Conversation } from './types'
+export const convList = (projectId: string) => invoke<Conversation[]>('conv_list', { projectId })
+export const convHistory = (sessionId: string) => invoke<ChatItem[]>('conv_history', { sessionId })
