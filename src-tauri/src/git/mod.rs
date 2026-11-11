@@ -61,8 +61,10 @@ pub fn repos_of(store: &Store, project_id: &str) -> Result<Vec<String>> {
 
 /// `repo` deve essere una delle radici di `repos_of` (confronto sui percorsi canonici).
 fn resolve_repo(store: &Store, project_id: &str, repo: &str) -> Result<PathBuf> {
+    // prima la fiducia (altrimenti l'interfaccia non mostra "Mi fido"), poi l'argomento della pagina
+    let repos = repos_of(store, project_id)?;
     let want = Path::new(repo).canonicalize().map_err(|_| "repository non valido".to_string())?;
-    repos_of(store, project_id)?
+    repos
         .into_iter()
         .find(|r| Path::new(r).canonicalize().is_ok_and(|c| c == want))
         .map(|r| PathBuf::from(r))
@@ -80,11 +82,29 @@ fn check_rel(path: &str) -> Result<()> {
 
 // ---------- operazioni ----------
 
+/// Errori di `run_tool` che il fallback a meno dettaglio può risolvere.
+fn needs_fallback(e: &str) -> bool {
+    e.contains("output oltre") || e.contains("tempo scaduto")
+}
+
 pub fn status(store: &Store, project_id: &str, repo: &str) -> Result<RepoStatus> {
     let dir = resolve_repo(store, project_id, repo)?;
-    let out = git_ok(&dir, &["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], READ_TIMEOUT)?;
+    // output troppo grande o troppo lento (decine di migliaia di file non tracciati): si degrada a meno dettaglio
+    let mut out = None;
+    let mut degraded = false;
+    for mode in ["--untracked-files=all", "--untracked-files=normal", "--untracked-files=no"] {
+        match git_ok(&dir, &["status", "--porcelain=v2", "-z", "--branch", mode], READ_TIMEOUT) {
+            Ok(o) => {
+                out = Some(o);
+                break;
+            }
+            Err(e) if needs_fallback(&e) => degraded = true,
+            Err(e) => return Err(e),
+        }
+    }
+    let out = out.ok_or_else(|| "git: stato troppo grande".to_string())?;
     let (h, mut entries) = parse_porcelain_v2(&out);
-    let truncated = entries.len() > MAX_ENTRIES;
+    let truncated = degraded || entries.len() > MAX_ENTRIES;
     entries.truncate(MAX_ENTRIES);
     let merge_head = git_ok(&dir, &["rev-parse", "--git-path", "MERGE_HEAD"], READ_TIMEOUT)?;
     let merge_head = String::from_utf8_lossy(&merge_head);
@@ -115,9 +135,27 @@ fn decode(bytes: Vec<u8>) -> Side {
 }
 
 /// Contenuto di `spec` (`HEAD:percorso`, `:0:percorso`) o vuoto se non esiste.
+/// Messaggi di git (con `LC_ALL=C`) per "questo oggetto non esiste": percorso assente in HEAD o nell'indice,
+/// oppure HEAD non nato (repository senza commit). Qualsiasi altro errore è un errore vero.
+fn is_missing(stderr: &str) -> bool {
+    stderr.contains("does not exist in 'HEAD'")
+        || stderr.contains("does not exist (neither on disk nor in the index)")
+        || stderr.contains("exists on disk, but not in")
+        || stderr.contains("invalid object name 'HEAD'")
+}
+
+/// Contenuto di `spec` (`HEAD:percorso`, `:0:percorso`): vuoto solo se l'oggetto non esiste; prima si legge la
+/// dimensione, così un blob oltre `MAX_DIFF_BYTES` è `Binary` senza essere caricato.
 fn show(dir: &Path, spec: &str) -> Result<Side> {
-    let out = git(dir, &["show", spec], READ_TIMEOUT)?;
-    Ok(if out.status == 0 { decode(out.stdout) } else { Side::Text(String::new()) })
+    let sz = git(dir, &["cat-file", "-s", spec], READ_TIMEOUT)?;
+    if sz.status != 0 {
+        return if is_missing(&sz.stderr) { Ok(Side::Text(String::new())) } else { Err(format!("git: {}", sz.stderr.trim())) };
+    }
+    let size: u64 = String::from_utf8_lossy(&sz.stdout).trim().parse().map_err(|_| "git: dimensione illeggibile".to_string())?;
+    if size > MAX_DIFF_BYTES {
+        return Ok(Side::Binary);
+    }
+    Ok(decode(git_ok(dir, &["show", spec], READ_TIMEOUT)?))
 }
 
 fn disk(dir: &Path, rel: &str) -> Result<Side> {
@@ -396,6 +434,77 @@ mod tests {
             let r = diff(&st, "p", &root(&d), p, false).unwrap();
             assert!(r.binary && r.before.is_empty() && r.after.is_empty(), "{p}");
         }
+    }
+
+    #[test]
+    fn missing_vs_real_git_errors() {
+        let d = repo();
+        // HEAD non nato: file nuovo in indice => prima vuoto, non errore
+        std::fs::write(d.path().join("n.txt"), "new\n").unwrap();
+        g(d.path(), &["add", "n.txt"]);
+        let (_s, st) = project(&[d.path()]);
+        let r = diff(&st, "p", &root(&d), "n.txt", true).unwrap();
+        assert_eq!((r.before.as_str(), r.after.as_str()), ("", "new\n"));
+        commit_all(d.path(), "c1");
+        // percorso assente in HEAD, nell'indice e su disco: tutto vuoto
+        let r = diff(&st, "p", &root(&d), "nulla.txt", true).unwrap();
+        assert_eq!((r.before.as_str(), r.after.as_str()), ("", ""));
+        let r = diff(&st, "p", &root(&d), "nulla.txt", false).unwrap();
+        assert!(r.before.is_empty() && r.after.is_empty());
+        // file solo su disco, non in indice
+        std::fs::write(d.path().join("solo.txt"), "x").unwrap();
+        assert_eq!(diff(&st, "p", &root(&d), "solo.txt", false).unwrap().before, "");
+        // repository rotto: errore leggibile, non un diff "tutto aggiunto"
+        std::fs::write(d.path().join(".git/HEAD"), "garbage\n").unwrap();
+        let e = diff(&st, "p", &root(&d), "n.txt", true).unwrap_err();
+        assert!(e.starts_with("git: "), "{e}");
+        assert!(diff(&st, "p", &root(&d), "n.txt", false).is_err());
+    }
+
+    #[test]
+    fn huge_blob_is_binary_without_reading_it() {
+        let d = repo();
+        // oltre il tetto di 16 MB di run_tool: se fosse letto sarebbe un errore
+        std::fs::write(d.path().join("huge.txt"), vec![b'a'; 17 * 1024 * 1024]).unwrap();
+        commit_all(d.path(), "big");
+        let (_s, st) = project(&[d.path()]);
+        let r = diff(&st, "p", &root(&d), "huge.txt", true).unwrap();
+        assert!(r.binary && r.before.is_empty() && r.after.is_empty());
+        std::fs::write(d.path().join("huge.txt"), vec![b'b'; 17 * 1024 * 1024]).unwrap();
+        g(d.path(), &["add", "huge.txt"]);
+        assert!(diff(&st, "p", &root(&d), "huge.txt", true).unwrap().binary);
+        assert!(diff(&st, "p", &root(&d), "huge.txt", false).unwrap().binary);
+    }
+
+    #[test]
+    fn fallback_only_for_overflow_and_timeout() {
+        assert!(needs_fallback("output oltre 16 MB"));
+        assert!(needs_fallback("tempo scaduto dopo 15 s"));
+        assert!(!needs_fallback("git: fatal: not a git repository"));
+    }
+
+    #[test]
+    fn nfd_names_round_trip_to_diff() {
+        let d = repo();
+        let name = "e\u{301}.txt";
+        std::fs::write(d.path().join(name), "uno\n").unwrap();
+        commit_all(d.path(), "c1");
+        std::fs::write(d.path().join(name), "due\n").unwrap();
+        let (_s, st) = project(&[d.path()]);
+        let r = status(&st, "p", &root(&d)).unwrap();
+        assert_eq!(r.entries.len(), 1);
+        let p = r.entries[0].path.clone();
+        let df = diff(&st, "p", &root(&d), &p, false).unwrap();
+        assert_eq!((df.before.as_str(), df.after.as_str()), ("uno\n", "due\n"));
+    }
+
+    #[test]
+    fn untrusted_beats_bad_repo_argument() {
+        let d = repo();
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("t.db")).unwrap();
+        s.upsert_project(&Project { id: "p".into(), name: "p".into(), folders: vec![root(&d)] }).unwrap();
+        assert_eq!(status(&s, "p", "/Users/dev/non-esiste").unwrap_err(), crate::trust::UNTRUSTED);
     }
 
     #[test]

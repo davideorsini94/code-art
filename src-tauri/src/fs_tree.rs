@@ -284,6 +284,16 @@ pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
     }
 }
 
+/// Stato git dentro `.git` (`index`, `refs/**`): va a `git:changed` ma non a `fs:changed`. `.git/HEAD` resta
+/// anche in `fs:changed` (aggiorna il branch nella barra del titolo).
+fn is_git_internal(roots: &[PathBuf], path: &Path) -> bool {
+    let Some(rel) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else {
+        return false;
+    };
+    let comps: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    comps.iter().position(|c| c == ".git").is_some_and(|i| !(comps.len() == i + 2 && comps[i + 1] == "HEAD"))
+}
+
 /// Un watcher per ogni progetto aperto (chiave: id progetto).
 #[derive(Default)]
 pub struct Watchers(Mutex<HashMap<String, RecommendedWatcher>>);
@@ -302,8 +312,10 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
             for p in ev.paths.into_iter().filter(|p| !is_noise(&roots, p)) {
-                let _ = gtx.send(p.clone());
-                let _ = tx.send(p);
+                if !is_git_internal(&roots, &p) {
+                    let _ = tx.send(p.clone());
+                }
+                let _ = gtx.send(p);
             }
         }
     }) else {
@@ -723,6 +735,17 @@ mod tests {
         assert!(n("/p/target/debug/x"));
         assert!(!n("/p/src/main.rs"));
         assert!(!n("/p/.gitignore"));
+    }
+
+    #[test]
+    fn fs_changed_gets_only_head_from_git_dir() {
+        let roots = vec![PathBuf::from("/p")];
+        let g = |p: &str| is_git_internal(&roots, Path::new(p));
+        assert!(g("/p/.git/index"));
+        assert!(g("/p/.git/refs/heads/x"));
+        assert!(!g("/p/.git/HEAD"));
+        assert!(!g("/p/src/main.rs"));
+        assert!(!g("/p/.gitignore"));
     }
 
     #[test]

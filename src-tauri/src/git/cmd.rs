@@ -18,6 +18,9 @@ pub fn git(repo: &Path, args: &[&str], timeout: Duration) -> Result<ToolOutput, 
         .env("LC_ALL", "C")
         .args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
         .args(args);
+    // nei test il codice sotto esame non dipende dalla configurazione git dell'utente (firma, status.*, fsmonitor)
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1");
     run_tool(cmd, timeout, None)
 }
 
