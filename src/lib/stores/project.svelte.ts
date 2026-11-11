@@ -1,4 +1,4 @@
-import { listen } from '@tauri-apps/api/event'
+import { listenProject } from '../events'
 import { projectBranch, projectCurrent, projectMissingFolders, projectPickRelocate, projectRename, trustAccept, trustCheck } from '../ipc'
 import type { Project } from '../types'
 
@@ -17,8 +17,8 @@ class ProjectStore {
       await Promise.all([this.refreshBranch(), this.refreshMissing(), this.refreshTrust()])
       // prima apertura di una cartella mai vista: domanda nativa (la risposta la registra il core)
       if (this.untrusted.length > 0) void this.acceptTrust()
-      // Il watcher dei file (tappe successive) emette fs:changed: rileggiamo il branch.
-      void listen('fs:changed', () => void this.refreshBranch())
+      // il watcher dei file emette fs:changed (anche per `.git/HEAD`): rileggiamo il branch
+      void listenProject('fs:changed', this.project.id, () => void this.refreshBranch())
       window.addEventListener('focus', () => void this.refreshBranch())
     } catch {
       this.project = null

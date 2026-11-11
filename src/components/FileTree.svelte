@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { listen } from '@tauri-apps/api/event'
+  import { listenProject } from '../lib/events'
   import { PATH_DRAG_TYPE, relativeToFolders } from '../lib/conv/paths'
   import { tooltip } from '../lib/tooltip'
   import { projectStore } from '../lib/stores/project.svelte'
@@ -44,19 +44,27 @@
     }
   })
 
-  onMount(() => {
+  // eventi del watcher del progetto della finestra (il progetto si carica dopo il montaggio)
+  $effect(() => {
+    const pid = projectStore.project?.id
+    if (!pid) return
     let unlisten: (() => void) | undefined
-    void listen<FsChanged>('fs:changed', (ev) => {
+    let gone = false
+    void listenProject<FsChanged>('fs:changed', pid, (ev) => {
       const dirs = new Set(ev.payload.paths.map(parentOf))
       for (const d of dirs) if (children[d]) void load(d)
       // una cartella creata/rimossa cambia anche l'elenco del suo genitore (già coperto da parentOf)
-    }).then((u) => (unlisten = u))
+    }).then((u) => (gone ? u() : (unlisten = u)))
+    return () => {
+      gone = true
+      unlisten?.()
+    }
+  })
+
+  onMount(() => {
     const close = () => (menu = null)
     window.addEventListener('click', close)
-    return () => {
-      unlisten?.()
-      window.removeEventListener('click', close)
-    }
+    return () => window.removeEventListener('click', close)
   })
 
   async function run(op: () => Promise<unknown>): Promise<boolean> {

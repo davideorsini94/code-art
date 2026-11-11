@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tauri::{AppHandle, Emitter, Manager, Window};
+use tauri::{AppHandle, Manager, Window};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
@@ -311,14 +311,14 @@ pub fn focus_conversation(app: &AppHandle, life: &Lifecycle, session_id: &str, p
     }
     lock(&life.pending).remove(session_id);
     let payload = json!({ "sessionId": session_id });
-    let _ = app.emit_to(label.as_str(), "conv:focus", payload.clone());
+    projects::emit_to_project(app, project_id, "conv:focus", payload.clone());
     if !existed {
         // finestra appena creata: l'interfaccia non è ancora in ascolto. La selezione è idempotente.
-        let app = app.clone();
+        let (app, project_id) = (app.clone(), project_id.to_string());
         std::thread::spawn(move || {
             for ms in [800u64, 2000] {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
-                let _ = app.emit_to(label.as_str(), "conv:focus", payload.clone());
+                projects::emit_to_project(&app, &project_id, "conv:focus", payload.clone());
             }
         });
     }

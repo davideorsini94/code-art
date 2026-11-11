@@ -613,6 +613,7 @@ fn list_names(dir: &Path) -> Option<HashSet<String>> {
 /// Elenchi riusciti in questo passaggio (cartella → nomi); le cartelle non leggibili non compaiono.
 type Listings = HashMap<PathBuf, HashSet<String>>;
 
+#[cfg(test)]
 pub fn sync_project_sessions(
     root: &Path,
     store: &Store,
@@ -621,6 +622,19 @@ pub fn sync_project_sessions(
     now: i64,
     is_running: IsRunning,
 ) -> Result<Vec<Conversation>> {
+    sync_project_sessions_pruned(root, store, cache, project, now, is_running).map(|(list, _)| list)
+}
+
+/// Come `sync_project_sessions`, restituendo anche gli id delle righe tolte (`prune_vanished`): chi chiama emette
+/// `conv:removed` per ognuna.
+pub fn sync_project_sessions_pruned(
+    root: &Path,
+    store: &Store,
+    cache: &MetaCache,
+    project: &Project,
+    now: i64,
+    is_running: IsRunning,
+) -> Result<(Vec<Conversation>, Vec<String>)> {
     let mut listings = Listings::new();
     for dir in session_dirs_for(root, &project.folders) {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
@@ -642,8 +656,8 @@ pub fn sync_project_sessions(
             listings.insert(dir, n);
         }
     }
-    prune_vanished(root, store, project, is_running, &mut listings);
-    conversations_for(root, store, project, now, is_running)
+    let pruned = prune_vanished(root, store, project, is_running, &mut listings);
+    Ok((conversations_for(root, store, project, now, is_running)?, pruned))
 }
 
 /// Toglie dallo store le conversazioni il cui file di sessione è PROVATO sparito (eliminate altrove o dopo un
@@ -651,13 +665,13 @@ pub fn sync_project_sessions(
 /// cartella di sessione in cui potrebbe stare (quelle del progetto e quella del suo cwd) è stata elencata con
 /// successo (in questo passaggio) e non contiene il file; `try_exists` sul percorso atteso dà `Ok(false)`. Qualsiasi
 /// errore lascia la riga. Se un passaggio scartasse TUTTE le righe di un progetto con più di 3 righe è sospetto
-/// (cartella sparita, permessi, volume smontato): non si scarta nulla.
-fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning, listings: &mut Listings) {
+/// (cartella sparita, permessi, volume smontato): non si scarta nulla. Restituisce gli id tolti.
+fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning, listings: &mut Listings) -> Vec<String> {
     if !root.is_dir() {
-        return;
+        return vec![];
     }
     let project_dirs = session_dirs_for(root, &project.folders);
-    let Ok(list) = store.list_conversations(&project.id) else { return };
+    let Ok(list) = store.list_conversations(&project.id) else { return vec![] };
     let mut gone = Vec::new();
     for c in &list {
         if c.turn_count == 0 || !valid_session_id(&c.session_id) || is_running(&c.session_id) {
@@ -684,11 +698,9 @@ fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsR
         }
     }
     if list.len() > 3 && gone.len() == list.len() {
-        return;
+        return vec![];
     }
-    for id in gone {
-        let _ = store.delete_conversation(&id);
-    }
+    gone.into_iter().filter(|id| store.delete_conversation(id).is_ok()).collect()
 }
 
 /// Conversazioni salvate del progetto con `maybe_open_elsewhere` calcolato dall'mtime del file.
@@ -713,19 +725,24 @@ pub fn fill_elsewhere(c: &mut Conversation, dirs: &[PathBuf], now: i64, running:
 }
 
 /// Storia di una sessione del progetto: rifiuta ids sconosciuti, di altri progetti o con caratteri strani.
+/// Una conversazione avviata da Code Art il cui file non esiste ancora (la CLI lo scrive al primo messaggio)
+/// ha una storia vuota, non un errore.
 pub fn history_in(root: &Path, store: &Store, project: &Project, session_id: &str) -> Result<Vec<ChatItem>> {
     if !valid_session_id(session_id) {
         return Err("sessione non valida".into());
     }
-    match store.get_conversation(session_id)? {
-        Some(c) if c.project_id == project.id => {}
+    let conv = match store.get_conversation(session_id)? {
+        Some(c) if c.project_id == project.id => c,
         _ => return Err("sessione non appartiene a questo progetto".into()),
-    }
+    };
     for dir in session_dirs_for(root, &project.folders) {
         let f = dir.join(format!("{session_id}.jsonl"));
         if f.is_file() {
             return read_session_items(&f);
         }
+    }
+    if conv.owned {
+        return Ok(vec![]);
     }
     Err("file della sessione non trovato".into())
 }
@@ -836,7 +853,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use super::engine::Engine;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -845,7 +862,8 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 pub struct SessionWatchers(Mutex<HashMap<String, RecommendedWatcher>>);
 
 /// Osserva `~/.claude/projects` (la cartella del progetto può nascere dopo) e, per ogni file di
-/// sessione toccato nelle cartelle del progetto, risincronizza ed emette `conv:upsert` alla sua finestra.
+/// sessione toccato nelle cartelle del progetto, risincronizza ed emette `conv:upsert` attraverso il sink del
+/// motore (`Engine::emit_synced`: Dock e notifiche; saltate le sessioni con un processo vivo).
 pub fn watch_project(app: &AppHandle, project: &Project) {
     let root = default_root();
     if !root.is_dir() {
@@ -865,7 +883,6 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
         return;
     }
-    let label = crate::projects::window_label(&project.id);
     let (handle, project_id) = (app.clone(), project.id.clone());
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
@@ -901,9 +918,11 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                         if let Some(q) = handle.try_state::<super::titles::TitleQueue>() {
                             q.after_file_sync(&conv, before);
                         }
-                        let running = handle.try_state::<Engine>().is_some_and(|e| e.is_ours(&conv.session_id));
-                        fill_elsewhere(&mut conv, &dirs, now_ms(), running);
-                        let _ = handle.emit_to(label.as_str(), "conv:upsert", conv);
+                        if let Some(engine) = handle.try_state::<Engine>() {
+                            let ours = engine.is_ours(&conv.session_id);
+                            fill_elsewhere(&mut conv, &dirs, now_ms(), ours);
+                            engine.emit_synced(&conv);
+                        }
                     }
                 }
             }
@@ -1231,6 +1250,23 @@ mod tests {
         assert!(history_in(&fixtures_root(), &s, &other, U1).is_err());
         assert!(history_in(&fixtures_root(), &s, &p, U3).is_err()); // non nello store
         assert!(history_in(&fixtures_root(), &s, &p, "../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn history_of_a_just_started_owned_conversation_is_empty() {
+        let (_d, s) = store();
+        let p = project("/Users/dev/proj");
+        s.upsert_project(&p).unwrap();
+        let fresh = "44444444-4444-4444-8444-444444444444";
+        s.insert_owned_conversation("p1", fresh, "/Users/dev/proj", None, "default").unwrap();
+        assert_eq!(history_in(&fixtures_root(), &s, &p, fresh).unwrap(), vec![]);
+        // sessione importata senza file: errore come prima
+        let foreign = "55555555-5555-4555-8555-555555555555";
+        s.upsert_synced_conversation("p1", foreign, "/Users/dev/proj", "t", 0, 1).unwrap();
+        assert!(history_in(&fixtures_root(), &s, &p, foreign).is_err());
+        // altro progetto: errore anche se avviata da noi
+        let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/proj".into()] };
+        assert!(history_in(&fixtures_root(), &s, &other, fresh).is_err());
     }
 
     fn write_lines(f: &Path, lines: &[&str]) {

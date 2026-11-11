@@ -454,7 +454,12 @@ pub fn sync_and_enqueue(
     is_running: sessions::IsRunning,
 ) -> Result<Vec<Conversation>> {
     let before: HashMap<String, i64> = store.list_conversations(&project.id)?.into_iter().map(|c| (c.session_id, c.turn_count)).collect();
-    let list = sessions::sync_project_sessions(root, store, cache, project, now, is_running)?;
+    let (list, pruned) = sessions::sync_project_sessions_pruned(root, store, cache, project, now, is_running)?;
+    // righe il cui file di sessione è sparito: tolte dall'interfaccia (e dal numero sul Dock) come un'eliminazione
+    for id in &pruned {
+        queue.forget(id);
+        queue.0.sink.emit(&project.id, "conv:removed", serde_json::json!({ "sessionId": id }));
+    }
     let turns = store.title_turns(&project.id)?;
     let first = lock(&queue.0.state).imported.insert(project.id.clone());
     let fresh: Vec<Conversation> =
@@ -894,6 +899,23 @@ mod tests {
         e.queue.wait_idle();
         assert_eq!(e.fake.calls(), 2);
         assert_eq!(e.store.title_turn(&id).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn pruned_rows_are_announced_as_removed() {
+        let e = env(Fake::new(REPLY));
+        let (a, b) = (sid(1), sid(2));
+        write_session(&e, &a, 1);
+        write_session(&e, &b, 1);
+        let cache = sessions::MetaCache::default();
+        sync_and_enqueue(&e.queue, &e.root, &e.store, &cache, &e.project, 1_000, &|_| false).unwrap();
+        e.queue.wait_idle();
+        std::fs::remove_file(e.root.join("-Users-dev-proj").join(format!("{a}.jsonl"))).unwrap();
+        sync_and_enqueue(&e.queue, &e.root, &e.store, &cache, &e.project, 1_000, &|_| false).unwrap();
+        assert!(e.store.get_conversation(&a).unwrap().is_none());
+        let removed: Vec<(String, Value)> =
+            e.sink.0.lock().unwrap().iter().filter(|(_, ev, _)| ev == "conv:removed").map(|(p, _, v)| (p.clone(), v.clone())).collect();
+        assert_eq!(removed, vec![("p1".to_string(), serde_json::json!({ "sessionId": a }))]);
     }
 
     #[test]

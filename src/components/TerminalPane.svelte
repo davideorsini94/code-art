@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte'
-  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+  import { listenProject } from '../lib/events'
   import { openUrl } from '@tauri-apps/plugin-opener'
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
@@ -50,9 +50,10 @@
   }
 
   async function register() {
-    const win = getCurrentWebviewWindow()
+    const pid = projectStore.project?.id
+    if (!pid) return
     unlisten = await Promise.all([
-      win.listen<{ id: number; data: string }>('pty:data', ({ payload }) => {
+      listenProject<{ id: number; data: string }>('pty:data', pid, ({ payload }) => {
         const key = byPty.get(payload.id)
         const bytes = decode(payload.data)
         if (key === undefined) {
@@ -61,7 +62,7 @@
           live.get(key)?.term.write(bytes)
         }
       }),
-      win.listen<{ id: number }>('pty:exit', ({ payload }) => {
+      listenProject<{ id: number }>('pty:exit', pid, ({ payload }) => {
         if (!byPty.has(payload.id)) pendingExit.add(payload.id)
         else markExited(payload.id)
       }),

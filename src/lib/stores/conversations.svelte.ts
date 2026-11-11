@@ -1,4 +1,5 @@
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { UnlistenFn } from '@tauri-apps/api/event'
+import { listenProject } from '../events'
 import { convArchive, convDelete, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
 import { errorText } from '../errors'
 import { activeCount, nextActiveAfterRemoval, removeConversation, sortConversations, upsertConversation, waitingCount } from '../conv/order'
@@ -37,7 +38,7 @@ class ConversationStore {
     const removedEarly: string[] = []
     this.error = null
     try {
-      const un = await listen<Conversation>('conv:upsert', (ev) => {
+      const un = await listenProject<Conversation>('conv:upsert', projectId, (ev) => {
         if (gen !== this.generation || ev.payload.projectId !== projectId) return
         if (loading) early.push(ev.payload)
         else this.upsert(ev.payload)
@@ -45,12 +46,12 @@ class ConversationStore {
       if (gen !== this.generation) return un()
       this.unlisten = un
       // clic su una notifica: il backend porta in primo piano la finestra e chiede di aprire la conversazione
-      const unFocus = await listen<{ sessionId: string }>('conv:focus', (ev) => {
+      const unFocus = await listenProject<{ sessionId: string }>('conv:focus', projectId, (ev) => {
         if (gen === this.generation) void this.select(ev.payload.sessionId)
       })
       if (gen !== this.generation) return unFocus()
       this.unlistenFocus = unFocus
-      const unRemoved = await listen<{ sessionId: string }>('conv:removed', (ev) => {
+      const unRemoved = await listenProject<{ sessionId: string }>('conv:removed', projectId, (ev) => {
         if (gen !== this.generation) return
         if (loading) removedEarly.push(ev.payload.sessionId)
         else this.remove(ev.payload.sessionId)

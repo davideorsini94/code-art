@@ -13,6 +13,7 @@
   import { palette } from './lib/palette/state.svelte'
   import { hooks } from './lib/palette/search'
   import { conversations } from './lib/stores/conversations.svelte'
+  import { chat } from './lib/stores/chat.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
@@ -23,9 +24,16 @@
 
   onMount(() => {
     void projectStore.load().then(() => {
-      if (projectStore.project) void conversations.start(projectStore.project.id)
+      const p = projectStore.project
+      if (!p) return
+      // una volta per finestra: gli eventi delle conversazioni arrivano anche a colonna chiusa
+      void chat.start(p.id)
+      void conversations.start(p.id)
     })
-    return () => conversations.stop()
+    return () => {
+      chat.stop()
+      conversations.stop()
+    }
   })
 
   const initial = loadLayout()

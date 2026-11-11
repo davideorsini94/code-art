@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use tauri::{AppHandle, State, WebviewWindow};
 
 const MAX_PER_WINDOW: usize = 16;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
@@ -175,15 +175,16 @@ pub async fn pty_spawn(
     rows: u16,
 ) -> Result<SpawnInfo, String> {
     let roots = roots_of(&window, &store).map_err(|e| e.message)?;
+    let project_id = crate::projects::window_project_id(&window)?;
     // una shell esegue codice: solo nei progetti fidati
-    crate::trust::ensure_project_trusted(&store, &crate::projects::window_project_id(&window)?)?;
+    crate::trust::ensure_project_trusted(&store, &project_id)?;
     let cwd: PathBuf = ensure_inside(&roots, Path::new(&cwd)).map_err(|e| e.message)?;
     if !cwd.is_dir() {
         return Err("cartella inesistente".into());
     }
     let label = window.label().to_string();
-    let (a1, l1) = (app.clone(), label.clone());
-    let (a2, l2) = (app, label.clone());
+    let (a1, p1) = (app.clone(), project_id.clone());
+    let (a2, p2) = (app, project_id);
     let shell = login_shell();
     let id = ptys.spawn(
         &label,
@@ -194,10 +195,10 @@ pub async fn pty_spawn(
         rows,
         move |id, bytes| {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-            let _ = a1.emit_to(l1.as_str(), "pty:data", DataEvent { id, data });
+            crate::projects::emit_to_project(&a1, &p1, "pty:data", DataEvent { id, data });
         },
         move |id| {
-            let _ = a2.emit_to(l2.as_str(), "pty:exit", ExitEvent { id });
+            crate::projects::emit_to_project(&a2, &p2, "pty:exit", ExitEvent { id });
         },
     )?;
     let shell = Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "shell".into());

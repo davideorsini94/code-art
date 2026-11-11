@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte'
+  import { untrack } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { iconFor } from '../lib/fileicons'
@@ -39,7 +39,10 @@
   const showViewer = $derived(!!active && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
   const MODES: [MarkdownMode, string, string][] = [['preview', 'Anteprima', 'Mostra solo l\'anteprima'], ['edit', 'Modifica', 'Mostra solo il codice'], ['split', 'Affiancate', 'Codice e anteprima affiancati']]
 
-  onMount(() => editor.watch())
+  $effect(() => {
+    const pid = projectStore.project?.id
+    if (pid) editor.watch(pid)
+  })
 
   // testo dell'anteprima markdown: quello corrente dell'editor (modifiche non salvate comprese), con 150 ms di attesa
   let mdText = $state('')

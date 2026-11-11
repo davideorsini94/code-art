@@ -1,5 +1,7 @@
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import { convAnswer, convHistory, convPending } from '../ipc'
+import { listenProject } from '../events'
+import { errorText } from '../errors'
 import { answerAsk, appendUser, initialState, reconcile, reduceAll, type ChatState } from '../conv/reduce'
 import { conversations } from './conversations.svelte'
 import type { ClaudeEvent, ConvEventPayload } from '../types'
@@ -18,6 +20,8 @@ const frame = (cb: () => void) =>
  * - altre sessioni: gli eventi si scartano (alla prossima apertura la storia dal file li contiene già).
  * - a fine turno la storia si rilegge e sostituisce lo stato (`reconcile`): risolve duplicati e messaggi tagliati.
  * - le richieste ancora aperte (`conv_pending`) si applicano dopo la storia, anche per chi apre la scheda in ritardo.
+ * - una conversazione appena avviata (file di sessione non ancora scritto) parte da uno stato vuoto, mai da un errore.
+ * Si avvia una volta per finestra (App), non con il pannello: gli eventi arrivano anche a colonna chiusa.
  */
 class ChatStore {
   states = $state.raw<Record<string, ChatState>>({})
@@ -36,13 +40,14 @@ class ChatStore {
     return sessionId ? this.states[sessionId] : undefined
   }
 
-  async start() {
+  /** In ascolto degli eventi del progetto della finestra. */
+  async start(projectId: string) {
     this.stop()
     const gen = ++this.generation
-    const un = await listen<ConvEventPayload>('conv:event', (ev) => this.onEvent(ev.payload))
+    const un = await listenProject<ConvEventPayload>('conv:event', projectId, (ev) => this.onEvent(ev.payload))
     if (gen !== this.generation) return un()
     this.unlisten = un
-    const unRemoved = await listen<{ sessionId: string }>('conv:removed', (ev) => this.drop(ev.payload.sessionId))
+    const unRemoved = await listenProject<{ sessionId: string }>('conv:removed', projectId, (ev) => this.drop(ev.payload.sessionId))
     if (gen !== this.generation) return unRemoved()
     this.unlistenRemoved = unRemoved
   }
@@ -81,6 +86,12 @@ class ChatStore {
     return { history, pending }
   }
 
+  /** Conversazione avviata da noi e senza turni: il file di sessione può non esistere ancora. */
+  private isFresh(sessionId: string): boolean {
+    const c = conversations.all.find((x) => x.sessionId === sessionId)
+    return !!c && c.owned && c.turnCount === 0
+  }
+
   /** Porta in primo piano la sessione; se non è in cache ne legge la storia e le richieste aperte. */
   async open(sessionId: string): Promise<void> {
     this.order = [sessionId, ...this.order.filter((s) => s !== sessionId)]
@@ -89,16 +100,33 @@ class ChatStore {
     const gen = this.generation
     this.buffering.set(sessionId, [])
     this.setError(sessionId, null)
+    let base: ChatState
     try {
       const { history, pending } = await this.fetch(sessionId)
-      const early = this.buffering.get(sessionId) ?? []
-      this.buffering.delete(sessionId)
-      if (gen !== this.generation || !this.order.includes(sessionId)) return
-      this.states = { ...this.states, [sessionId]: reduceAll(reduceAll(initialState(history), pending), early) }
+      base = reduceAll(initialState(history), pending)
     } catch (e) {
-      this.buffering.delete(sessionId)
-      this.setError(sessionId, String(e))
+      if (!this.isFresh(sessionId)) {
+        this.buffering.delete(sessionId)
+        this.setError(sessionId, errorText(e))
+        return
+      }
+      base = initialState([])
     }
+    const early = this.buffering.get(sessionId) ?? []
+    this.buffering.delete(sessionId)
+    if (gen !== this.generation || !this.order.includes(sessionId)) return
+    this.states = { ...this.states, [sessionId]: reduceAll(base, early) }
+  }
+
+  /** Il pannello torna a mostrare la sessione (anche dopo essere stato chiuso): se è in cache rilegge le
+   *  richieste aperte (nessuna si perde), altrimenti la apre. */
+  async refresh(sessionId: string): Promise<void> {
+    if (!this.states[sessionId] || this.buffering.has(sessionId)) return this.open(sessionId)
+    this.order = [sessionId, ...this.order.filter((s) => s !== sessionId)]
+    const pending = await convPending(sessionId).catch(() => null)
+    if (!pending?.length) return
+    this.flush()
+    this.update(sessionId, (s) => reduceAll(s, pending))
   }
 
   /** Fine turno: rilegge la storia e la fonde con lo stato live (todo e richieste aperte restano). */
@@ -111,7 +139,8 @@ class ChatStore {
     try {
       fetched = await this.fetch(sessionId)
     } catch (e) {
-      this.setError(sessionId, String(e))
+      // conversazione appena avviata: il file può non esserci ancora; lo stato live resta valido
+      if (!this.isFresh(sessionId)) this.setError(sessionId, errorText(e))
     }
     const early = this.buffering.get(sessionId) ?? []
     this.buffering.delete(sessionId)

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 /// Tetto per `fs_read_bytes` (anteprime di immagini, PDF, audio e video).
@@ -251,7 +251,7 @@ pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
 #[derive(Default)]
 pub struct Watchers(Mutex<HashMap<String, RecommendedWatcher>>);
 
-/// (Ri)avvia il watcher del progetto su tutte le sue cartelle; emette `fs:changed` alla sola finestra del progetto.
+/// (Ri)avvia il watcher del progetto su tutte le sue cartelle; emette `fs:changed:<id progetto>` alla finestra del progetto.
 pub fn watch_project(app: &AppHandle, project: &Project) {
     let (tx, rx) = channel::<PathBuf>();
     // radici come date e canonicalizzate: gli eventi possono arrivare con l'uno o l'altro percorso
@@ -273,8 +273,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     for f in &project.folders {
         let _ = watcher.watch(Path::new(f), RecursiveMode::Recursive);
     }
-    let label = crate::projects::window_label(&project.id);
-    let handle = app.clone();
+    let (handle, project_id) = (app.clone(), project.id.clone());
     std::thread::spawn(move || {
         // il thread termina quando il watcher (e quindi `tx`) viene distrutto
         while let Ok(first) = rx.recv() {
@@ -294,7 +293,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                 .map(|p| p.to_string_lossy().to_string())
                 .filter(|p| seen.insert(p.clone()))
                 .collect();
-            let _ = handle.emit_to(label.as_str(), "fs:changed", FsChanged { paths });
+            crate::projects::emit_to_project(&handle, &project_id, "fs:changed", FsChanged { paths });
         }
     });
     if let Ok(mut map) = app.state::<Watchers>().0.lock() {

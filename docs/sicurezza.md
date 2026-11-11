@@ -180,6 +180,21 @@ Rilassamenti e perché:
 `src-tauri/capabilities/project.json` (finestre `proj-*`):
 - `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `pty:*`).
   Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
+
+**Come arrivano gli eventi di un progetto.** In Tauri 2 `emit_to(etichetta)` filtra solo gli ascoltatori
+registrati *per quella finestra*: un ascoltatore globale (`listen` senza finestra) di qualunque finestra li riceve
+tutti. Per questo:
+- ogni evento di progetto porta l'id del progetto nel **nome**: `conv:event:<id>`, `conv:upsert:<id>`,
+  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
+  costruisce il nome (`projects::project_event` / `emit_to_project` nel core, `src/lib/events.ts` nell'interfaccia,
+  che lo ricava dal proprio progetto); il core lo emette con `emit_to` verso la sola finestra del progetto;
+- l'interfaccia ascolta solo con `getCurrentWebviewWindow().listen` (finestra corrente), mai con il `listen`
+  globale (`src/lib/events.test.ts` fallisce se un sorgente lo importa).
+- Test: `project_events_carry_the_project_id_in_the_name` (e nessun `emit_to` con nome fisso fuori dall'helper),
+  `listenProject` in `src/lib/events.test.ts`.
+- Rischio residuo: una pagina compromessa che conosce l'id (UUID) di un altro progetto può registrare un ascoltatore
+  globale su quel nome e leggerne gli eventi (output del terminale, testo delle conversazioni). Le altre finestre non
+  ricevono mai l'id di un progetto diverso dal proprio; la finestra di benvenuto non ha il permesso di ascolto.
 - `core:window:allow-start-dragging`, `core:window:allow-internal-toggle-maximize` — barra del titolo
   (`data-tauri-drag-region`, doppio clic).
 - `opener:allow-open-url` limitato a `http://*` e `https://*` — link esterni nel browser di sistema.
@@ -242,4 +257,6 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 - La CLI `claude` in bypass permissions, in una cartella fidata, può fare tutto ciò che può fare l'utente:
   è la scelta voluta, resa visibile (modalità in ambra, domanda di fiducia).
 - Fiducia per percorso, non per inode (vedi "Misure attive").
+- Eventi di progetto: una pagina compromessa che conosce l'UUID di un altro progetto può ascoltarne gli eventi
+  (vedi "Come arrivano gli eventi di un progetto").
 - La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).

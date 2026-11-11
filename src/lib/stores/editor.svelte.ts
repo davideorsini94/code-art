@@ -1,4 +1,4 @@
-import { listen } from '@tauri-apps/api/event'
+import { listenProject } from '../events'
 import { asFsError, fsRead, fsWrite } from '../ipc'
 import { projectStore } from './project.svelte'
 import type { FileContent, FsChanged } from '../types'
@@ -236,11 +236,11 @@ class EditorStore {
     )
   }
 
-  /** Ascolta `fs:changed` (una sola volta per finestra). */
-  watch() {
+  /** Ascolta `fs:changed` del progetto della finestra (una sola volta). */
+  watch(projectId: string) {
     if (this.watching) return
     this.watching = true
-    void listen<FsChanged>('fs:changed', (e) => void this.applyChanged(e.payload.paths))
+    void listenProject<FsChanged>('fs:changed', projectId, (e) => void this.applyChanged(e.payload.paths))
   }
 }
 

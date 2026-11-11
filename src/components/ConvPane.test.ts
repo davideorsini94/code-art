@@ -35,8 +35,8 @@ beforeAll(() => {
 afterEach(cleanup)
 
 describe('ConvPane', () => {
-  it('a states change with the same id does not re-call chat.open (no re-stick every frame)', async () => {
-    const open = vi.spyOn(chat, 'open')
+  it('a states change with the same id does not re-call chat.refresh (no re-stick every frame)', async () => {
+    const open = vi.spyOn(chat, 'refresh')
     conversations.all = [conv]
     conversations.activeId = 's1'
     render(ConvPane)

@@ -98,6 +98,20 @@ pub fn window_label(project_id: &str) -> String {
     format!("{PROJECT_PREFIX}{project_id}")
 }
 
+/// Nome di un evento di un progetto (`conv:event`, `fs:changed`, `pty:data`…): l'id del progetto fa parte del
+/// nome. Un ascoltatore globale (`listen` senza finestra) di un'altra finestra riceve ogni evento emesso con
+/// `emit_to`; con l'id nel nome deve almeno conoscere l'UUID del progetto, che le altre finestre non vedono.
+/// Lo stesso nome lo costruisce l'interfaccia (`src/lib/events.ts`) dal proprio id di progetto.
+pub fn project_event(name: &str, project_id: &str) -> String {
+    format!("{name}:{project_id}")
+}
+
+/// Emette un evento di progetto alla sola finestra del progetto (vedi `project_event`).
+pub fn emit_to_project<S: serde::Serialize + Clone>(app: &AppHandle, project_id: &str, name: &str, payload: S) {
+    use tauri::Emitter;
+    let _ = app.emit_to(window_label(project_id).as_str(), project_event(name, project_id).as_str(), payload);
+}
+
 /// Il titolo nativo resta impostato (Mission Control, menu Finestra, Dock) ma non va disegnato
 /// nella barra: lo disegna già `Titlebar.svelte`.
 fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<WebviewWindow> {
@@ -413,6 +427,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&dir.path().join("t.db")).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn project_events_carry_the_project_id_in_the_name() {
+        let id = "8f0e2c1a-1111-4111-8111-111111111111";
+        for name in ["conv:event", "conv:upsert", "conv:removed", "conv:focus", "fs:changed", "pty:data", "pty:exit"] {
+            assert_eq!(project_event(name, id), format!("{name}:{id}"));
+        }
+        // ogni emissione di progetto passa dall'unico helper: nessun `emit_to` con un nome fisso altrove
+        for (file, src) in [
+            ("fs_tree.rs", include_str!("fs_tree.rs")),
+            ("pty.rs", include_str!("pty.rs")),
+            ("lifecycle.rs", include_str!("lifecycle.rs")),
+            ("claude/sessions.rs", include_str!("claude/sessions.rs")),
+            ("claude/engine.rs", include_str!("claude/engine.rs")),
+        ] {
+            assert!(!src.contains(".emit_to("), "{file}: usare projects::emit_to_project");
+        }
     }
 
     #[test]

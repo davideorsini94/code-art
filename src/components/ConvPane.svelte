@@ -34,21 +34,20 @@
   let measuring = false
 
   onMount(() => {
-    void chat.start()
     const tick = setInterval(() => (now = Date.now()), 60_000)
     const on = () => (focused = true)
     const off = () => (focused = false)
     window.addEventListener('focus', on)
     window.addEventListener('blur', off)
     return () => {
-      chat.stop()
       clearInterval(tick)
       window.removeEventListener('focus', on)
       window.removeEventListener('blur', off)
     }
   })
 
-  // cambia la conversazione mostrata: riparte dal fondo e carica la storia. `chat.open` legge `chat.states`:
+  // cambia la conversazione mostrata (o il pannello viene rimontato): riparte dal fondo, carica la storia o rilegge
+  // le richieste aperte. `chat.refresh` legge `chat.states`:
   // va fuori dal tracciamento, altrimenti l'effetto ripartirebbe a ogni frame di streaming e ri-agganciherebbe il fondo.
   let lastId: string | null = null
   $effect(() => {
@@ -58,7 +57,7 @@
     lastId = cur
     stick = shouldStick(stick, { idChanged })
     if (idChanged) heights.clear()
-    untrack(() => void chat.open(cur))
+    untrack(() => void chat.refresh(cur))
   })
 
   // "vista": la conversazione è sullo schermo con la finestra attiva (anche quando cambia lo stato, es. torna `waiting`)

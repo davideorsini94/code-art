@@ -38,7 +38,8 @@ const PLAN_REJECT_MESSAGE: &str = "The user rejected the plan.";
 const EXIT_LABEL: &str = "Processo terminato";
 pub const INTERRUPTED_LABEL: &str = "Turno interrotto — Riprendi";
 
-/// Destinazione degli eventi (`conv:event`, `conv:upsert`); nei test un finto che li registra.
+/// Destinazione degli eventi (`conv:event`, `conv:upsert`, `conv:removed`); nei test un finto che li registra.
+/// I nomi qui sono quelli di base: l'id del progetto lo aggiunge `TauriSink` (`projects::project_event`).
 pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, project_id: &str, event: &str, payload: Value);
 }
@@ -655,6 +656,17 @@ impl Engine {
         }
     }
 
+    /// `conv:upsert` di una conversazione letta dal disco (watcher delle sessioni): passa dallo stesso sink del
+    /// motore (Dock e notifiche), ma non per le sessioni con un processo vivo, di cui lo stato lo emette il motore.
+    pub fn emit_synced(&self, c: &Conversation) {
+        if self.is_running(&c.session_id) {
+            return;
+        }
+        if let Ok(v) = serde_json::to_value(c) {
+            self.0.sink.emit(&c.project_id, "conv:upsert", v);
+        }
+    }
+
     fn emit_upsert(&self, session_id: &str) {
         if let Ok(Some(c)) = self.0.store.get_conversation(session_id) {
             self.emit_conversation(c);
@@ -1037,14 +1049,15 @@ fn collect_tail(stderr: Option<std::process::ChildStderr>, tail: &Mutex<Vec<u8>>
 
 // ---------- integrazione con Tauri ----------
 
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
-/// Emette verso la finestra del progetto; se è chiusa l'evento si perde (lo stato resta salvato).
+/// Emette verso la finestra del progetto, con l'id del progetto nel nome dell'evento
+/// (`projects::project_event`); se la finestra è chiusa l'evento si perde (lo stato resta salvato).
 pub struct TauriSink(pub AppHandle);
 
 impl EventSink for TauriSink {
     fn emit(&self, project_id: &str, event: &str, payload: Value) {
-        let _ = self.0.emit_to(crate::projects::window_label(project_id).as_str(), event, payload);
+        crate::projects::emit_to_project(&self.0, project_id, event, payload);
     }
 }
 
