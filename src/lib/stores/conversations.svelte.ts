@@ -11,7 +11,7 @@ class ConversationStore {
   showArchived = $state(false)
   error = $state<string | null>(null)
   /** Comandi slash e modello correnti per sessione, dall'ultimo `init` visto in questa esecuzione. */
-  inits = $state.raw<Record<string, { slashCommands: string[]; model: string }>>({})
+  inits = $state.raw<Record<string, { slashCommands: string[]; model: string; at: number }>>({})
 
   private projectId: string | null = null
   private unlisten: UnlistenFn | null = null
@@ -55,7 +55,7 @@ class ConversationStore {
 
   /** Da ogni evento `init` (i comandi e il modello possono cambiare). */
   setInit(sessionId: string, slashCommands: string[], model: string) {
-    this.inits = { ...this.inits, [sessionId]: { slashCommands, model } }
+    this.inits = { ...this.inits, [sessionId]: { slashCommands, model, at: Date.now() } }
   }
 
   upsert(c: Conversation) {

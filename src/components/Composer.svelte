@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** Istante dell'ultima scelta di modello riuscita, per sessione (sopravvive allo smontaggio del compositore). */
+  let modelSetAt = $state<Record<string, number>>({})
+</script>
+
 <script lang="ts">
   import { onDestroy, tick } from 'svelte'
   import { chat } from '../lib/stores/chat.svelte'
@@ -5,6 +10,7 @@
   import { projectStore } from '../lib/stores/project.svelte'
   import { convInterrupt, convSaveImage, convSend, convSetModel, convSetPermissionMode } from '../lib/ipc'
   import { BUILTIN_COMMANDS, completeSlash, slashMatches } from '../lib/conv/slash'
+  import { displayedModel } from '../lib/conv/model'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
   import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, PATH_DRAG_TYPE, imageExt, mentionFor } from '../lib/conv/paths'
   import type { Conversation } from '../lib/types'
@@ -19,13 +25,13 @@
   ]
   const ALIASES = ['opus', 'sonnet', 'haiku']
 
-  type Thumb = { url: string; bytes: Uint8Array; ext: string; name: string }
+  type Thumb = { url: string; bytes: Uint8Array; ext: string; name: string; path?: string }
 
   const sessionId = $derived(conv.sessionId)
   const working = $derived(conv.status === 'working')
   const init = $derived(conversations.inits[sessionId])
   const commands = $derived(init?.slashCommands?.length ? init.slashCommands : BUILTIN_COMMANDS)
-  const currentModel = $derived(init?.model ?? conv.model ?? '')
+  const currentModel = $derived(displayedModel({ convModel: conv.model, initModel: init?.model ?? null, lastSetAt: modelSetAt[sessionId] ?? null, initAt: init?.at ?? null }))
   const models = $derived([...new Set([...ALIASES, ...(currentModel ? [currentModel] : [])])])
   const modes = $derived(MODES.some(([m]) => m === conv.permissionMode) ? MODES : [...MODES, [conv.permissionMode, conv.permissionMode] as [string, string]])
   const pct = $derived(conv.contextUsedPct == null ? null : Math.max(0, Math.min(100, Math.round(conv.contextUsedPct))))
@@ -59,7 +65,11 @@
     area.style.height = `${Math.min(area.scrollHeight, 160)}px`
   })
 
-  onDestroy(() => thumbs.forEach((t) => URL.revokeObjectURL(t.url)))
+  let alive = true
+  onDestroy(() => {
+    alive = false
+    thumbs.forEach((t) => URL.revokeObjectURL(t.url))
+  })
 
   const syncCursor = () => {
     cursor = area?.selectionStart ?? text.length
@@ -89,14 +99,23 @@
     void setCursor(pre.length + lead.length + s.length + 1)
   }
 
+  /** Controlli di numero e dimensione sulle miniature attuali; ritorna il messaggio d'errore o null. */
+  function imageLimit(size: number): string | null {
+    if (thumbs.length >= MAX_IMAGES) return `al massimo ${MAX_IMAGES} immagini per messaggio`
+    if (size > MAX_IMAGE_BYTES) return 'immagine troppo grande (massimo 20 MB)'
+    if (thumbs.reduce((n, t) => n + t.bytes.length, 0) + size > MAX_TOTAL_BYTES) return 'immagini troppo grandi: al massimo 30 MB per messaggio'
+    return null
+  }
+
   async function addImage(file: File) {
     const ext = imageExt(file.type)
     if (!ext) return void (error = `formato non supportato: ${file.type || file.name}`)
-    if (thumbs.length >= MAX_IMAGES) return void (error = `al massimo ${MAX_IMAGES} immagini per messaggio`)
-    if (file.size > MAX_IMAGE_BYTES) return void (error = 'immagine troppo grande (massimo 20 MB)')
-    if (thumbs.reduce((n, t) => n + t.bytes.length, 0) + file.size > MAX_TOTAL_BYTES) return void (error = 'immagini troppo grandi: al massimo 30 MB per messaggio')
+    const early = imageLimit(file.size)
+    if (early) return void (error = early)
     const bytes = new Uint8Array(await file.arrayBuffer())
-    if (thumbs.length >= MAX_IMAGES) return
+    if (!alive) return
+    const late = imageLimit(bytes.length)
+    if (late) return void (error = late)
     error = null
     thumbs = [...thumbs, { url: URL.createObjectURL(new Blob([bytes], { type: file.type })), bytes, ext, name: file.name || `immagine.${ext}` }]
   }
@@ -136,15 +155,19 @@
     busy = true
     error = null
     const sent = text
+    const sentThumbs = [...thumbs]
     try {
-      const paths: string[] = []
-      for (const t of thumbs) paths.push(await convSaveImage(Array.from(t.bytes), t.ext))
+      for (const t of sentThumbs) t.path ??= await convSaveImage(t.bytes, t.ext)
+      const paths = sentThumbs.map((t) => t.path as string)
       await convSend(sessionId, sent, paths)
       chat.addUser(sessionId, sent, paths)
-      thumbs.forEach((t) => URL.revokeObjectURL(t.url))
-      thumbs = []
-      text = ''
-      clearDraft(sessionId)
+      sentThumbs.forEach((t) => URL.revokeObjectURL(t.url))
+      thumbs = thumbs.filter((t) => !sentThumbs.includes(t))
+      // quanto scritto nel frattempo non si cancella
+      if (text === sent) {
+        text = ''
+        clearDraft(sessionId)
+      }
     } catch (e) {
       error = String(e)
     } finally {
@@ -161,11 +184,25 @@
     }
   }
   const interrupt = () => run(() => convInterrupt(sessionId))
-  const setModel = (m: string) => run(() => convSetModel(sessionId, m))
-  const setMode = (m: string) => run(() => convSetPermissionMode(sessionId, m))
+  /** Se la scelta fallisce il `<select>` torna al valore reale, così non contraddice il chip. */
+  async function guarded(el: HTMLSelectElement, actual: string, op: () => Promise<void>) {
+    error = null
+    try {
+      await op()
+    } catch (e) {
+      error = String(e)
+      el.value = actual
+    }
+  }
+  const setModel = (el: HTMLSelectElement) =>
+    guarded(el, currentModel, async () => {
+      await convSetModel(sessionId, el.value)
+      modelSetAt = { ...modelSetAt, [sessionId]: Date.now() }
+    })
+  const setMode = (el: HTMLSelectElement) => guarded(el, conv.permissionMode, () => convSetPermissionMode(sessionId, el.value))
 
   function onkeydown(ev: KeyboardEvent) {
-    if (ev.isComposing) return
+    if (ev.isComposing || ev.keyCode === 229) return
     if (matches.length) {
       if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
         ev.preventDefault()
@@ -199,7 +236,7 @@
 <div class="composer" role="group" aria-label="Rispondi a Claude" {ondragover} {ondrop}>
   {#if thumbs.length}
     <ul class="thumbs" aria-label="Immagini allegate">
-      {#each thumbs as t (t.url)}
+      {#each thumbs as t (t)}
         <li>
           <img src={t.url} alt={t.name} />
           <button type="button" class="x" aria-label="Rimuovi {t.name}" onclick={() => removeThumb(t)}>×</button>
@@ -239,13 +276,13 @@
   <div class="bar">
     <label class="chip mode" class:bypass={conv.permissionMode === 'bypassPermissions'} title="Modalità permessi: {modeLabel}">
       <span class="sr">Modalità permessi</span>
-      <select value={conv.permissionMode} onchange={(e) => setMode(e.currentTarget.value)}>
+      <select value={conv.permissionMode} onchange={(e) => setMode(e.currentTarget)}>
         {#each modes as [m, label] (m)}<option value={m}>{label}</option>{/each}
       </select>
     </label>
     <label class="chip" title="Modello">
       <span class="sr">Modello</span>
-      <select value={currentModel} onchange={(e) => setModel(e.currentTarget.value)}>
+      <select value={currentModel} onchange={(e) => setModel(e.currentTarget)}>
         {#if !currentModel}<option value="" disabled>Modello</option>{/if}
         {#each models as m (m)}<option value={m}>{m}</option>{/each}
       </select>
@@ -272,13 +309,13 @@
 <style>
   .composer { display: flex; flex-direction: column; gap: 6px; }
   .box { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 9px 12px; border-radius: 14px; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--edge-soft); }
-  .box:focus-within { border-color: var(--accent, #8fa8ff); }
+  .box:focus-within { border-color: var(--accent); }
   textarea { flex: 1; min-width: 0; resize: none; background: none; border: 0; outline: 0; color: var(--txt); font: inherit; line-height: 1.4; max-height: 160px; }
   textarea::placeholder { color: var(--faint); }
   .hint { color: var(--faint); font-size: 11px; padding-bottom: 2px; }
   .pop { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); list-style: none; margin: 0; padding: 4px; border-radius: 12px; background: rgba(20, 22, 30, 0.97); border: 1px solid var(--edge-soft); z-index: 5; }
   .pop button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--txt); font: inherit; padding: 5px 9px; border-radius: 8px; cursor: pointer; }
-  .pop li.on button { background: var(--glass2, rgba(255, 255, 255, 0.1)); }
+  .pop li.on button { background: var(--glass2); }
   .thumbs { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
   .thumbs li { position: relative; }
   .thumbs img { display: block; height: 52px; max-width: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--edge-soft); }
@@ -288,17 +325,17 @@
   .chip { display: inline-flex; border: 1px solid var(--edge-soft); border-radius: 999px; background: rgba(0, 0, 0, 0.22); color: var(--dim); font-size: 11.5px; }
   .chip select { appearance: none; background: none; border: 0; outline: 0; color: inherit; font: inherit; padding: 3px 10px; cursor: pointer; max-width: 180px; }
   .chip select option { color: #111; }
-  .chip:focus-within { border-color: var(--accent, #8fa8ff); }
+  .chip:focus-within { border-color: var(--accent); }
   .chip.bypass { color: var(--wait); border-color: var(--wait); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .ring { display: inline-flex; align-items: center; gap: 4px; color: var(--faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
   .ring .bg { fill: none; stroke: var(--edge-soft); stroke-width: 3; }
   .ring .fg { fill: none; stroke: var(--work); stroke-width: 3; stroke-linecap: round; }
   .ring .fg.hot { stroke: var(--wait); }
-  .btn { padding: 5px 14px; border-radius: 10px; border: 1px solid var(--edge-soft); background: rgba(255, 255, 255, 0.06); color: var(--txt); font: inherit; font-size: 12px; cursor: pointer; }
+  .btn { padding: 5px 14px; border-radius: 10px; border: 1px solid var(--edge-soft); background: var(--glass); color: var(--txt); font: inherit; font-size: 12px; cursor: pointer; }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn.go { background: var(--accent, #8fa8ff); color: #10131c; border-color: transparent; font-weight: 600; }
+  .btn.go { background: var(--accent); color: #10131c; border-color: transparent; font-weight: 600; }
   .btn.stop { border-color: var(--wait); color: var(--wait); }
   .err { color: #ff8f8f; font-size: 11.5px; margin: 0; }
-  @media (prefers-reduced-motion: no-preference) { .chip, .box { transition: border-color 0.15s; } }
+  @media (prefers-reduced-motion: no-preference) { .chip, .box { transition: border-color var(--dur); } }
 </style>

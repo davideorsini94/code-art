@@ -132,7 +132,6 @@
       <div class="chatH">
         <span class="dot {dotClass}"></span>
         <span class="title">{conv.title}</span>
-        {#if cs?.contextUsedPct != null}<span class="ctx" title="Contesto usato">{Math.round(cs.contextUsedPct)}%</span>{/if}
       </div>
       {#if conv.prevTitle}
         <div class="was">
@@ -171,7 +170,6 @@
   header { flex: none; }
   .chatH { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; display: flex; align-items: center; gap: 9px; }
   .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ctx { margin-left: auto; font-size: 10.5px; font-weight: 400; color: var(--faint); }
   .was { color: var(--faint); font-size: 11px; margin: 2px 0 0 17px; }
   .list { flex: 1; min-height: 0; overflow-y: auto; margin: 10px -4px 0; padding: 0 4px; }
   .r { padding-bottom: 9px; }

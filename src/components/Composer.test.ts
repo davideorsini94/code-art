@@ -35,6 +35,7 @@ beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
   conversations.inits = {}
+  vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() }))
 })
 afterEach(cleanup)
 
@@ -82,12 +83,12 @@ describe('Composer', () => {
   })
 
   it('bypassPermissions chip is amber; modes and models call the right commands', async () => {
-    const { container } = render(Composer, { conv: { ...base, permissionMode: 'bypassPermissions' } })
+    const { container } = render(Composer, { conv: { ...base, sessionId: 'sm', permissionMode: 'bypassPermissions' } })
     expect(container.querySelector('.chip.mode')?.classList.contains('bypass')).toBe(true)
     await fireEvent.change(screen.getByLabelText('Modalità permessi'), { target: { value: 'plan' } })
-    expect(ipc.convSetPermissionMode).toHaveBeenCalledWith('s1', 'plan')
+    expect(ipc.convSetPermissionMode).toHaveBeenCalledWith('sm', 'plan')
     await fireEvent.change(screen.getByLabelText('Modello'), { target: { value: 'opus' } })
-    expect(ipc.convSetModel).toHaveBeenCalledWith('s1', 'opus')
+    expect(ipc.convSetModel).toHaveBeenCalledWith('sm', 'opus')
   })
 
   it('offers built-in commands, then the ones from init; selecting inserts the command', async () => {
@@ -116,5 +117,88 @@ describe('Composer', () => {
     localStorage.setItem('codeart.draft.s1', 'bozza')
     render(Composer, { conv: base })
     expect((screen.getByLabelText('Messaggio') as HTMLTextAreaElement).value).toBe('bozza')
+  })
+
+  it('after a successful model choice the picker shows conv.model, not the older init model', async () => {
+    conversations.setInit('s5', [], 'claude-opus-4')
+    const { rerender } = render(Composer, { conv: { ...base, sessionId: 's5', model: 'sonnet' } })
+    const sel = screen.getByLabelText('Modello') as HTMLSelectElement
+    expect(sel.value).toBe('claude-opus-4')
+    await new Promise((r) => setTimeout(r, 2))
+    await fireEvent.change(sel, { target: { value: 'haiku' } })
+    await waitFor(() => expect(ipc.convSetModel).toHaveBeenCalledWith('s5', 'haiku'))
+    await rerender({ conv: { ...base, sessionId: 's5', model: 'haiku' } })
+    await waitFor(() => expect(sel.value).toBe('haiku'))
+  })
+
+  it('a failed model/mode change puts the select back to the real value', async () => {
+    vi.mocked(ipc.convSetPermissionMode).mockRejectedValueOnce('errore')
+    render(Composer, { conv: { ...base, sessionId: 's6' } })
+    const sel = screen.getByLabelText('Modalità permessi') as HTMLSelectElement
+    await fireEvent.change(sel, { target: { value: 'plan' } })
+    await screen.findByText('errore')
+    expect(sel.value).toBe('default')
+  })
+
+  const png = (n = 8, name = 'a.png') => new File([new Uint8Array(n)], name, { type: 'image/png' })
+  const paste = (ta: HTMLElement, files: File[]) => fireEvent.paste(ta, { clipboardData: { files } })
+
+  it('pasting an image shows a removable thumbnail; sending saves it once and passes the path', async () => {
+    render(Composer, { conv: base })
+    const ta = screen.getByLabelText('Messaggio')
+    await paste(ta, [png()])
+    await screen.findByAltText('a.png')
+    await fireEvent.input(ta, { target: { value: 'guarda' } })
+    vi.mocked(ipc.convSend).mockRejectedValueOnce('boom')
+    await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true })
+    await screen.findByText('boom')
+    await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(ipc.convSend).toHaveBeenLastCalledWith('s1', 'guarda', ['/tmp/CodeArt/images/x.png']))
+    expect(ipc.convSaveImage).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.queryByAltText('a.png')).toBeNull())
+  })
+
+  it('removing a thumbnail drops it', async () => {
+    render(Composer, { conv: base })
+    await paste(screen.getByLabelText('Messaggio'), [png()])
+    await fireEvent.click(await screen.findByLabelText('Rimuovi a.png'))
+    expect(screen.queryByAltText('a.png')).toBeNull()
+  })
+
+  it('accepts at most 10 images per message', async () => {
+    render(Composer, { conv: base })
+    const ta = screen.getByLabelText('Messaggio')
+    for (let i = 0; i < 11; i++) await paste(ta, [png(8, `i${i}.png`)])
+    await screen.findByText('al massimo 10 immagini per messaggio')
+    expect(screen.getAllByRole('img').filter((e) => e.tagName === 'IMG')).toHaveLength(10)
+  })
+
+  it('refuses images beyond 30 MB in total', async () => {
+    render(Composer, { conv: base })
+    const ta = screen.getByLabelText('Messaggio')
+    for (const n of [1, 2]) await paste(ta, [png(14 * 1024 * 1024, `g${n}.png`)])
+    await paste(ta, [png(14 * 1024 * 1024, 'g3.png')])
+    await screen.findByText('immagini troppo grandi: al massimo 30 MB per messaggio')
+    expect(screen.queryByAltText('g3.png')).toBeNull()
+  })
+
+  it("does not wipe text typed while the send is in flight", async () => {
+    let done!: () => void
+    vi.mocked(ipc.convSend).mockImplementationOnce(() => new Promise<void>((r) => (done = r)))
+    render(Composer, { conv: base })
+    const ta = screen.getByLabelText('Messaggio') as HTMLTextAreaElement
+    await fireEvent.input(ta, { target: { value: 'uno' } })
+    await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true })
+    await fireEvent.input(ta, { target: { value: 'uno due' } })
+    done()
+    await waitFor(() => expect(ipc.convSend).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 5))
+    expect(ta.value).toBe('uno due')
+  })
+
+  it('archiving a conversation removes its draft', async () => {
+    localStorage.setItem('codeart.draft.sz', 'x')
+    await conversations.archive('sz', true)
+    expect(localStorage.getItem('codeart.draft.sz')).toBeNull()
   })
 })

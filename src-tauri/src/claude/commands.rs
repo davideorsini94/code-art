@@ -146,8 +146,17 @@ fn save_image_in(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result<Strin
 }
 
 /// Salva un'immagine incollata/trascinata nella cartella temporanea dell'app; ritorna il percorso da passare a `conv_send`.
+/// I byte arrivano come corpo binario della richiesta (niente array JSON); l'estensione nell'header `ext`.
 #[tauri::command]
-pub async fn conv_save_image(bytes: Vec<u8>, ext: String) -> Result<String> {
+pub async fn conv_save_image(request: tauri::ipc::Request<'_>) -> Result<String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("corpo della richiesta non binario".into());
+    };
+    if bytes.len() as u64 > super::engine::IMAGE_MAX_BYTES {
+        return Err("immagine troppo grande".into());
+    }
+    let bytes = bytes.clone();
+    let ext = request.headers().get("ext").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     tauri::async_runtime::spawn_blocking(move || save_image_in(&super::engine::image_dir(), &bytes, &ext)).await.map_err(|e| e.to_string())?
 }
 
