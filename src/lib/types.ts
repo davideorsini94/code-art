@@ -21,5 +21,5 @@ export type Conversation = {
   contextUsedPct: number | null
   maybeOpenElsewhere: boolean
 }
-export type FsError = { code: 'conflict' | 'too_large' | 'not_text' | 'io'; message: string }
+export type FsError = { code: 'conflict' | 'forbidden' | 'too_large' | 'not_text' | 'io'; message: string }
 export type FsChanged = { paths: string[] }

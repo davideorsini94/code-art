@@ -1,5 +1,5 @@
 //! Albero file: lettura/scrittura sicura e watcher per progetto.
-use crate::store::Project;
+use crate::store::{Project, Store};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -220,36 +220,92 @@ pub fn unwatch_project(app: &AppHandle, project_id: &str) {
     }
 }
 
+// ---------- confinamento ----------
+
+/// Risolve `path` (anche se non esiste ancora) e lo accetta solo se sta dentro una delle `roots`.
+/// Canonicalizza il più vicino antenato esistente (risolve `..` e symlink) e rimette in coda il resto,
+/// che non può contenere `..`. Restituisce il percorso risolto, da usare per l'operazione.
+pub fn ensure_inside(roots: &[PathBuf], path: &Path) -> Result<PathBuf, FsError> {
+    let forbidden = || FsError::new("forbidden", "Percorso fuori dal progetto");
+    if !path.is_absolute() {
+        return Err(forbidden());
+    }
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut base = path;
+    let canon = loop {
+        match base.canonicalize() {
+            Ok(c) => break c,
+            Err(_) => {
+                let (Some(parent), Some(name)) = (base.parent(), base.file_name()) else {
+                    return Err(forbidden()); // include `..` finale o radice inesistente
+                };
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+        }
+    };
+    let mut resolved = canon;
+    for part in rest.iter().rev() {
+        resolved.push(part);
+    }
+    let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|r| resolved.starts_with(&r));
+    if inside { Ok(resolved) } else { Err(forbidden()) }
+}
+
+/// Cartelle del progetto della finestra chiamante (dall'etichetta, mai da un argomento).
+fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<PathBuf>, FsError> {
+    let id = window
+        .label()
+        .strip_prefix(crate::projects::PROJECT_PREFIX)
+        .ok_or_else(|| FsError::new("forbidden", "Percorso fuori dal progetto"))?;
+    let project = store
+        .get_project(id)
+        .map_err(|e| FsError::new("io", e))?
+        .ok_or_else(|| FsError::new("io", "progetto inesistente"))?;
+    Ok(project.folders.iter().map(PathBuf::from).collect())
+}
+
+fn checked(window: &WebviewWindow, store: &Store, path: &str) -> Result<PathBuf, FsError> {
+    ensure_inside(&roots_of(window, store)?, Path::new(path))
+}
+
 // ---------- comandi ----------
 
 #[tauri::command]
-pub async fn fs_list(path: String) -> Result<Vec<DirEntry>, FsError> {
-    list(Path::new(&path))
+pub async fn fs_list(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<Vec<DirEntry>, FsError> {
+    list(&checked(&window, &store, &path)?)
 }
 
 #[tauri::command]
-pub async fn fs_create(path: String, is_dir: bool) -> Result<(), FsError> {
-    create(Path::new(&path), is_dir)
+pub async fn fs_create(window: WebviewWindow, store: State<'_, Store>, path: String, is_dir: bool) -> Result<(), FsError> {
+    create(&checked(&window, &store, &path)?, is_dir)
 }
 
 #[tauri::command]
-pub async fn fs_rename(from: String, to: String) -> Result<(), FsError> {
-    rename(Path::new(&from), Path::new(&to))
+pub async fn fs_rename(window: WebviewWindow, store: State<'_, Store>, from: String, to: String) -> Result<(), FsError> {
+    let (from, to) = (checked(&window, &store, &from)?, checked(&window, &store, &to)?);
+    rename(&from, &to)
 }
 
 #[tauri::command]
-pub async fn fs_trash(path: String) -> Result<(), FsError> {
-    trash_path(Path::new(&path))
+pub async fn fs_trash(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<(), FsError> {
+    trash_path(&checked(&window, &store, &path)?)
 }
 
 #[tauri::command]
-pub async fn fs_read(path: String) -> Result<FileContent, FsError> {
-    read(Path::new(&path))
+pub async fn fs_read(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<FileContent, FsError> {
+    read(&checked(&window, &store, &path)?)
 }
 
 #[tauri::command]
-pub async fn fs_write(path: String, text: String, expected_mtime_ms: Option<i64>) -> Result<i64, FsError> {
-    write(Path::new(&path), &text, expected_mtime_ms)
+pub async fn fs_write(
+    window: WebviewWindow,
+    store: State<'_, Store>,
+    path: String,
+    text: String,
+    expected_mtime_ms: Option<i64>,
+) -> Result<i64, FsError> {
+    write(&checked(&window, &store, &path)?, &text, expected_mtime_ms)
 }
 
 #[cfg(test)]
@@ -317,6 +373,56 @@ mod tests {
         assert!(!f.exists());
         write(&f, "x", None).unwrap(); // nuovo file senza mtime atteso: ok
         assert!(f.exists());
+    }
+
+    fn roots(d: &Path) -> Vec<PathBuf> {
+        let r = d.join("proj");
+        std::fs::create_dir_all(&r).unwrap();
+        vec![r]
+    }
+
+    #[test]
+    fn ensure_inside_accepts_existing_and_new_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        std::fs::write(r[0].join("a.txt"), "").unwrap();
+        assert!(ensure_inside(&r, &r[0].join("a.txt")).is_ok());
+        assert!(ensure_inside(&r, &r[0]).is_ok());
+        assert!(ensure_inside(&r, &r[0].join("nuova/cartella/file.txt")).is_ok());
+    }
+
+    #[test]
+    fn ensure_inside_rejects_outside_and_dotdot() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        std::fs::write(d.path().join("outside.txt"), "").unwrap();
+        assert_eq!(ensure_inside(&r, &d.path().join("outside.txt")).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, &r[0].join("../outside.txt")).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, &r[0].join("nuova/../../outside.txt")).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, Path::new("relativo/file")).unwrap_err().code, "forbidden");
+    }
+
+    #[test]
+    fn ensure_inside_rejects_symlink_leading_outside() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        let out = d.path().join("outside");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("s.txt"), "").unwrap();
+        std::os::unix::fs::symlink(&out, r[0].join("link")).unwrap();
+        assert_eq!(ensure_inside(&r, &r[0].join("link")).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, &r[0].join("link/s.txt")).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, &r[0].join("link/nuovo.txt")).unwrap_err().code, "forbidden");
+    }
+
+    #[test]
+    fn ensure_inside_rejects_sibling_sharing_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        let sib = d.path().join("proj-old");
+        std::fs::create_dir(&sib).unwrap();
+        assert_eq!(ensure_inside(&r, &sib).unwrap_err().code, "forbidden");
+        assert_eq!(ensure_inside(&r, &sib.join("x.txt")).unwrap_err().code, "forbidden");
     }
 
     #[test]

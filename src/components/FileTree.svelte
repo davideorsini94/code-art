@@ -3,7 +3,7 @@
   import { listen } from '@tauri-apps/api/event'
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
-  import { fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
+  import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
   import type { DirEntry, FsChanged } from '../lib/types'
 
   let children = $state<Record<string, DirEntry[]>>({})
@@ -58,7 +58,8 @@
     try {
       await op()
     } catch (e) {
-      error = (e as { message?: string })?.message ?? String(e)
+      const err = asFsError(e)
+      error = err.code === 'forbidden' ? 'Percorso fuori dal progetto' : err.message
     }
   }
 

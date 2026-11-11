@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager, State, TitleBarStyle, WebviewUrl, WebviewWindow,
 use tauri_plugin_dialog::DialogExt;
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
-const PROJECT_PREFIX: &str = "proj-";
+pub const PROJECT_PREFIX: &str = "proj-";
 const WELCOME_LABEL: &str = "welcome";
 
 // ---------- logica pura ----------

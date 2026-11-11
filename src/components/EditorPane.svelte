@@ -177,6 +177,8 @@
       <p class="empty">Apri un file dall'albero</p>
     {:else if active?.error === 'too_large' || active?.error === 'not_text'}
       <p class="empty">File non modificabile qui</p>
+    {:else if active?.error === 'forbidden'}
+      <p class="empty">Percorso fuori dal progetto</p>
     {:else if active?.error}
       <p class="empty">Impossibile aprire il file</p>
     {/if}

@@ -33,7 +33,7 @@ export type Tab = {
   rev: number // incrementa a ogni ricarica: il pannello rimette baseText nel modello
   dirty: boolean
   mtimeMs: number | null
-  error: 'too_large' | 'not_text' | 'io' | null
+  error: 'too_large' | 'not_text' | 'forbidden' | 'io' | null
   prompt: boolean // "Cambiato su disco" in attesa di scelta
   diff: { before: string; after: string } | null
 }
@@ -89,7 +89,7 @@ class EditorStore {
       tab.mtimeMs = c.mtimeMs
     } catch (e) {
       const err = asFsError(e)
-      tab.error = err.code === 'too_large' || err.code === 'not_text' ? err.code : 'io'
+      tab.error = err.code === 'too_large' || err.code === 'not_text' || err.code === 'forbidden' ? err.code : 'io'
     }
     this.tabs = [...this.tabs.filter((t) => t.path !== path), tab]
     this.active = path
