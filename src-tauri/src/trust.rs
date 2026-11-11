@@ -18,6 +18,12 @@ const TITLE: &str = "Cartella non fidata";
 const BTN_TRUST: &str = "Mi fido";
 const BTN_READ_ONLY: &str = "Apri in sola consultazione";
 
+/// Solo la scelta esplicita "Mi fido" vale come fiducia: pulsante predefinito (Invio), Esc, errore o etichetta
+/// sconosciuta non la concedono.
+fn is_trust_answer(r: &MessageDialogResult) -> bool {
+    matches!(r, MessageDialogResult::Custom(l) if l == BTN_TRUST)
+}
+
 pub fn is_trusted(store: &Store, folder: &str) -> bool {
     store.folder_trusted(&crate::projects::normalize(folder)).unwrap_or(false)
 }
@@ -102,11 +108,11 @@ pub async fn trust_accept(app: AppHandle, window: WebviewWindow, from_click: Opt
         .message(message)
         .title(TITLE)
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(BTN_TRUST.into(), BTN_READ_ONLY.into()))
+        .buttons(MessageDialogButtons::OkCancelCustom(BTN_READ_ONLY.into(), BTN_TRUST.into()))
         .parent(&window);
     let answer = tauri::async_runtime::spawn_blocking(move || dialog.blocking_show_with_result()).await;
-    let trusted = matches!(&answer, Ok(MessageDialogResult::Ok | MessageDialogResult::Yes))
-        || matches!(&answer, Ok(MessageDialogResult::Custom(l)) if l == BTN_TRUST);
+    // "Apri in sola consultazione" è il primo pulsante, quindi quello predefinito (Invio) di NSAlert.
+    let trusted = matches!(&answer, Ok(r) if is_trust_answer(r));
     {
         let prompts = app.state::<TrustPrompts>();
         let mut map = prompts.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -132,6 +138,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&dir.path().join("t.db")).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn only_the_explicit_trust_button_grants_trust() {
+        use MessageDialogResult::*;
+        for (r, want) in [
+            (Custom(BTN_TRUST.into()), true),
+            (Custom(BTN_READ_ONLY.into()), false),
+            (Ok, false),
+            (Yes, false),
+            (No, false),
+            (Cancel, false),
+            (Custom("altro".into()), false),
+            (Custom(String::new()), false),
+        ] {
+            assert_eq!(is_trust_answer(&r), want, "{r:?}");
+        }
     }
 
     #[test]

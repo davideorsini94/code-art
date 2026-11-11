@@ -53,7 +53,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   dalla WebView; i vecchi `project_open_folder`, `project_add_folder`, `project_relocate` sono stati rimossi.
 - **Cartelle fidate** (`src-tauri/src/trust.rs`, tabella `trusted_folders`): fidata = scelta col selettore
   nativo oppure confermata con la domanda nativa "Ti fidi di questa cartella? Claude potrà eseguire comandi
-  al suo interno senza chiedere" (Mi fido / Apri in sola consultazione), mostrata dal core come foglio della
+  al suo interno senza chiedere" (Mi fido / Apri in sola consultazione; il pulsante predefinito, quello di Invio, è "Apri in sola consultazione" e solo un clic esplicito su "Mi fido" concede la fiducia), mostrata dal core come foglio della
   finestra (`trust_accept`): una pagina compromessa non può dichiarare fidata una cartella da sola. Le cartelle
   già nello store prima di questa funzione non sono fidate (domanda all'apertura). Finché il progetto ha una
   cartella non fidata `conv_start`/`conv_resume`/`conv_send` (e ogni avvio di `claude` in

@@ -72,6 +72,28 @@ pub fn plan_window_close(convs: &[(String, ConvStatus, bool, bool)]) -> ClosePla
     ClosePlan { stop, working, ask }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseChoice {
+    Background,
+    Interrupt,
+    Cancel,
+}
+
+/// Risposta alla domanda di chiusura finestra. Solo le etichette note valgono; tutto il resto (Esc, errore,
+/// etichetta sconosciuta) è "Annulla". Il primo pulsante, predefinito (Invio), è quello non distruttivo.
+fn close_choice(r: &MessageDialogResult) -> CloseChoice {
+    match r {
+        MessageDialogResult::Custom(l) if l == BTN_BACKGROUND => CloseChoice::Background,
+        MessageDialogResult::Custom(l) if l == BTN_INTERRUPT => CloseChoice::Interrupt,
+        _ => CloseChoice::Cancel,
+    }
+}
+
+/// Uscita confermata solo dal pulsante esplicito "Esci".
+fn is_quit_answer(r: &MessageDialogResult) -> bool {
+    matches!(r, MessageDialogResult::Custom(l) if l == BTN_QUIT)
+}
+
 fn status_of(s: &str) -> ConvStatus {
     match s {
         "working" => ConvStatus::Working,
@@ -425,18 +447,13 @@ pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
         .buttons(MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()))
         .show_with_result(move |r| {
             lock(&handle.state::<Arc<Lifecycle>>().closing).remove(&pid);
-            let label = match &r {
-                MessageDialogResult::Custom(l) => l.as_str(),
-                MessageDialogResult::Yes => BTN_BACKGROUND,
-                MessageDialogResult::No => BTN_INTERRUPT,
-                _ => BTN_CANCEL,
-            };
-            if label != BTN_BACKGROUND && label != BTN_INTERRUPT {
+            let choice = close_choice(&r);
+            if choice == CloseChoice::Cancel {
                 return;
             }
             // stato di adesso, non quello di quando la domanda è comparsa
             let plan = project_plan(&handle, &pid);
-            let ids = if label == BTN_BACKGROUND { plan.stop } else { [plan.stop, plan.working].concat() };
+            let ids = if choice == CloseChoice::Background { plan.stop } else { [plan.stop, plan.working].concat() };
             let _ = win.destroy();
             stop_in_background(&handle, ids);
         });
@@ -476,11 +493,9 @@ pub fn request_quit(app: &AppHandle) {
         .message(QUIT_MESSAGE)
         .title("Uscire da Code Art?")
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(BTN_QUIT.into(), BTN_CANCEL.into()))
+        .buttons(MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_QUIT.into()))
         .show_with_result(move |r| {
-            if matches!(&r, MessageDialogResult::Ok | MessageDialogResult::Yes)
-                || matches!(&r, MessageDialogResult::Custom(l) if l == BTN_QUIT)
-            {
+            if is_quit_answer(&r) {
                 quit_now(&handle);
             }
         });
@@ -490,6 +505,26 @@ pub fn request_quit(app: &AppHandle) {
 mod tests {
     use super::*;
     use ConvStatus::*;
+
+    #[test]
+    fn close_dialog_answers_map_only_known_labels() {
+        use MessageDialogResult as R;
+        let c = |s: &str| R::Custom(s.into());
+        assert_eq!(close_choice(&c(BTN_BACKGROUND)), CloseChoice::Background);
+        assert_eq!(close_choice(&c(BTN_INTERRUPT)), CloseChoice::Interrupt);
+        for r in [c(BTN_CANCEL), c("altro"), R::Ok, R::Yes, R::No, R::Cancel] {
+            assert_eq!(close_choice(&r), CloseChoice::Cancel, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn quit_needs_the_explicit_quit_button() {
+        use MessageDialogResult as R;
+        assert!(is_quit_answer(&R::Custom(BTN_QUIT.into())));
+        for r in [R::Custom(BTN_CANCEL.into()), R::Custom("altro".into()), R::Ok, R::Yes, R::No, R::Cancel] {
+            assert!(!is_quit_answer(&r), "{r:?}");
+        }
+    }
 
     #[test]
     fn decide_close_asks_only_with_running_turns() {
