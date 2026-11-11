@@ -321,6 +321,7 @@ impl Engine {
         Ok(session_id)
     }
 
+    #[cfg(test)]
     pub fn resume(&self, project_id: &str, session_id: &str) -> Result<()> {
         crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         self.owned_conv(project_id, session_id)?;
@@ -538,7 +539,8 @@ impl Engine {
         write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": request}))
     }
 
-    /// `conv_stop`: come `stop`, con il controllo del progetto.
+    /// Come `stop`, con il controllo del progetto (usato solo dai test).
+    #[cfg(test)]
     pub fn stop_owned(&self, project_id: &str, session_id: &str) -> Result<()> {
         self.owned_conv(project_id, session_id)?;
         self.stop(session_id);

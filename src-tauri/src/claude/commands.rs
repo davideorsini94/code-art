@@ -37,11 +37,6 @@ pub async fn conv_start(app: AppHandle, window: WebviewWindow, project_id: Strin
 }
 
 #[tauri::command]
-pub async fn conv_resume(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<()> {
-    with_engine(app, window, move |e, pid| e.resume(pid, &session_id)).await
-}
-
-#[tauri::command]
 pub async fn conv_send(app: AppHandle, window: WebviewWindow, session_id: String, text: String, image_paths: Vec<String>) -> Result<()> {
     with_engine(app, window, move |e, pid| e.send(pid, &session_id, &text, &image_paths)).await
 }
@@ -76,26 +71,10 @@ pub async fn conv_archive(app: AppHandle, window: WebviewWindow, session_id: Str
     with_engine(app, window, move |e, pid| e.archive(pid, &session_id, archived)).await
 }
 
-#[tauri::command]
-pub async fn conv_running(app: AppHandle, window: WebviewWindow, project_id: String) -> Result<Vec<String>> {
-    with_engine(app, window, move |e, pid| {
-        if pid != project_id {
-            return Err("progetto non della finestra chiamante".into());
-        }
-        Ok(e.running(pid))
-    })
-    .await
-}
-
 /// Richieste di permesso/domanda/piano ancora aperte (eventi `Ask`, dalla più vecchia).
 #[tauri::command]
 pub async fn conv_pending(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<Vec<ClaudeEvent>> {
     with_engine(app, window, move |e, pid| e.pending_asks(pid, &session_id)).await
-}
-
-#[tauri::command]
-pub async fn conv_stop(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<()> {
-    with_engine(app, window, move |e, pid| e.stop_owned(pid, &session_id)).await
 }
 
 /// Elimina la conversazione: la sposta nel Cestino (insieme alla cartella dei sotto-agenti) dopo una conferma

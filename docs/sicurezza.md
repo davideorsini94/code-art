@@ -63,7 +63,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   al suo interno senza chiedere" (Mi fido / Apri in sola consultazione; il pulsante predefinito, quello di Invio, è "Apri in sola consultazione" e solo un clic esplicito su "Mi fido" concede la fiducia), mostrata dal core come foglio della
   finestra (`trust_accept`): una pagina compromessa non può dichiarare fidata una cartella da sola. Le cartelle
   già nello store prima di questa funzione non sono fidate (domanda all'apertura). Finché il progetto ha una
-  cartella non fidata `conv_start`/`conv_resume`/`conv_send` (e ogni avvio di `claude` in
+  cartella non fidata `conv_start`/`conv_send` (e ogni avvio di `claude` in
   `Engine::ensure_running`), `pty_spawn` e la titolazione automatica sono rifiutati con `untrusted_folder`;
   albero, lettura, ricerca ed editor (in sola lettura) funzionano. La finestra mostra "Cartella non fidata — sola
   lettura; Claude e terminale disattivati · Mi fido". Il dialogo ha un titolo fisso ("Cartella non fidata", non il
@@ -141,7 +141,6 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_search` | `query` | 2–200 caratteri; tempo massimo 3 s | finestra | F (sola lettura) |
 | `claude_check` | — | — | globale | P (`claude --version`) |
 | `conv_start` | `projectId`, `opts` | coincide con la finestra; `model` (`valid_model`: niente spazi né `-` iniziale), `permissionMode` in whitelist; progetto fidato | finestra | P (`claude`), R |
-| `conv_resume` | `sessionId` | UUID; del progetto; progetto fidato | finestra | P, R |
 | `conv_send` | `sessionId`, `text`, `imagePaths` | UUID; del progetto; fidato; ≤ 10 immagini, ≤ 20 MB l'una e 30 MB in tutto, solo png/jpg/gif/webp canonicalizzate dentro la cartella immagini dell'app o del progetto | finestra | P, F (lettura immagini) |
 | `conv_answer` | `sessionId`, `requestId`, `choice` | del progetto; richiesta ancora aperta; scelta ammessa per il tipo (domande: testo per una domanda, oppure oggetto JSON con una risposta per ogni domanda e nessuna domanda sconosciuta) | finestra | P (stdin di `claude`) |
 | `conv_interrupt` | `sessionId` | del progetto | finestra | P |
@@ -149,8 +148,6 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_set_permission_mode` | `sessionId`, `mode` | del progetto; whitelist | finestra | P |
 | `conv_mark_viewed` | `sessionId` | del progetto | finestra | — |
 | `conv_archive` | `sessionId`, `archived` | del progetto | finestra | — |
-| `conv_running` | `projectId` | coincide con la finestra | finestra | — |
-| `conv_stop` | `sessionId` | del progetto | finestra | P (termina il gruppo di processi) |
 | `conv_save_image` | corpo binario, header `ext` | finestra di progetto; estensione in whitelist, byte iniziali coerenti, ≤ 20 MB; nome casuale, cartella 0700, file 0600 | finestra | F (cartella temporanea dell'app) |
 | `conv_delete` | `sessionId` | UUID; del progetto; fidato; file trovato solo dalle cartelle di sessione del progetto, no link simbolici né fuori radice; conferma nativa del core | finestra | F (sposta nel Cestino il file di sessione in `~/.claude`: unica scrittura lì), P (ferma il processo) |
 | `conv_pending` | `sessionId` | del progetto | finestra | — |
