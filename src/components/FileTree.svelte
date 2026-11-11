@@ -5,6 +5,8 @@
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
+  import FileIcon from './FileIcon.svelte'
+  import { iconFor } from '../lib/fileicons'
   import type { DirEntry, FsChanged } from '../lib/types'
 
   let children = $state<Record<string, DirEntry[]>>({})
@@ -124,19 +126,6 @@
       expanded[target.path] = true
     })
   }
-
-  const ICONS: Record<string, [string, string]> = {
-    ts: ['TS', '#6aa3ff'], tsx: ['TX', '#6aa3ff'], js: ['JS', '#f2d36b'], jsx: ['JX', '#f2d36b'],
-    svelte: ['SV', '#ff8a5c'], rs: ['RS', '#e8a07a'], json: ['{}', '#d9c26b'], md: ['MD', '#9aa3b8'],
-    css: ['CS', '#b48cff'], html: ['<>', '#ff8a8a'], py: ['PY', '#6bd0a0'], toml: ['TM', '#9aa3b8'],
-    yml: ['YM', '#9aa3b8'], yaml: ['YM', '#9aa3b8'], sh: ['SH', '#6bd0a0'], lock: ['LK', '#667089'],
-    png: ['IM', '#5ee0c1'], jpg: ['IM', '#5ee0c1'], svg: ['IM', '#5ee0c1'], gif: ['IM', '#5ee0c1'],
-  }
-  function icon(e: DirEntry): [string, string] {
-    if (e.isDir) return ['▬', 'var(--accent)']
-    const ext = e.name.includes('.') ? e.name.split('.').pop()!.toLowerCase() : ''
-    return ICONS[ext] ?? ['··', 'var(--faint)']
-  }
 </script>
 
 {#snippet inputRow(depth: number)}
@@ -158,7 +147,8 @@
   {#if editing?.kind === 'rename' && editing.path === e.path}
     {@render inputRow(depth)}
   {:else}
-    {@const [glyph, color] = icon(e)}
+    {@const spec = iconFor(e.name, e.isDir, !!expanded[e.path])}
+    {@const isRoot = depth === 0 && folders.includes(e.path)}
     <div
       class="row"
       class:ignored={e.ignored}
@@ -167,6 +157,7 @@
       style:padding-left="{8 + depth * 14}px"
       role="treeitem"
       aria-selected={editor.active === e.path}
+      aria-expanded={e.isDir ? !!expanded[e.path] : undefined}
       tabindex="0"
       draggable="true"
       ondragstart={(ev) => {
@@ -189,8 +180,14 @@
         menu = { x: ev.clientX, y: ev.clientY, entry: e }
       }}
     >
-      <span class="chev">{e.isDir ? (expanded[e.path] ? '▾' : '▸') : ''}</span>
-      <span class="ic" style:color>{glyph}</span>
+      <span class="chev" class:open={e.isDir && expanded[e.path]} aria-hidden="true">
+        {#if e.isDir}
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.500 2 6.500 5 3.500 8" /></svg>
+        {/if}
+      </span>
+      <span class="ic" class:loading={e.isDir && expanded[e.path] && !children[e.path]}>
+        <FileIcon id={spec.id} color={spec.color} size={isRoot ? 17 : 16} root={isRoot} />
+      </span>
       <span class="name">{e.name}</span>
     </div>
     {#if e.isDir && expanded[e.path]}
@@ -234,8 +231,17 @@
   .row.active { background: var(--glass2); }
   .row.drop { outline: 1px solid var(--accent); }
   .row.ignored { opacity: 0.45; }
-  .chev { width: 10px; color: var(--faint); font-size: 10px; flex: none; }
-  .ic { width: 18px; flex: none; font-size: 9px; font-weight: 700; text-align: center; letter-spacing: -0.02em; }
+  .chev { width: 10px; height: 10px; color: var(--faint); flex: none; display: flex; }
+  .chev svg { transition: transform 170ms ease; }
+  .chev.open svg { transform: rotate(90deg); }
+  .row:hover .chev { color: var(--dim); }
+  .ic { width: 18px; height: 18px; flex: none; display: flex; align-items: center; justify-content: center; }
+  .ic.loading { opacity: 0.55; animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.9; } }
+  @media (prefers-reduced-motion: reduce) {
+    .chev svg { transition: none; }
+    .ic.loading { animation: none; }
+  }
   .name { overflow: hidden; text-overflow: ellipsis; }
   .edit {
     width: 100%; box-sizing: border-box; height: 24px; background: var(--glass2); color: var(--txt);
