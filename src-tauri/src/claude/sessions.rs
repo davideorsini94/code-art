@@ -1211,7 +1211,11 @@ mod tests {
         }
         let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         let c = list.iter().find(|c| c.session_id == U1).unwrap();
-        assert_eq!((c.title.as_str(), c.archived, c.owned, c.turn_count), ("Mio", true, true, 2));
+        // pilotata da Code Art: il conteggio dei turni è del motore, la sincronizzazione non lo tocca
+        assert_eq!((c.title.as_str(), c.archived, c.owned, c.turn_count), ("Mio", true, true, 99));
+        s.exec_for_test("UPDATE conversations SET owned = 0 WHERE session_id = ?1", U1);
+        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(list.iter().find(|c| c.session_id == U1).unwrap().turn_count, 2);
     }
 
     #[test]

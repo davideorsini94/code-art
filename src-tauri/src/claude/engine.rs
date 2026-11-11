@@ -378,6 +378,9 @@ impl Engine {
         {
             let mut rt = lock(&conv.rt);
             if rt.stopping {
+                drop(rt);
+                // il messaggio non è partito: nessun `working` senza processo
+                self.apply(session_id, Some(&conv), StateInput::ProcessExited, false);
                 return Err("la conversazione è stata fermata".into());
             }
             rt.closed = true;
@@ -602,11 +605,12 @@ impl Engine {
 
     fn load_state(&self, session_id: &str) -> ConvState {
         match self.0.store.conversation_state(session_id).ok().flatten() {
+            // `seen_turn` mai oltre `turn_count`: altrimenti i turni successivi finirebbero `idle` invece di `waiting`
             Some((status, turns, seen)) => ConvState {
                 status: parse_status(&status),
                 open_asks: 0,
                 turn_count: turns.max(0) as u32,
-                seen_turn: seen.unwrap_or(turns).max(0) as u32,
+                seen_turn: seen.unwrap_or(turns).clamp(0, turns.max(0)) as u32,
             },
             None => ConvState::default(),
         }
@@ -617,10 +621,12 @@ impl Engine {
     }
 
     /// Applica un ingresso alla macchina degli stati (in memoria se il processo è vivo, altrimenti dallo store).
+    /// Un processo la cui uscita è già stata gestita (`finished`) non conta come vivo: il suo stato in memoria è
+    /// vecchio, e scriverlo salverebbe uno stato senza processo.
     fn apply(&self, session_id: &str, conv: Option<&Arc<Conv>>, input: StateInput, touch: bool) {
-        let (before, after) = match conv {
-            Some(c) => {
-                let mut rt = lock(&c.rt);
+        let live = conv.map(|c| lock(&c.rt)).filter(|rt| !rt.finished);
+        let (before, after) = match live {
+            Some(mut rt) => {
                 let before = rt.state;
                 rt.state = next_status(before, input);
                 self.save(session_id, &rt.state, touch);
@@ -866,7 +872,14 @@ impl Engine {
 
     fn handle_line(&self, session_id: &str, conv: &Arc<Conv>, line: &str) {
         for mut ev in parse_line(line) {
-            if let ClaudeEvent::Unknown { json, .. } = &mut ev {
+            if let ClaudeEvent::Unknown { label, json } = &mut ev {
+                // richiesta della CLI che l'host non gestisce (solo `can_use_tool` lo è): risposta d'errore, così il
+                // turno non resta ad aspettare (docs/claude-protocol.md §5)
+                if label.starts_with("control_request/") {
+                    if let Some(id) = serde_json::from_str::<Value>(json).ok().and_then(|v| v["request_id"].as_str().map(String::from)) {
+                        let _ = write_line(conv, &unsupported_response(&id));
+                    }
+                }
                 truncate_utf8(json, UNKNOWN_JSON_CAP);
             }
             let mut changed = false;
@@ -997,6 +1010,11 @@ fn answer_payload(ask: &ClaudeEvent, choice: &str) -> Result<Value> {
         }
         _ => Err(format!("risposta non valida: {choice}")),
     }
+}
+
+/// Risposta a una `control_request` della CLI che l'host non sa gestire.
+fn unsupported_response(request_id: &str) -> Value {
+    json!({"type": "control_response", "response": {"subtype": "error", "request_id": request_id, "error": "unsupported"}})
 }
 
 fn write_line(conv: &Conv, v: &Value) -> Result<()> {
@@ -1956,6 +1974,56 @@ mod tests {
         let err = env.engine.send("p1", &sid, "x", &big).unwrap_err();
         assert!(err.contains("30 MB"), "{err}");
         assert!(!stdin_lines(&env, &sid).iter().any(|l| l["type"] == "user"));
+    }
+
+    #[test]
+    fn seen_turn_is_clamped_to_the_turn_count() {
+        let env = setup(&[]);
+        let sid = "77777777-7777-4777-8777-777777777777";
+        env.store.insert_owned_conversation("p1", sid, &env.folders[0].to_string_lossy(), None, "default").unwrap();
+        env.store.save_conversation_state(sid, "idle", 3, 7, false).unwrap();
+        let s = env.engine.load_state(sid);
+        assert_eq!((s.turn_count, s.seen_turn), (3, 3));
+        // il prossimo turno finisce `waiting` (non `idle`)
+        let s = next_status(next_status(s, StateInput::UserSent), StateInput::Event(&ClaudeEvent::TurnEnd { context_used_pct: None, is_error: false }));
+        assert_eq!(s.status, ConvStatus::Waiting);
+    }
+
+    #[test]
+    fn apply_on_a_finished_process_uses_the_store() {
+        let env = setup(&[("FAKE_CLAUDE_EXIT_AT_START", "1")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        let conv = env.engine.live(&sid);
+        wait_until("uscita gestita", || !env.engine.is_running(&sid));
+        let Some(conv) = conv else { return }; // già uscito prima di `live`: niente da verificare
+        assert!(lock(&conv.rt).finished);
+        // lo store è andato avanti (un altro processo, una vista): il vecchio stato in memoria non lo sovrascrive
+        env.store.save_conversation_state(&sid, "waiting", 5, 4, false).unwrap();
+        env.engine.apply(&sid, Some(&conv), StateInput::Viewed, false);
+        assert_eq!(env.store.conversation_state(&sid).unwrap(), Some(("idle".into(), 5, Some(5))));
+    }
+
+    #[test]
+    fn unsupported_control_requests_get_an_error_response() {
+        // righe scritte a mano (sintetiche): una richiesta della CLI che l'host non gestisce, poi la fine del turno
+        let dir = tempfile::tempdir().unwrap();
+        let fx = dir.path().join("synthetic-control.jsonl");
+        std::fs::write(
+            &fx,
+            concat!(
+                r#"{"type":"control_request","request_id":"cli_req_9","request":{"subtype":"hook_callback","callback_id":"x"}}"#,
+                "\n",
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx.to_string_lossy())]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        let want = json!({"type": "control_response", "response": {"subtype": "error", "request_id": "cli_req_9", "error": "unsupported"}});
+        wait_until("risposta d'errore su stdin", || stdin_lines(&env, &sid).contains(&want));
+        wait_until("turno finito", || env.sink.has_kind(&sid, "turnEnd"));
     }
 
     #[test]

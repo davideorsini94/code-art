@@ -181,6 +181,8 @@ impl Store {
 
     /// Inserisce una sessione nuova (owned=false, idle, permessi dal default) oppure aggiorna SOLO
     /// cwd, last_activity e turn_count di una già nota: titolo, archiviazione, letto/non letto restano.
+    /// Per le conversazioni pilotate da Code Art (`owned = 1`) `turn_count` (e lo stato) li scrive solo il motore,
+    /// che conta ogni fine turno (anche i comandi slash): il conteggio dei prompt del file non lo sovrascrive.
     pub fn upsert_synced_conversation(
         &self,
         project_id: &str,
@@ -200,7 +202,8 @@ impl Store {
             "INSERT INTO conversations(session_id, project_id, cwd, title, last_activity, turn_count, permission_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO UPDATE SET
-               cwd = excluded.cwd, last_activity = excluded.last_activity, turn_count = excluded.turn_count",
+               cwd = excluded.cwd, last_activity = excluded.last_activity,
+               turn_count = CASE WHEN conversations.owned = 1 THEN conversations.turn_count ELSE excluded.turn_count END",
             params![session_id, project_id, cwd, title, last_activity, turn_count, mode],
         )
         .map_err(err)?;
@@ -427,6 +430,20 @@ mod tests {
         store.setting_set("default_permission_mode", "plan").unwrap();
         assert_eq!(store.setting_get("default_permission_mode").unwrap().as_deref(), Some("plan"));
         assert_eq!(store.setting_get("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn sync_does_not_touch_the_turn_count_of_owned_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        store.insert_owned_conversation("p", "own", "/Users/dev/x", None, "default").unwrap();
+        store.save_conversation_state("own", "waiting", 5, 4, false).unwrap();
+        store.upsert_synced_conversation("p", "own", "/Users/dev/x", "t", 10, 2).unwrap();
+        assert_eq!(store.conversation_state("own").unwrap(), Some(("waiting".into(), 5, Some(4))));
+        // importata: il conteggio viene dal file
+        store.upsert_synced_conversation("p", "imp", "/Users/dev/x", "t", 10, 2).unwrap();
+        store.upsert_synced_conversation("p", "imp", "/Users/dev/x", "t", 11, 3).unwrap();
+        assert_eq!(store.get_conversation("imp").unwrap().unwrap().turn_count, 3);
     }
 
     #[test]
