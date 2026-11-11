@@ -54,6 +54,7 @@
       <button class="link" onclick={() => void conversations.create()}>＋ nuova</button>
     </span>
   </div>
+  {#if conversations.notice}<p class="empty" role="status">{conversations.notice}</p>{/if}
   {#if conversations.error}<p class="err" role="alert">{conversations.error}</p>{/if}
   <div class="scroll" use:measure onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}>
     {#if list.length === 0}

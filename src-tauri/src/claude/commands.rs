@@ -104,10 +104,9 @@ pub async fn conv_stop(app: AppHandle, window: WebviewWindow, session_id: String
 #[tauri::command]
 pub async fn conv_delete(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<DeleteOutcome> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
-    let _guard = app
-        .state::<DeletePrompts>()
-        .acquire(window.label())
-        .ok_or_else(|| "una conferma di eliminazione è già aperta".to_string())?;
+    let Some(_guard) = app.state::<DeletePrompts>().acquire(window.label()) else {
+        return Ok(DeleteOutcome::Busy);
+    };
     let handle = app.clone();
     let win = window.clone();
     let confirm = move |title: &str| {

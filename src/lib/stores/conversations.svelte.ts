@@ -11,6 +11,8 @@ class ConversationStore {
   activeId = $state<string | null>(null)
   showArchived = $state(false)
   error = $state<string | null>(null)
+  /** Avviso non bloccante (es. eliminata ma con un residuo in `~/.claude`). */
+  notice = $state<string | null>(null)
   /** Comandi slash e modello correnti per sessione, dall'ultimo `init` visto in questa esecuzione. */
   inits = $state.raw<Record<string, { slashCommands: string[]; model: string; at: number }>>({})
 
@@ -127,7 +129,12 @@ class ConversationStore {
   unlockTitle = (id: string) => this.run(() => convUnlockTitle(id))
   /** La conferma è la finestra nativa aperta dal core: qui nessun "sei sicuro?". La rimozione dalla lista arriva
    *  con `conv:removed`. */
-  delete = (id: string) => this.run(() => convDelete(id))
+  delete = (id: string) =>
+    this.run(async () => {
+      this.notice = null
+      const out = await convDelete(id)
+      if (out.kind === 'deletedWithWarning') this.notice = out.message
+    })
   archive = (id: string, archived: boolean) =>
     this.run(async () => {
       await convArchive(id, archived)

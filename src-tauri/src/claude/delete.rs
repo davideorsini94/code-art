@@ -17,13 +17,20 @@ pub const BTN_CANCEL: &str = "Annulla";
 const UNTITLED: &str = "Conversazione senza titolo";
 const TITLE_SHOWN_MAX: usize = 100;
 
-/// Esito di `conv_delete`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Esito di `conv_delete` (JSON: `{"kind":"deleted"}`, `{"kind":"deletedWithWarning","message":"…"}`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum DeleteOutcome {
     Deleted,
+    /// Eliminata, ma qualcosa è rimasto (la cartella accanto non si è potuta spostare): avviso non bloccante.
+    DeletedWithWarning { message: String },
     Cancelled,
+    /// C'è già una conferma di eliminazione aperta in questa finestra: ignorato in silenzio dall'interfaccia.
+    Busy,
 }
+
+pub const SIBLING_WARNING: &str =
+    "Conversazione eliminata, ma la cartella dei suoi sotto-agenti non si è potuta spostare nel Cestino: resta in ~/.claude/projects.";
 
 /// Chi sposta un percorso nel Cestino; nei test un finto (mai il vero Cestino).
 pub trait Trasher: Send + Sync {
@@ -35,7 +42,7 @@ pub struct SystemTrasher;
 
 impl Trasher for SystemTrasher {
     fn trash(&self, path: &Path) -> Result<()> {
-        trash::delete(path).map_err(|e| e.to_string())
+        super::trasher::move_to_trash(path)
     }
 }
 
@@ -80,24 +87,36 @@ pub fn locate(root: &Path, folders: &[String], session_id: &str) -> Result<Optio
     Ok(None)
 }
 
-/// Sposta nel Cestino il file (errore = niente è cambiato) e poi, al meglio, la cartella accanto.
-pub fn trash_files(t: &dyn Trasher, files: &SessionFiles) -> Result<()> {
+/// Sposta nel Cestino il file (errore = niente è cambiato) e poi la cartella accanto.
+/// `Ok(true)` = tutto spostato; `Ok(false)` = il file sì ma la cartella no (da segnalare all'utente).
+pub fn trash_files(t: &dyn Trasher, files: &SessionFiles) -> Result<bool> {
     t.trash(&files.file)?;
-    if let Some(d) = &files.dir {
-        let _ = t.trash(d);
-    }
-    Ok(())
+    Ok(files.dir.as_ref().is_none_or(|d| t.trash(d).is_ok()))
 }
 
-/// Testo del dialogo: titolo come testo semplice, una riga, senza caratteri di controllo, accorciato.
+/// Esegue `f`; se fallisce la ritenta una volta.
+pub fn retry_once<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    f().or_else(|_| f())
+}
+
+/// Caratteri di formato Unicode (categoria Cf): bidi, spazi a larghezza zero, ecc. Possono camuffare il testo.
+fn is_format_char(c: char) -> bool {
+    matches!(c as u32,
+        0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E | 0x200B..=0x200F
+        | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD
+        | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// Testo del dialogo: titolo come testo semplice tra «», su una riga, senza caratteri di controllo né di formato
+/// (Cf), accorciato.
 pub fn dialog_message(title: &str) -> String {
-    let t: String = title.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let t: String = title.chars().filter(|c| !is_format_char(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t = if t.is_empty() { UNTITLED.to_string() } else { t.chars().take(TITLE_SHOWN_MAX).collect() };
-    format!("{t}\n\n{DIALOG_NOTE}")
+    let t: String = if t.is_empty() { UNTITLED.to_string() } else { t.chars().take(TITLE_SHOWN_MAX).collect() };
+    format!("«{t}»\n\n{DIALOG_NOTE}")
 }
 
-/// Un solo dialogo di eliminazione alla volta per finestra (chiave: id del progetto).
+/// Un solo dialogo di eliminazione alla volta per finestra (chiave: etichetta della finestra).
 #[derive(Default)]
 pub struct DeletePrompts(Arc<Mutex<HashSet<String>>>);
 
@@ -202,10 +221,21 @@ mod tests {
     #[test]
     fn dialog_message_is_plain_single_line_and_bounded() {
         let m = dialog_message("  Titolo\n<b>x</b>\u{7}  con   spazi ");
-        assert_eq!(m, format!("Titolo <b>x</b> con spazi\n\n{DIALOG_NOTE}"));
-        assert!(dialog_message("").starts_with(UNTITLED));
+        assert_eq!(m, format!("«Titolo <b>x</b> con spazi»\n\n{DIALOG_NOTE}"));
+        assert!(dialog_message("").starts_with(&format!("«{UNTITLED}»")));
         let long = dialog_message(&"a".repeat(500));
-        assert_eq!(long.lines().next().unwrap().chars().count(), TITLE_SHOWN_MAX);
+        assert_eq!(long.lines().next().unwrap().chars().count(), TITLE_SHOWN_MAX + 2);
+        // bidi e zero-width spariscono
+        assert_eq!(dialog_message("a\u{202E}b\u{200B}c\u{FEFF}"), format!("«abc»\n\n{DIALOG_NOTE}"));
+    }
+
+    #[test]
+    fn retry_once_retries_a_single_time() {
+        let mut n = 0;
+        assert_eq!(retry_once(|| { n += 1; if n < 2 { Err("x".to_string()) } else { Ok(n) } }), Ok(2));
+        let mut m = 0;
+        assert!(retry_once(|| -> Result<()> { m += 1; Err("x".into()) }).is_err());
+        assert_eq!(m, 2);
     }
 
     #[test]

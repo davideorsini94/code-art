@@ -166,6 +166,25 @@ struct Inner {
     /// conversazione mostra "Turno interrotto — Riprendi" (solo in memoria: dopo un'altra sessione dell'app il
     /// turno non è più "appena interrotto").
     interrupted: Mutex<HashSet<String>>,
+    /// Sessioni in eliminazione (dopo la conferma): `send`/`resume` le rifiutano, così nessun processo può
+    /// ricreare il file mentre lo si sposta nel Cestino.
+    deleting: Mutex<HashSet<String>>,
+}
+
+/// Segna una sessione "in eliminazione" finché vive; si toglie da sola a ogni uscita.
+struct Tombstone(Engine, String);
+
+impl Tombstone {
+    fn new(engine: &Engine, session_id: &str) -> Tombstone {
+        lock(&engine.0.deleting).insert(session_id.to_string());
+        Tombstone(engine.clone(), session_id.to_string())
+    }
+}
+
+impl Drop for Tombstone {
+    fn drop(&mut self) {
+        lock(&self.0 .0.deleting).remove(&self.1);
+    }
 }
 
 /// Stato condiviso dell'app (non della finestra): i processi sopravvivono alla chiusura della finestra.
@@ -185,6 +204,7 @@ impl Engine {
             titles: OnceLock::new(),
             exits: Mutex::new(HashMap::new()),
             interrupted: Mutex::new(interrupted),
+            deleting: Mutex::new(HashSet::new()),
         });
         Engine(inner)
     }
@@ -478,31 +498,41 @@ impl Engine {
         confirm: &dyn Fn(&str) -> bool,
         trasher: &dyn super::delete::Trasher,
     ) -> Result<super::delete::DeleteOutcome> {
-        use super::delete::{locate, trash_files, DeleteOutcome};
+        use super::delete::{locate, retry_once, trash_files, DeleteOutcome, SIBLING_WARNING};
         let conv = self.owned_conv(project_id, session_id)?;
         crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         let project = self.project(project_id)?;
-        let files = locate(&self.0.sessions_root, &project.folders, session_id)?;
+        locate(&self.0.sessions_root, &project.folders, session_id)?; // rifiuta subito ciò che non si potrà spostare
         if !confirm(&conv.title) {
             return Ok(DeleteOutcome::Cancelled);
         }
+        // Da qui nessun invio/ripresa: la conferma può aver aspettato a lungo, quindi tutto si ricontrolla.
+        let _tomb = Tombstone::new(self, session_id);
+        drop(lock(&self.0.convs)); // barriera: un avvio già sotto il lock ha ora il processo in mappa e lo fermiamo
+        self.owned_conv(project_id, session_id)?;
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let files = locate(&self.0.sessions_root, &project.folders, session_id)?;
         self.stop(session_id);
         if let Some(q) = self.0.titles.get() {
             q.forget(session_id);
         }
+        let mut sibling_ok = true;
         if let Some(f) = &files {
             let real = f.file.canonicalize().ok(); // il watcher usa il percorso canonico: da calcolare prima
-            trash_files(trasher, f)?;
+            sibling_ok = trash_files(trasher, f)?;
             cache.forget(&f.file);
             if let Some(real) = real {
                 cache.forget(&real);
             }
         }
-        self.0.store.delete_conversation(session_id)?;
+        if retry_once(|| self.0.store.delete_conversation(session_id)).is_err() {
+            // il file è già nel Cestino: la voce sparirà alla prossima sincronizzazione (`prune_vanished`)
+            return Err("La conversazione è nel Cestino, ma non si è potuta togliere dall'elenco: sparirà alla prossima sincronizzazione.".into());
+        }
         lock(&self.0.exits).remove(session_id);
         lock(&self.0.interrupted).remove(session_id);
         self.0.sink.emit(project_id, "conv:removed", json!({"sessionId": session_id}));
-        Ok(DeleteOutcome::Deleted)
+        Ok(if sibling_ok { DeleteOutcome::Deleted } else { DeleteOutcome::DeletedWithWarning { message: SIBLING_WARNING.into() } })
     }
 
     /// Messaggio di controllo a processo vivo (§8); senza processo il valore salvato vale alla ripresa.
@@ -646,6 +676,11 @@ impl Engine {
         let deadline = Instant::now() + REPLACE_WAIT;
         let mut convs = loop {
             let convs = lock(&self.0.convs);
+            // sotto il lock dei processi: chi supera questo controllo ha il processo in mappa prima che
+            // `delete_conversation` lo fermi (vedi la barriera lì)
+            if lock(&self.0.deleting).contains(session_id) {
+                return Err("la conversazione si sta eliminando".into());
+            }
             let Some(c) = convs.get(session_id).cloned() else { break convs };
             if !c.is_dead() {
                 return Ok(c);
@@ -1610,17 +1645,30 @@ mod tests {
     use crate::claude::sessions::MetaCache;
 
     /// Finto Cestino: registra i percorsi e li toglie dal disco temporaneo (mai il vero Cestino).
+    type Probe = Box<dyn Fn(&Path) + Send>;
     #[derive(Default)]
-    struct FakeTrash(Mutex<Vec<PathBuf>>);
+    struct FakeTrash {
+        taken: Mutex<Vec<PathBuf>>,
+        fail_files: bool,
+        fail_dirs: bool,
+        /// Eseguito a ogni chiamata, prima dello spostamento (osserva lo stato del motore in quel momento).
+        probe: Mutex<Option<Probe>>,
+    }
     impl Trasher for FakeTrash {
         fn trash(&self, path: &Path) -> Result<()> {
-            self.0.lock().unwrap().push(path.to_path_buf());
+            if let Some(p) = self.probe.lock().unwrap().as_ref() {
+                p(path);
+            }
+            if (path.is_dir() && self.fail_dirs) || (!path.is_dir() && self.fail_files) {
+                return Err("finto errore del Cestino".into());
+            }
+            self.taken.lock().unwrap().push(path.to_path_buf());
             if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
         }
     }
     impl FakeTrash {
         fn taken(&self) -> Vec<PathBuf> {
-            self.0.lock().unwrap().clone()
+            self.taken.lock().unwrap().clone()
         }
     }
 
@@ -1730,6 +1778,81 @@ mod tests {
     }
 
     #[test]
+    fn failed_file_trash_leaves_everything_intact() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash { fail_files: true, ..Default::default() };
+        assert!(env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(file.exists() && env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+        // la tomba è tolta: la conversazione si può di nuovo usare
+        assert!(!lock(&env.engine.0.deleting).contains(DEL_SID));
+    }
+
+    #[test]
+    fn failed_sibling_trash_gives_a_warning_but_deletes() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let sibling = file.parent().unwrap().join(DEL_SID);
+        std::fs::create_dir_all(&sibling).unwrap();
+        let trash = FakeTrash { fail_dirs: true, ..Default::default() };
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert!(matches!(out, DeleteOutcome::DeletedWithWarning { ref message } if message.contains("sotto-agenti")), "{out:?}");
+        assert!(!file.exists() && sibling.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+        assert_eq!(removed(&env, DEL_SID), 1);
+    }
+
+    #[test]
+    fn missing_file_still_asks_then_drops_the_row() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        std::fs::remove_file(&file).unwrap();
+        let asked = Mutex::new(0);
+        let trash = FakeTrash::default();
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| { *asked.lock().unwrap() += 1; true }, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*asked.lock().unwrap(), 1);
+        assert!(trash.taken().is_empty() && env.store.get_conversation(DEL_SID).unwrap().is_none());
+    }
+
+    #[test]
+    fn send_is_refused_during_the_delete_window_and_after_it() {
+        let env = setup(&[]);
+        disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (engine, seen) = (env.engine.clone(), seen.clone());
+            *trash.probe.lock().unwrap() = Some(Box::new(move |_| {
+                seen.lock().unwrap().push(engine.send("p1", DEL_SID, "ancora", &[]).is_err());
+            }));
+        }
+        // durante il dialogo (prima della conferma) la conversazione resta usabile: lo provano gli altri test; qui la finestra dopo la conferma
+        env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![true], "invio rifiutato mentre si sposta il file");
+        assert_eq!(spawns(&env, DEL_SID), 0, "nessun processo avviato");
+        // dopo: la riga non c'è più, quindi non è più della finestra
+        assert!(env.engine.send("p1", DEL_SID, "tardi", &[]).is_err());
+        assert!(env.engine.resume("p1", DEL_SID).is_err());
+        assert_eq!(spawns(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn sync_drops_rows_whose_file_vanished() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        std::fs::remove_file(&file).unwrap();
+        // senza turni (conversazione appena avviata, file non ancora scritto) o in corso: la riga resta
+        let fresh = "33333333-3333-4333-8333-333333333333";
+        env.store.insert_owned_conversation("p1", fresh, &env.folders[0].to_string_lossy(), None, "default").unwrap();
+        let project = env.store.get_project("p1").unwrap().unwrap();
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &MetaCache::default(), &project, 0, &|_| false).unwrap();
+        assert_eq!(list.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>(), vec![fresh]);
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+    }
+
+    #[test]
     fn delete_stops_a_running_conversation_first() {
         let env = setup(&[]);
         let sid = env.engine.start("p1", StartOpts::default()).unwrap();
@@ -1740,8 +1863,14 @@ mod tests {
         let file = dir.join(format!("{sid}.jsonl"));
         std::fs::write(&file, "{}\n").unwrap();
         let trash = FakeTrash::default();
+        let running_at_trash = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (engine, log, id) = (env.engine.clone(), running_at_trash.clone(), sid.clone());
+            *trash.probe.lock().unwrap() = Some(Box::new(move |_| log.lock().unwrap().push(engine.is_running(&id))));
+        }
         let out = env.engine.delete_conversation("p1", &sid, &MetaCache::default(), &|_| true, &trash).unwrap();
         assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*running_at_trash.lock().unwrap(), vec![false], "il processo è fermato prima del Cestino");
         assert!(!env.engine.is_running(&sid));
         assert_eq!(trash.taken(), vec![file]);
         assert!(env.store.get_conversation(&sid).unwrap().is_none());

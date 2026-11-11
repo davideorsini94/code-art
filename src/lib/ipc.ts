@@ -26,6 +26,8 @@ export const fsCreate = (path: string, isDir: boolean) => invoke<void>('fs_creat
 export const fsRename = (from: string, to: string) => invoke<void>('fs_rename', { from, to })
 export const fsTrash = (path: string) => invoke<void>('fs_trash', { path })
 export const fsRead = (path: string) => invoke<FileContent>('fs_read', { path })
+/** Byte grezzi di un file del progetto (anteprime; ≤ 50 MB). Il core risponde con un corpo binario. */
+export const fsReadBytes = async (path: string) => new Uint8Array(await invoke<ArrayBuffer>('fs_read_bytes', { path }))
 export const fsWrite = (path: string, text: string, expectedMtimeMs: number | null) =>
   invoke<number>('fs_write', { path, text, expectedMtimeMs })
 
@@ -47,7 +49,7 @@ export const convList = (projectId: string) => invoke<Conversation[]>('conv_list
 export const convHistory = (sessionId: string) => invoke<ChatItem[]>('conv_history', { sessionId })
 
 // ---- motore conversazioni ----
-import type { ClaudeCheck, ClaudeEvent, ConvStartOpts } from './types'
+import type { ClaudeCheck, ClaudeEvent, ConvDeleteOutcome, ConvStartOpts } from './types'
 export const claudeCheck = () => invoke<ClaudeCheck>('claude_check')
 export const convStart = (projectId: string, opts: ConvStartOpts = {}) => invoke<string>('conv_start', { projectId, opts })
 export const convResume = (sessionId: string) => invoke<void>('conv_resume', { sessionId })
@@ -63,7 +65,7 @@ export const convSetPermissionMode = (sessionId: string, mode: string) =>
 export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_viewed', { sessionId })
 export const convArchive = (sessionId: string, archived: boolean) => invoke<void>('conv_archive', { sessionId, archived })
 /** Elimina la conversazione (file di sessione nel Cestino) dopo una conferma NATIVA mostrata dal core. */
-export const convDelete = (sessionId: string) => invoke<'deleted' | 'cancelled'>('conv_delete', { sessionId })
+export const convDelete = (sessionId: string) => invoke<ConvDeleteOutcome>('conv_delete', { sessionId })
 export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })
 /** Ferma il processo della conversazione (interrompe un turno in corso); si riprende al prossimo invio. */
 export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessionId })

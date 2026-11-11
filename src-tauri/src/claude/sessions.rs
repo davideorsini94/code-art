@@ -618,7 +618,29 @@ pub fn sync_project_sessions(
             }
         }
     }
+    prune_vanished(root, store, project, is_running);
     conversations_for(root, store, project, now, is_running)
+}
+
+/// Toglie dallo store le conversazioni il cui file di sessione non esiste più (eliminate altrove o dopo un
+/// fallimento di `conv_delete`). Prudenza: solo se la radice delle sessioni esiste, la conversazione non è pilotata
+/// dal motore e ha già dei turni (una appena avviata non ha ancora il file).
+fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning) {
+    if !root.is_dir() {
+        return;
+    }
+    let dirs = session_dirs_for(root, &project.folders);
+    let Ok(list) = store.list_conversations(&project.id) else { return };
+    for c in list {
+        if c.turn_count == 0 || !valid_session_id(&c.session_id) || is_running(&c.session_id) {
+            continue;
+        }
+        let name = format!("{}.jsonl", c.session_id);
+        let own = session_dirs_for(root, std::slice::from_ref(&c.cwd));
+        if !dirs.iter().chain(own.iter()).any(|d| d.join(&name).exists()) {
+            let _ = store.delete_conversation(&c.session_id);
+        }
+    }
 }
 
 /// Conversazioni salvate del progetto con `maybe_open_elsewhere` calcolato dall'mtime del file.

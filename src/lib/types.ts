@@ -55,3 +55,10 @@ export type ConvStartOpts = { model?: string; permissionMode?: string }
 export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
 /** Payload dell'evento `conv:event`. */
 export type ConvEventPayload = { sessionId: string; event: ClaudeEvent }
+
+/** Esito di `conv_delete`: `busy` = c'è già una conferma aperta (da ignorare in silenzio). */
+export type ConvDeleteOutcome =
+  | { kind: 'deleted' }
+  | { kind: 'deletedWithWarning'; message: string }
+  | { kind: 'cancelled' }
+  | { kind: 'busy' }

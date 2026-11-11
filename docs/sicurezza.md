@@ -73,7 +73,12 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   predefinito), che la WebView non può aggirare né rispondere; un solo dialogo alla volta per finestra. Poi:
   processo fermato, titolazione tolta dalla coda, riga dello store e cache dei metadati rimosse, evento
   `conv:removed` (Dock ricalcolato). Il watcher vede sparire il file e lo ignora; una sincronizzazione successiva
-  non lo reimporta. Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
+  non lo reimporta. Dopo la conferma (che può aspettare a lungo) la sessione è "in eliminazione": `send`/`resume`
+  sono rifiutati finché dura, e proprietà, fiducia e file sono ricontrollati, così nessun processo può ricreare il
+  file. Se la cartella `<id>/` non si sposta l'esito è `deletedWithWarning` (avviso all'utente); se la riga non si
+  toglie dallo store (due tentativi) l'errore lo dice e la sincronizzazione successiva scarta le righe con turni il cui
+  file non esiste più e senza processo. Il Cestino usa `NSFileManager` (`claude/trasher.rs`), non Finder/AppleScript
+  (niente permesso di Automazione). Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
 - **Inventario dei comandi**: `every_command_is_registered_and_listed` verifica che ogni `#[tauri::command]`
   sia registrato in `lib.rs` ed elencato nella tabella qui sotto.
 
