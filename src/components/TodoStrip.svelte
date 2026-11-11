@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '../lib/tooltip'
   import type { TodoItem } from '../lib/conv/reduce'
 
   let { todos }: { todos: TodoItem[] } = $props()
@@ -12,7 +13,7 @@
 
 {#if todos.length > 0}
   <div class="strip" aria-label="Attività">
-    <button class="head" aria-expanded={open} onclick={() => (open = !open)}>
+    <button class="head" use:tooltip={`${open ? 'Comprimi' : 'Espandi'} le attività (${done}/${todos.length}): ${current ? label(current) : 'tutto completato'}`} aria-expanded={open} onclick={() => (open = !open)}>
       <span class="count">{done}/{todos.length}</span>
       <span class="cur">{current ? label(current) : 'Tutto completato'}</span>
       <span class="caret">{open ? '▾' : '▸'}</span>

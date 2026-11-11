@@ -16,6 +16,7 @@
   import { conversations } from '../lib/stores/conversations.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
+  import { tooltip } from '../lib/tooltip'
 
   type Item = { key: string; section: string; label: string; labelPos: number[]; detail?: string; detailPos?: number[]; badge?: string; run: () => void | Promise<void> }
 
@@ -300,6 +301,7 @@
             class="opt"
             class:on={i === sel}
             role="option"
+            use:tooltip={it.detail ?? ''}
             tabindex="-1"
             aria-selected={i === sel}
             onmousemove={() => (sel = i)}

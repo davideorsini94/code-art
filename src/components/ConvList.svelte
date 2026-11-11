@@ -3,6 +3,7 @@
   import { conversations } from '../lib/stores/conversations.svelte'
   import { windowRange, WINDOW_THRESHOLD } from '../lib/conv/order'
   import ConvCard from './ConvCard.svelte'
+  import { tooltip } from '../lib/tooltip'
 
   /** Altezza fissa della scheda (con "era:" il riassunto scende a una riga, quindi l'altezza non cambia) e spazio tra le schede.
    *  Stessi valori con e senza finestra di rendering. */
@@ -50,8 +51,8 @@
   <div class="h">
     <span>Conversazioni</span>
     <span class="actions">
-      <button class="link" class:on={conversations.showArchived} title={conversations.showArchived ? 'Torna a tutte le conversazioni' : 'Mostra solo le archiviate'} onclick={() => (conversations.showArchived = !conversations.showArchived)}>{conversations.showArchived ? '← Tutte' : 'Archiviate'}</button>
-      <button class="link" onclick={() => void conversations.create()}>＋ nuova</button>
+      <button class="link" class:on={conversations.showArchived} use:tooltip={conversations.showArchived ? 'Torna a tutte le conversazioni' : 'Mostra solo le archiviate'} onclick={() => (conversations.showArchived = !conversations.showArchived)}>{conversations.showArchived ? '← Tutte' : 'Archiviate'}</button>
+      <button class="link" use:tooltip={'Nuova conversazione'} onclick={() => void conversations.create()}>＋ nuova</button>
     </span>
   </div>
   {#if conversations.notice}<p class="empty" role="status">{conversations.notice}</p>{/if}
@@ -99,14 +100,14 @@
 
 {#if menu}
   <div class="menu glass-strong" style:left="{menu.x}px" style:top="{menu.y}px" role="menu">
-    <button role="menuitem" onclick={() => { renamingId = menu!.id; menu = null }}>Rinomina</button>
+    <button role="menuitem" use:tooltip={'Rinomina la conversazione (anche con doppio clic sul titolo)'} onclick={() => { renamingId = menu!.id; menu = null }}>Rinomina</button>
     {#if menu.locked}
-      <button role="menuitem" onclick={() => { void conversations.unlockTitle(menu!.id); menu = null }}>Sblocca titolo</button>
+      <button role="menuitem" use:tooltip={'Lascia che Claude aggiorni di nuovo il titolo'} onclick={() => { void conversations.unlockTitle(menu!.id); menu = null }}>Sblocca titolo</button>
     {/if}
-    <button role="menuitem" onclick={() => { void conversations.archive(menu!.id, !menu!.archived); menu = null }}>
+    <button role="menuitem" use:tooltip={menu.archived ? 'Rimetti la conversazione nell\'elenco principale' : 'Togli dall\'elenco senza eliminare'} onclick={() => { void conversations.archive(menu!.id, !menu!.archived); menu = null }}>
       {menu.archived ? 'Ripristina' : 'Archivia'}
     </button>
-    <button role="menuitem" onclick={() => { void conversations.delete(menu!.id); menu = null }}>Elimina…</button>
+    <button role="menuitem" use:tooltip={'Elimina la conversazione (chiede conferma)'} onclick={() => { void conversations.delete(menu!.id); menu = null }}>Elimina…</button>
   </div>
 {/if}
 

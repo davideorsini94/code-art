@@ -4,6 +4,7 @@
   // niente annotazioni né link: il contenuto del PDF non può far partire nulla.
   import { onDestroy } from 'svelte'
   import { fsReadBytes, asFsError } from '../lib/ipc'
+  import { tooltip } from '../lib/tooltip'
 
   let { path, rev }: { path: string; rev: number } = $props()
 
@@ -208,11 +209,11 @@
   <div class="foot">
     <span>{status === 'ready' ? `pagina ${current} di ${count}` : ''}</span>
     <span class="grow"></span>
-    <button onclick={() => setZoom(zoom / 1.2)} aria-label="Riduci">−</button>
+    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => setZoom(zoom / 1.2)} aria-label="Riduci">−</button>
     <span class="z">{Math.round(zoom * 100)}%</span>
-    <button onclick={() => setZoom(zoom * 1.2)} aria-label="Ingrandisci">+</button>
-    <button class:on={fitMode} onclick={() => setZoom(fitZoom(), true)}>Adatta</button>
-    <button onclick={() => setZoom(1)}>100%</button>
+    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => setZoom(zoom * 1.2)} aria-label="Ingrandisci">+</button>
+    <button class:on={fitMode} use:tooltip={{ text: 'Adatta alla larghezza', shortcut: '⌘0' }} onclick={() => setZoom(fitZoom(), true)}>Adatta</button>
+    <button use:tooltip={'Dimensione reale (100%)'} onclick={() => setZoom(1)}>100%</button>
   </div>
 </div>
 

@@ -12,6 +12,7 @@
   import { errorText } from '../lib/errors'
   import { BUILTIN_COMMANDS, completeSlash, slashMatches } from '../lib/conv/slash'
   import { displayedModel } from '../lib/conv/model'
+  import { tooltip } from '../lib/tooltip'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
   import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, PATH_DRAG_TYPE, imageExt, mentionFor } from '../lib/conv/paths'
   import type { Conversation } from '../lib/types'
@@ -24,6 +25,7 @@
     ['plan', 'Piano'],
     ['default', 'Chiedi sempre'],
   ]
+
   const ALIASES = ['opus', 'sonnet', 'haiku']
 
   type Thumb = { url: string; bytes: Uint8Array; ext: string; name: string; path?: string }
@@ -229,6 +231,7 @@
     }
   }
 
+  const sendTip = $derived<string | { text: string; shortcut: string }>(canSend ? { text: 'Invia il messaggio', shortcut: '⌘↵' } : busy ? 'Invio in corso…' : 'Scrivi un messaggio per inviare')
   const modeLabel = $derived(modes.find(([m]) => m === conv.permissionMode)?.[1] ?? conv.permissionMode)
   const R = 8
   const C = 2 * Math.PI * R
@@ -239,8 +242,8 @@
     <ul class="thumbs" aria-label="Immagini allegate">
       {#each thumbs as t (t)}
         <li>
-          <img src={t.url} alt={t.name} />
-          <button type="button" class="x" aria-label="Rimuovi {t.name}" onclick={() => removeThumb(t)}>×</button>
+          <img src={t.url} alt={t.name} use:tooltip={t.name} />
+          <button type="button" class="x" aria-label="Rimuovi {t.name}" use:tooltip={`Rimuovi ${t.name}`} onclick={() => removeThumb(t)}>×</button>
         </li>
       {/each}
     </ul>
@@ -250,8 +253,8 @@
     {#if matches.length}
       <ul class="pop" role="listbox" aria-label="Comandi">
         {#each matches as m, i (m)}
-          <li role="option" aria-selected={i === pick} class:on={i === pick}>
-            <button type="button" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => choose(m)}>/{m}</button>
+          <li role="option" aria-selected={i === pick} class:on={i === pick} data-no-tooltip="voce di un elenco di completamento: il testo è già la spiegazione">
+            <button type="button" tabindex="-1" data-no-tooltip="voce di un elenco di completamento: il testo è già la spiegazione" onmousedown={(e) => e.preventDefault()} onclick={() => choose(m)}>/{m}</button>
           </li>
         {/each}
       </ul>
@@ -262,35 +265,34 @@
       rows="1"
       placeholder="Rispondi a Claude…"
       aria-label="Messaggio"
-      title={working ? 'Claude sta lavorando: puoi scrivere, ma potrai inviare solo a fine turno' : undefined}
       {onkeydown}
       {onpaste}
       oninput={syncCursor}
       onclick={syncCursor}
       onkeyup={(e) => !['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key) && syncCursor()}
     ></textarea>
-    <span class="hint">⌘↵</span>
+    <span class="hint" use:tooltip={{ text: 'Invia il messaggio', shortcut: '⌘↵' }}>⌘↵</span>
   </div>
 
   {#if error}<p class="err" role="alert">{error}</p>{/if}
 
   <div class="bar">
-    <label class="chip mode" class:bypass={conv.permissionMode === 'bypassPermissions'} title="Modalità permessi: {modeLabel}">
+    <label class="chip mode" class:bypass={conv.permissionMode === 'bypassPermissions'}>
       <span class="sr">Modalità permessi</span>
-      <select value={conv.permissionMode} onchange={(e) => setMode(e.currentTarget)}>
+      <select value={conv.permissionMode} use:tooltip={`Modalità permessi: ${modeLabel}`} onchange={(e) => setMode(e.currentTarget)}>
         {#each modes as [m, label] (m)}<option value={m}>{label}</option>{/each}
       </select>
     </label>
-    <label class="chip" title="Modello">
+    <label class="chip">
       <span class="sr">Modello</span>
-      <select value={currentModel} onchange={(e) => setModel(e.currentTarget)}>
+      <select value={currentModel} use:tooltip={`Modello: ${currentModel || 'nessuno'}`} onchange={(e) => setModel(e.currentTarget)}>
         {#if !currentModel}<option value="" disabled>Modello</option>{/if}
         {#each models as m (m)}<option value={m}>{m}</option>{/each}
       </select>
     </label>
     <span class="grow"></span>
     {#if pct !== null}
-      <span class="ring" title="Contesto usato: {pct}%" role="img" aria-label="Contesto usato: {pct}%">
+      <span class="ring" use:tooltip={`Contesto usato: ${pct}%`} role="img" aria-label="Contesto usato: {pct}%">
         <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
           <circle cx="11" cy="11" r={R} class="bg" />
           <circle cx="11" cy="11" r={R} class="fg" class:hot={pct >= 85} stroke-dasharray={C} stroke-dashoffset={C * (1 - pct / 100)} transform="rotate(-90 11 11)" />
@@ -299,10 +301,10 @@
       </span>
     {/if}
     {#if working}
-      <button type="button" class="btn stop" onclick={interrupt}>Interrompi</button>
-      <button type="button" class="btn" disabled title="Attendi la fine del turno per inviare">Invia</button>
+      <button type="button" class="btn stop" use:tooltip={{ text: 'Interrompi', shortcut: 'Esc' }} onclick={interrupt}>Interrompi</button>
+      <span class="tipw" use:tooltip={'Attendi la fine del turno per inviare'}><button type="button" class="btn" disabled use:tooltip={'Attendi la fine del turno per inviare'}>Invia</button></span>
     {:else}
-      <button type="button" class="btn go" disabled={!canSend} onclick={send}>Invia</button>
+      <span class="tipw" use:tooltip={sendTip}><button type="button" class="btn go" disabled={!canSend} use:tooltip={sendTip} onclick={send}>Invia</button></span>
     {/if}
   </div>
 </div>
@@ -335,6 +337,9 @@
   .ring .fg.hot { stroke: var(--wait); }
   .btn { padding: 5px 14px; border-radius: 10px; border: 1px solid var(--edge-soft); background: var(--glass); color: var(--txt); font: inherit; font-size: 12px; cursor: pointer; }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* un pulsante disabilitato non riceve eventi del puntatore: il suggerimento sta sul contenitore */
+  .tipw { display: inline-flex; }
+  .tipw button:disabled { pointer-events: none; }
   .btn.go { background: var(--accent); color: #10131c; border-color: transparent; font-weight: 600; }
   .btn.stop { border-color: var(--wait); color: var(--wait); }
   .err { color: #ff8f8f; font-size: 11.5px; margin: 0; }

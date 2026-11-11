@@ -1,5 +1,6 @@
 <script lang="ts">
   import { capText } from '../lib/conv/tools'
+  import { tooltip } from '../lib/tooltip'
 
   /** Testo non fidato mostrato come testo (mai HTML); oltre 20 000 caratteri solo l'inizio, con "mostra tutto". */
   let { text, label = '' }: { text: string; label?: string } = $props()
@@ -10,7 +11,7 @@
 {#if label}<div class="lbl">{label}</div>{/if}
 <pre class="plain">{shown.text}</pre>
 {#if shown.truncated}
-  <button class="more" onclick={() => (all = true)}>mostra tutto ({text.length.toLocaleString('it-IT')} caratteri)</button>
+  <button class="more" use:tooltip={'Mostra l\'intero testo'} onclick={() => (all = true)}>mostra tutto ({text.length.toLocaleString('it-IT')} caratteri)</button>
 {/if}
 
 <style>

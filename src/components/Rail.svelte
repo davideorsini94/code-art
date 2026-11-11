@@ -1,22 +1,23 @@
 <script lang="ts">
   import type { ResizableCol } from '../lib/layout'
+  import { tooltip } from '../lib/tooltip'
 
   let { collapsed, ontoggle }: { collapsed: Set<string>; ontoggle: (col: ResizableCol) => void } = $props()
 
-  const items: { col: ResizableCol; icon: string; label: string }[] = [
-    { col: 'sidebar', icon: '◫', label: 'Progetto' },
-    { col: 'convlist', icon: '☰', label: 'Conversazioni' },
-    { col: 'conv', icon: '✎', label: 'Conversazione' },
+  const items: { col: ResizableCol; icon: string; label: string; what: string }[] = [
+    { col: 'sidebar', icon: '◫', label: 'Progetto', what: 'i file del progetto' },
+    { col: 'convlist', icon: '☰', label: 'Conversazioni', what: 'l\'elenco delle conversazioni' },
+    { col: 'conv', icon: '✎', label: 'Conversazione', what: 'la conversazione' },
   ]
 </script>
 
 <nav class="glass rail">
   {#each items as it (it.col)}
-    <button class:on={!collapsed.has(it.col)} title={it.label} aria-label={it.label} onclick={() => ontoggle(it.col)}>
+    <button class:on={!collapsed.has(it.col)} use:tooltip={`${collapsed.has(it.col) ? 'Mostra' : 'Nascondi'} ${it.what}`} aria-label={it.label} onclick={() => ontoggle(it.col)}>
       {it.icon}
     </button>
   {/each}
-  <button class="bottom" title="Impostazioni" aria-label="Impostazioni">⚙</button>
+  <button class="bottom" use:tooltip={'Impostazioni (in arrivo)'} aria-label="Impostazioni">⚙</button>
 </nav>
 
 <style>

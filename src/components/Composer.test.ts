@@ -76,7 +76,7 @@ describe('Composer', () => {
     await fireEvent.input(ta, { target: { value: 'altro' } })
     await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true })
     expect(ipc.convSend).not.toHaveBeenCalled()
-    expect((screen.getByTitle('Attendi la fine del turno per inviare') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Invia' }) as HTMLButtonElement).disabled).toBe(true)
     await fireEvent.click(screen.getByRole('button', { name: 'Interrompi' }))
     await fireEvent.keyDown(ta, { key: 'Escape' })
     expect(ipc.convInterrupt).toHaveBeenCalledTimes(2)
@@ -107,10 +107,10 @@ describe('Composer', () => {
 
   it('shows the context ring only when known', () => {
     render(Composer, { conv: base })
-    expect(screen.queryByTitle(/Contesto usato/)).toBeNull()
+    expect(screen.queryByRole('img', { name: /Contesto usato/ })).toBeNull()
     cleanup()
     render(Composer, { conv: { ...base, contextUsedPct: 42.4 } })
-    expect(screen.getByTitle('Contesto usato: 42%')).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Contesto usato: 42%' })).toBeTruthy()
   })
 
   it('restores the draft for the conversation', () => {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { tooltip } from '../lib/tooltip'
   import { claudeCheck } from '../lib/ipc'
 
   let { onresult }: { onresult?: (found: boolean) => void } = $props()
@@ -49,11 +50,11 @@
         <span class="label">{s.label}</span>
         <div class="cmd">
           <code>{s.cmd}</code>
-          <button onclick={() => copy(s.cmd)}>{copied === s.cmd ? 'Copiato' : 'Copia'}</button>
+          <button use:tooltip={'Copia il comando negli appunti'} onclick={() => copy(s.cmd)}>{copied === s.cmd ? 'Copiato' : 'Copia'}</button>
         </div>
       </div>
     {/each}
-    <button class="retry" disabled={checking} onclick={() => check()}>{checking ? 'Controllo…' : 'Riprova'}</button>
+    <button class="retry" use:tooltip={'Cerca di nuovo claude nel PATH'} disabled={checking} onclick={() => check()}>{checking ? 'Controllo…' : 'Riprova'}</button>
   </div>
 {/if}
 

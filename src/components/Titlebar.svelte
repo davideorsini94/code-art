@@ -5,6 +5,7 @@
   import { palette } from '../lib/palette/state.svelte'
   import { hooks } from '../lib/palette/search'
   import { onMount } from 'svelte'
+  import { tooltip } from '../lib/tooltip'
 
   let editing = $state(false)
   let draft = $state('')
@@ -47,19 +48,19 @@
       }}
     />
   {:else}
-    <div class="proj" ondblclick={startEdit} role="presentation" title="Doppio click per rinominare">
+    <div class="proj" ondblclick={startEdit} role="presentation" use:tooltip={'Rinomina progetto (doppio clic)'}>
       {projectStore.project?.name ?? 'Code Art'}
     </div>
   {/if}
   {#if projectStore.branch}
-    <div class="branch" data-tauri-drag-region>⎇ {projectStore.branch}</div>
+    <div class="branch" data-tauri-drag-region use:tooltip={`Ramo Git: ${projectStore.branch}`}>⎇ {projectStore.branch}</div>
   {/if}
   {#if conversations.active > 0}
     <div class="active" data-tauri-drag-region>{activeLabel(conversations.active)}</div>
   {/if}
-  <button class="pal" onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
+  <button class="pal" use:tooltip={{ text: 'Cerca file, conversazioni e comandi', shortcut: '⌘K' }} onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
   {#if conversations.waiting > 0}
-    <span class="chip"><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
+    <span class="chip" use:tooltip={'Conversazioni che aspettano una tua risposta'}><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
   {/if}
 </header>
 

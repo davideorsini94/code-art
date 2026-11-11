@@ -5,6 +5,7 @@
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
   import { projectStore } from '../lib/stores/project.svelte'
+  import { tooltip } from '../lib/tooltip'
 
   type XTerm = import('@xterm/xterm').Terminal
   type Fit = import('@xterm/addon-fit').FitAddon
@@ -212,13 +213,13 @@
 <div class="term-pane">
   <div class="tabs" role="tablist">
     {#each tabs as t (t.key)}
-      <div class="tab" class:on={t.key === active} class:dead={t.exited} role="tab" aria-selected={t.key === active} tabindex="0"
+      <div class="tab" class:on={t.key === active} class:dead={t.exited} role="tab" use:tooltip={t.exited ? `${t.title} (terminato)` : t.title} aria-selected={t.key === active} tabindex="0"
         onclick={() => select(t.key)} onkeydown={(e) => e.key === 'Enter' && select(t.key)}>
         <span>{t.title}</span>
-        <button class="x" aria-label="Chiudi {t.title}" onclick={(e) => { e.stopPropagation(); void close(t.key) }}>×</button>
+        <button class="x" aria-label="Chiudi {t.title}" use:tooltip={'Chiudi terminale'} onclick={(e) => { e.stopPropagation(); void close(t.key) }}>×</button>
       </div>
     {/each}
-    <button class="plus" aria-label="Nuovo terminale" title="Nuovo terminale" onclick={() => void newTab()}>+</button>
+    <button class="plus" aria-label="Nuovo terminale" use:tooltip={'Nuovo terminale'} onclick={() => void newTab()}>+</button>
   </div>
   <div class="host" bind:this={host}></div>
 </div>

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import type { Conversation } from '../lib/types'
   import { relativeTime } from '../lib/conv/time'
+  import { tooltip } from '../lib/tooltip'
 
   type Props = {
     conv: Conversation
@@ -19,6 +20,8 @@
 
   const LABEL = { waiting: 'aspetta te', working: 'al lavoro', idle: '' } as const
   const label = $derived(LABEL[conv.status])
+  const STATUS = { waiting: 'Aspetta una tua risposta', working: 'Claude sta lavorando', idle: 'Nessuna attività in corso' } as const
+  const statusTip = $derived(STATUS[conv.status])
 
   let draft = $state('')
   let finished = false
@@ -51,6 +54,7 @@
   class:on={active}
   role="button"
   tabindex="0"
+  use:tooltip={conv.title}
   aria-pressed={active}
   data-status={conv.status}
   onclick={() => onselect?.()}
@@ -63,7 +67,7 @@
   {oncontextmenu}
 >
   <div class="t">
-    <span class="dot {conv.status}" class:pulse={conv.status === 'working'} data-testid="dot"></span>
+    <span class="dot {conv.status}" class:pulse={conv.status === 'working'} data-testid="dot" use:tooltip={statusTip}></span>
     {#if renaming}
       <input
         class="rename"
@@ -80,24 +84,24 @@
         }}
       />
     {:else}
-      <span class="title" role="presentation" title={conv.title} ondblclick={(e) => { e.stopPropagation(); onstartrename?.() }}>{conv.title}</span>
+      <span class="title" role="presentation" data-no-tooltip="il tooltip della scheda (genitore) mostra già il titolo completo" ondblclick={(e) => { e.stopPropagation(); onstartrename?.() }}>{conv.title}</span>
     {/if}
     {#if conv.titleLocked}
-      <button class="lock" title="Titolo bloccato: clic per sbloccare" aria-label="Sblocca il titolo" onclick={(e) => { e.stopPropagation(); onunlock?.() }}>🔒</button>
+      <button class="lock" use:tooltip={'Titolo bloccato: clic per sbloccare'} aria-label="Sblocca il titolo" onclick={(e) => { e.stopPropagation(); onunlock?.() }}>🔒</button>
     {/if}
     {#if conv.maybeOpenElsewhere}
-      <span class="else" title="Forse aperta in un altro programma" aria-label="Forse aperta in un altro programma">⧉</span>
+      <span class="else" use:tooltip={'Forse aperta in un altro programma'} aria-label="Forse aperta in un altro programma">⧉</span>
     {/if}
   </div>
   {#if conv.prevTitle}
-    <div class="prev" title={conv.prevTitle}>era: {conv.prevTitle}</div>
+    <div class="prev" use:tooltip={`Titolo precedente: ${conv.prevTitle}`}>era: {conv.prevTitle}</div>
   {/if}
   {#if conv.summary}
-    <div class="s" class:one={!!conv.prevTitle}>{conv.summary}</div>
+    <div class="s" class:one={!!conv.prevTitle} use:tooltip={conv.summary}>{conv.summary}</div>
   {/if}
   <div class="m">
-    {#if label}<span class="badge {conv.status}">{label}</span>{:else}<span></span>{/if}
-    <span class="time">{relativeTime(conv.lastActivity, now)}</span>
+    {#if label}<span class="badge {conv.status}" use:tooltip={statusTip}>{label}</span>{:else}<span></span>{/if}
+    <span class="time" use:tooltip={conv.lastActivity ? new Date(conv.lastActivity).toLocaleString('it-IT') : ''}>{relativeTime(conv.lastActivity, now)}</span>
   </div>
 </div>
 

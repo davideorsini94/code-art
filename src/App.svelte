@@ -16,6 +16,7 @@
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
+  import { tooltip } from './lib/tooltip'
   import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
@@ -122,7 +123,7 @@
     <main class="welcome">
       <div class="glass welcome-box">
         <h1>Code Art</h1>
-        <button onclick={() => projectPickAndOpen()}>Apri cartella</button>
+        <button use:tooltip={{ text: 'Scegli una cartella da aprire come progetto', shortcut: '⌘O' }} onclick={() => projectPickAndOpen()}>Apri cartella</button>
       </div>
     </main>
   {:else}
@@ -140,7 +141,7 @@
           {/if}
         </section>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="handle" onpointerdown={(e) => startResize(e, col)}></div>
+        <div class="handle" use:tooltip={'Trascina per ridimensionare la colonna'} onpointerdown={(e) => startResize(e, col)}></div>
       {:else}
         <span></span><span></span>
       {/if}
@@ -148,7 +149,7 @@
     <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor">
       <div class="editor-area"><EditorPane /></div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="vhandle" class:hidden={!termVisible} onpointerdown={startTermResize}></div>
+      <div class="vhandle" class:hidden={!termVisible} use:tooltip={'Trascina per ridimensionare il terminale'} onpointerdown={startTermResize}></div>
       <div class="term-area" class:hidden={!termVisible} style:height="{termHeight}px"><TerminalPane visible={termVisible} /></div>
     </section>
   </main>

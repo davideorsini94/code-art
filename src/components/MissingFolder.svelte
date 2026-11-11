@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '../lib/tooltip'
   import { projectStore } from '../lib/stores/project.svelte'
 
   // il selettore lo apre il core: il percorso scelto non passa dalla WebView
@@ -11,7 +12,7 @@
       <h2>Cartella non trovata</h2>
       {#each projectStore.missing as folder (folder)}
         <p class="path">{folder}</p>
-        <button onclick={() => choose(folder)}>Scegli nuova posizione</button>
+        <button use:tooltip={`Indica dove si trova ora ${folder}`} onclick={() => choose(folder)}>Scegli nuova posizione</button>
       {/each}
     </div>
   </div>

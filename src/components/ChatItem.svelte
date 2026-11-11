@@ -6,6 +6,7 @@
   import { links } from '../lib/conv/links'
   import { diffAction, isSubagent, prettyJson, toolSummary } from '../lib/conv/tools'
   import { editor } from '../lib/stores/editor.svelte'
+  import { tooltip } from '../lib/tooltip'
   import type { Row } from '../lib/conv/reduce'
 
   let { row, sessionId }: { row: Row; sessionId: string } = $props()
@@ -31,12 +32,12 @@
   <div class="msg ai md" use:links>{@html renderMarkdown(item.text)}</div>
 {:else if item.kind === 'thinking'}
   <div class="think">
-    <button class="head" aria-expanded={open} onclick={() => (open = !open)}>{open ? '▾' : '▸'} Ragionamento</button>
+    <button class="head" use:tooltip={open ? 'Nascondi il ragionamento' : 'Mostra il ragionamento di Claude'} aria-expanded={open} onclick={() => (open = !open)}>{open ? '▾' : '▸'} Ragionamento</button>
     {#if open}{#if item.text}<PlainBlock text={item.text} />{:else}<span class="faint">Il testo del ragionamento non è disponibile.</span>{/if}{/if}
   </div>
 {:else if item.kind === 'tool' && isSubagent(item.name)}
   <div class="sub" class:err={item.ok === false}>
-    <button class="head" aria-expanded={open} onclick={() => (open = !open)}>
+    <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} i passi del subagent: ${toolSummary(item.name, item.input)}`} aria-expanded={open} onclick={() => (open = !open)}>
       <span class="caret">{open ? '▾' : '▸'}</span>
       <span class="name">Subagent</span>
       <span class="arg">{toolSummary(item.name, item.input)}</span>
@@ -54,13 +55,13 @@
 {:else if item.kind === 'tool'}
   <div class="tool" class:err={item.ok === false}>
     <div class="line">
-      <button class="head" aria-expanded={open} onclick={() => (open = !open)}>
+      <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} input e risultato: ${item.name} ${toolSummary(item.name, item.input)}`} aria-expanded={open} onclick={() => (open = !open)}>
         <span class="caret">{open ? '▾' : '▸'}</span>
         <span class="name">{item.name}</span>
         <span class="arg">{toolSummary(item.name, item.input)}</span>
         <span class="meta">{mark(item.ok)}</span>
       </button>
-      {#if action}<button class="diff" onclick={openDiff}>{action.type === 'diff' ? 'Apri diff' : 'Apri file'}</button>{/if}
+      {#if action}<button class="diff" use:tooltip={action.type === 'diff' ? 'Apri le modifiche nell\'editor (diff)' : 'Apri il file nell\'editor'} onclick={openDiff}>{action.type === 'diff' ? 'Apri diff' : 'Apri file'}</button>{/if}
     </div>
     {#if open}
       <div class="body">
@@ -73,7 +74,7 @@
   <AskBox {item} {sessionId} />
 {:else if item.kind === 'raw'}
   <div class="tool raw">
-    <button class="head" aria-expanded={open} onclick={() => (open = !open)}><span class="caret">{open ? '▾' : '▸'}</span><span class="name">{item.label}</span></button>
+    <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} ${item.label}`} aria-expanded={open} onclick={() => (open = !open)}><span class="caret">{open ? '▾' : '▸'}</span><span class="name">{item.label}</span></button>
     {#if open}<div class="body"><PlainBlock text={item.json} /></div>{/if}
   </div>
 {/if}

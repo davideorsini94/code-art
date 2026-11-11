@@ -3,6 +3,7 @@
   import { chat } from '../lib/stores/chat.svelte'
   import { renderMarkdown } from '../lib/safe-markdown'
   import { links } from '../lib/conv/links'
+  import { tooltip } from '../lib/tooltip'
 
   type Ask = Extract<ChatItem, { kind: 'ask' }>
   let { item, sessionId }: { item: Ask; sessionId: string } = $props()
@@ -40,21 +41,21 @@
   {#if !item.answered}
     <div class="btns">
       {#if item.askType === 'permission'}
-        <button class="btn p" disabled={busy} onclick={() => answer('allow')}>Consenti</button>
-        <button class="btn" disabled={busy} onclick={() => answer('deny')}>Nega</button>
+        <button class="btn p" use:tooltip={'Consenti a Claude di procedere'} disabled={busy} onclick={() => answer('allow')}>Consenti</button>
+        <button class="btn" use:tooltip={'Rifiuta: Claude non eseguirà l\'azione'} disabled={busy} onclick={() => answer('deny')}>Nega</button>
       {:else if item.askType === 'plan'}
-        <button class="btn p" disabled={busy} onclick={() => answer('approve')}>Approva piano</button>
-        <button class="btn" disabled={busy} onclick={() => answer('reject')}>Continua a pianificare</button>
+        <button class="btn p" use:tooltip={'Approva il piano: Claude lo esegue'} disabled={busy} onclick={() => answer('approve')}>Approva piano</button>
+        <button class="btn" use:tooltip={'Rifiuta il piano: Claude continua a pianificare'} disabled={busy} onclick={() => answer('reject')}>Continua a pianificare</button>
       {:else}
         {#each item.options as opt, i (i)}
-          <button class="btn" class:p={i === 0} disabled={busy} onclick={() => answer(opt)}>{opt}</button>
+          <button class="btn" class:p={i === 0} use:tooltip={`Rispondi: ${opt}`} disabled={busy} onclick={() => answer(opt)}>{opt}</button>
         {/each}
       {/if}
     </div>
     {#if item.askType === 'question'}
       <form class="free" onsubmit={(e) => { e.preventDefault(); void answer(free) }}>
         <input type="text" placeholder="Oppure scrivi una risposta…" bind:value={free} disabled={busy} aria-label="Risposta libera" />
-        <button class="btn" type="submit" disabled={busy || !free.trim()}>Invia</button>
+        <button class="btn" type="submit" use:tooltip={'Invia la risposta scritta'} disabled={busy || !free.trim()}>Invia</button>
       </form>
     {/if}
   {/if}

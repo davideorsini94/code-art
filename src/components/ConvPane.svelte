@@ -11,6 +11,7 @@
   import { WINDOW_THRESHOLD } from '../lib/conv/order'
   import { variableRange } from '../lib/conv/window'
   import { shouldStick } from '../lib/conv/stick'
+  import { tooltip } from '../lib/tooltip'
 
   /** Altezza stimata di una riga non ancora misurata. */
   const ESTIMATE = 72
@@ -121,6 +122,7 @@
     return { destroy: () => ro.disconnect() }
   }
 
+  const STATUS = { waiting: 'Aspetta una tua risposta', working: 'Claude sta lavorando', idle: 'Nessuna attività in corso' } as const
   const dotClass = $derived(conv ? { working: 'work', waiting: 'wait', idle: 'done' }[conv.status] : 'done')
 </script>
 
@@ -130,8 +132,8 @@
   {:else}
     <header>
       <div class="chatH">
-        <span class="dot {dotClass}"></span>
-        <span class="title">{conv.title}</span>
+        <span class="dot {dotClass}" use:tooltip={STATUS[conv.status]}></span>
+        <span class="title" use:tooltip={conv.title}>{conv.title}</span>
       </div>
       {#if conv.prevTitle}
         <div class="was">

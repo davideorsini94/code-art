@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { PATH_DRAG_TYPE } from '../lib/conv/paths'
+  import { PATH_DRAG_TYPE, relativeToFolders } from '../lib/conv/paths'
+  import { tooltip } from '../lib/tooltip'
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
@@ -156,6 +157,7 @@
       class:drop={dropTarget === e.path}
       style:padding-left="{8 + depth * 14}px"
       role="treeitem"
+      use:tooltip={isRoot ? e.path : relativeToFolders(e.path, folders)}
       aria-selected={editor.active === e.path}
       aria-expanded={e.isDir ? !!expanded[e.path] : undefined}
       tabindex="0"
@@ -212,11 +214,11 @@
 {#if menu}
   <div class="menu glass-strong" style:left="{menu.x}px" style:top="{menu.y}px" role="menu">
     {#if menu.entry.isDir}
-      <button role="menuitem" disabled={readOnly} onclick={() => startNew('file', menu!.entry.path)}>Nuovo file</button>
-      <button role="menuitem" disabled={readOnly} onclick={() => startNew('dir', menu!.entry.path)}>Nuova cartella</button>
+      <button role="menuitem" disabled={readOnly} use:tooltip={'Crea un nuovo file in questa cartella'} onclick={() => startNew('file', menu!.entry.path)}>Nuovo file</button>
+      <button role="menuitem" disabled={readOnly} use:tooltip={'Crea una nuova cartella qui dentro'} onclick={() => startNew('dir', menu!.entry.path)}>Nuova cartella</button>
     {/if}
-    <button role="menuitem" disabled={readOnly} onclick={() => startRename(menu!.entry)}>Rinomina</button>
-    <button role="menuitem" disabled={readOnly} onclick={() => void trash(menu!.entry)}>Sposta nel Cestino</button>
+    <button role="menuitem" disabled={readOnly} use:tooltip={'Cambia il nome'} onclick={() => startRename(menu!.entry)}>Rinomina</button>
+    <button role="menuitem" disabled={readOnly} use:tooltip={'Sposta nel Cestino (si può recuperare)'} onclick={() => void trash(menu!.entry)}>Sposta nel Cestino</button>
   </div>
 {/if}
 

@@ -70,10 +70,10 @@ describe('ConvCard', () => {
 
   it('icona "altrove" con suggerimento solo se maybeOpenElsewhere', () => {
     const { unmount } = render(ConvCard, { conv: base, now })
-    expect(screen.queryByTitle('Forse aperta in un altro programma')).toBeNull()
+    expect(screen.queryByLabelText('Forse aperta in un altro programma')).toBeNull()
     unmount()
     render(ConvCard, { conv: { ...base, maybeOpenElsewhere: true }, now })
-    expect(screen.getByTitle('Forse aperta in un altro programma')).toBeTruthy()
+    expect(screen.getByLabelText('Forse aperta in un altro programma')).toBeTruthy()
   })
 
   it('doppio click sul titolo avvia la rinomina; Invio conferma il testo nuovo', async () => {

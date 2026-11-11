@@ -1,12 +1,13 @@
 <script lang="ts">
+  import { tooltip } from '../lib/tooltip'
   import { projectStore } from '../lib/stores/project.svelte'
 </script>
 
 {#if projectStore.project && projectStore.untrusted.length > 0}
   <div class="trust" role="status">
-    <span>Cartella non fidata — sola lettura; Claude e terminale disattivati</span>
+    <span use:tooltip={'Una cartella non fidata si apre in sola lettura: niente salvataggi, Claude e terminale spenti'}>Cartella non fidata — sola lettura; Claude e terminale disattivati</span>
     <span aria-hidden="true">·</span>
-    <button onclick={() => void projectStore.acceptTrust(true)}>Mi fido</button>
+    <button use:tooltip={'Considera fidata questa cartella: abilita modifiche, Claude e terminale'} onclick={() => void projectStore.acceptTrust(true)}>Mi fido</button>
   </div>
 {/if}
 
