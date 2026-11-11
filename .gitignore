@@ -3,3 +3,14 @@ node_modules/
 target/
 dist/
 .DS_Store
+src-tauri/gen/
+# dati locali e segreti: mai nel repository pubblico
+.env
+.env.*
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+.claude/settings.local.json
+*.pem
+*.key

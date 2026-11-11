@@ -1,0 +1,57 @@
+:root {
+  --txt: #e9ecf5;
+  --dim: #9aa3b8;
+  --faint: #667089;
+  --glass: rgba(255, 255, 255, 0.055);
+  --glass2: rgba(255, 255, 255, 0.09);
+  --edge: rgba(255, 255, 255, 0.14);
+  --edge-soft: rgba(255, 255, 255, 0.07);
+  --work: #5ee0c1;
+  --wait: #ffb454;
+  --done: #7d8aa6;
+  --accent: #8fa8ff;
+  --err: #ff8f8f;
+  --surface-pop: rgba(24, 27, 38, 0.96); /* menu, tooltip */
+  --radius: 14px;
+  --dur: 200ms;
+}
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--edge-soft);
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 8px 24px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+}
+
+.glass-strong {
+  background: var(--glass2);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 8px 24px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(40px) saturate(170%);
+  -webkit-backdrop-filter: blur(40px) saturate(170%);
+}
+
+/* area codice e terminale: quasi opache per la leggibilità */
+.surface-opaque {
+  background: rgba(10, 12, 20, 0.88);
+  border: 1px solid var(--edge-soft);
+  border-radius: var(--radius);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

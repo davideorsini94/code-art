@@ -26,6 +26,7 @@
 - Prestazioni: finestra visibile entro 1 s a freddo; < 250 MB RAM con un progetto e nessun turno in corso; app < 40 MB; Monaco e xterm caricati con `import()` al primo uso.
 - Scorciatoie come VS Code: ⌘P apri file, ⌘⇧P comandi, ⌘K ricerca unica, ⌘S salva, ⌘↵ invia.
 - Testi dell'interfaccia in italiano.
+- **Sicurezza** (spec §11 bis): CSP restrittiva senza `unsafe-eval` né origini remote; nessun `{@html}` su dati non sanificati (markdown sempre sanificato con DOMPurify); i comandi `fs_*` accettano solo percorsi dentro le cartelle del progetto della finestra chiamante, dopo canonicalizzazione; processi esterni avviati con lista di argomenti, mai tramite shell con testo interpolato; link esterni aperti nel browser di sistema; nessun segreto, percorso personale o dato reale in codice, test, fixture o log.
 - Commit dopo ogni task, messaggi in stile `feat: …` / `test: …`.
 
 ## Review Focus
@@ -380,3 +381,20 @@ Fatti già verificati su `claude` 2.1.319: esistono `-p`, `--output-format strea
 - [ ] **Step 4:** Percorso manuale su un progetto reale, annotando l'esito: due progetti → due finestre con i nomi giusti in Mission Control; sessioni esistenti presenti con titoli generati; tre conversazioni in parallelo con stati corretti; titolo che cambia dopo un cambio di argomento e resta stabile altrimenti; skill, subagent, Playwright MCP, immagine incollata, cambio modello, modalità piano; modifica di Claude visibile come diff; conversazione proseguita da VS Code che si aggiorna nell'app.
 - [ ] **Step 5:** Per ogni obiettivo mancato, correggere prima di chiudere (candidati: caricamento pigro non rispettato, liste non virtualizzate).
 - [ ] **Step 6:** Commit `chore: pacchetto dmg e verifica della tappa 1`.
+
+### Task 16: Verifica di sicurezza (si esegue PRIMA del Task 15)
+
+**Files:**
+- Modify: `src-tauri/tauri.conf.json` (CSP), `src-tauri/capabilities/*.json`, `src-tauri/src/fs_tree.rs`, `src-tauri/src/projects.rs`, componenti che rendono markdown
+- Create: `src-tauri/src/trust.rs`, `src/lib/safe-markdown.ts`, `docs/sicurezza.md`
+- Test: in `trust.rs`; `src/lib/safe-markdown.test.ts`; `src-tauri/tests/security.rs`
+
+**Interfaces:**
+- Produces: `trust::is_trusted(store, folder) -> bool`, `trust::mark_trusted(store, folder)` (tabella `trusted_folders(path TEXT PK)`); comandi `trust_check(projectId) -> string[]` (cartelle non ancora fidate) e `trust_accept(projectId)`; `renderMarkdown(src: string): string` in `safe-markdown.ts` (marked + DOMPurify, nessun HTML grezzo, link con `rel="noopener"` intercettati e aperti nel browser di sistema).
+- Regole: `conv_start`/`conv_resume`/`conv_send` rifiutano con errore `untrusted_folder` finché le cartelle del progetto non sono fidate; alla prima apertura di una cartella mai vista la finestra mostra "Ti fidi di questa cartella? Claude potrà eseguire comandi al suo interno senza chiedere" con "Mi fido" / "Apri in sola consultazione". CSP: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'` (adattare solo se Monaco lo richiede, documentando perché).
+
+- [ ] **Step 1: Test che falliscono:** `renderMarkdown('<img src=x onerror=alert(1)>')` non contiene `onerror`; `renderMarkdown('<script>x</script>')` non contiene `<script`; `renderMarkdown('[a](javascript:alert(1))')` non contiene `javascript:`; `unknown_folder_is_untrusted_until_marked`; `conv_start_in_untrusted_folder_is_rejected`; in `security.rs`: `fs_write_outside_project_is_rejected` (percorso fuori cartella, con `..`, e tramite link simbolico che esce dal progetto → errore `{code:"forbidden"}`), `capabilities_grant_no_shell_or_fs_plugin` (legge i JSON e verifica l'assenza di permessi `shell:` e `fs:`), `csp_has_no_unsafe_eval_or_remote_origin` (legge `tauri.conf.json`).
+- [ ] **Step 2:** Run `pnpm vitest run src/lib/safe-markdown.test.ts` e `cargo test --manifest-path src-tauri/Cargo.toml security trust` → FAIL.
+- [ ] **Step 3:** Implementare; sostituire ogni resa di markdown o HTML nei componenti con `renderMarkdown`; `grep -rn "{@html" src` deve mostrare solo chiamate che passano da `renderMarkdown`.
+- [ ] **Step 4:** Run test → PASS. Run `cargo audit` (installarlo se manca) e `pnpm audit --prod`: nessuna vulnerabilità alta o critica aperta; annotare l'esito in `docs/sicurezza.md` insieme al modello di minaccia in dieci righe e all'elenco delle misure attive.
+- [ ] **Step 5:** Commit `feat: verifica di sicurezza, cartelle fidate, markdown sanificato, CSP`.

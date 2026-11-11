@@ -1,0 +1,2109 @@
+//! Motore delle conversazioni: un processo `claude` per conversazione, stream-json su stdin/stdout
+//! (docs/claude-protocol.md), stato salvato nello store ed eventi inoltrati alla finestra del progetto.
+use super::protocol::{parse_line, AskType, ClaudeEvent};
+use super::state::{next_status, ConvState, StateInput};
+use super::{sessions, ConvStatus, Conversation};
+use crate::store::{Project, Result, Store};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use crate::lock;
+use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Tetto per `Unknown.json` negli eventi (le righe utente riemesse possono contenere immagini base64).
+const UNKNOWN_JSON_CAP: usize = 4096;
+/// Coda di stderr conservata per l'evento "Processo terminato".
+const STDERR_TAIL: usize = 4096;
+pub(super) const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+const IMAGES_MAX_PER_MESSAGE: usize = 10;
+const IMAGES_MAX_TOTAL_BYTES: u64 = 30 * 1024 * 1024;
+/// `stop`: attesa dopo la richiesta di chiusura prima di uccidere il gruppo del processo.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// `stop`: attesa dopo l'uccisione del gruppo perché l'uscita sia gestita.
+const KILL_WAIT: Duration = Duration::from_secs(2);
+/// `ensure_running`: attesa massima perché un processo in chiusura sia del tutto terminato prima di sostituirlo.
+const REPLACE_WAIT: Duration = Duration::from_secs(5);
+/// Dopo l'uscita del processo, quanto aspettare ancora la fine dello stdout (un discendente può tenerlo aperto).
+const STDOUT_GRACE: Duration = Duration::from_millis(500);
+/// Dopo l'uscita di un nostro processo il file di sessione è stato scritto da noi: niente avviso "altrove".
+const OWN_WRITE_WINDOW: Duration = Duration::from_secs(60);
+pub const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"];
+const FALLBACK_PERMISSION_MODE: &str = "bypassPermissions";
+const DENY_MESSAGE: &str = "The user denied this action.";
+const PLAN_REJECT_MESSAGE: &str = "The user rejected the plan.";
+const EXIT_LABEL: &str = "Processo terminato";
+pub const INTERRUPTED_LABEL: &str = "Turno interrotto — Riprendi";
+
+/// Destinazione degli eventi (`conv:event`, `conv:upsert`, `conv:removed`); nei test un finto che li registra.
+/// I nomi qui sono quelli di base: l'id del progetto lo aggiunge `TauriSink` (`projects::project_event`).
+pub trait EventSink: Send + Sync + 'static {
+    fn emit(&self, project_id: &str, event: &str, payload: Value);
+}
+
+/// Eseguibile `claude` e ambiente con cui avviarlo.
+pub struct Launch {
+    pub claude: Option<PathBuf>,
+    pub env: HashMap<String, String>,
+}
+
+/// Calcolato una volta sola (la shell di login può impiegare qualche secondo).
+pub type LaunchCell = LazyLock<Launch, Box<dyn FnOnce() -> Launch + Send>>;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCheck {
+    pub found: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartOpts {
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+/// Cartella temporanea dell'app per le immagini incollate (unica fuori dal progetto accettata da `conv_send`).
+pub fn image_dir() -> PathBuf {
+    std::env::temp_dir().join("CodeArt/images")
+}
+
+/// Alias o id di modello: niente spazi, niente trattino iniziale (non deve sembrare un'opzione).
+pub fn valid_model(m: &str) -> bool {
+    let mut chars = m.chars();
+    m.len() <= 80
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '[' | ']'))
+}
+
+pub fn valid_permission_mode(m: &str) -> bool {
+    PERMISSION_MODES.contains(&m)
+}
+
+fn truncate_utf8(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+
+/// Processo vivo di una conversazione.
+struct Conv {
+    project_id: String,
+    /// pid = pgid (il processo parte in una sessione propria).
+    pid: u32,
+    stdin: Mutex<Option<ChildStdin>>,
+    rt: Mutex<Runtime>,
+    /// Segnala `finished` (insieme a `rt`).
+    ended: Condvar,
+}
+
+impl Conv {
+    /// Processo terminato o stdin chiuso: non più utilizzabile, `ensure_running` lo sostituisce.
+    /// Guarda solo `rt`, mai il mutex di stdin (che uno scrittore bloccato può tenere a lungo).
+    fn is_dead(&self) -> bool {
+        let rt = lock(&self.rt);
+        rt.closed || rt.reaped || rt.stopping
+    }
+}
+
+struct Runtime {
+    state: ConvState,
+    /// Richieste aperte: request id → evento `Ask` (serve `tool_name`/`input` per rispondere).
+    /// Il numero d'ordine di arrivo serve a restituirle dalla più vecchia (`pending_asks`).
+    pending: HashMap<String, (u64, ClaudeEvent)>,
+    ask_seq: u64,
+    next_req: u64,
+    /// Stdin dato per chiuso (scrittura fallita o uscita): il processo non accetta più messaggi.
+    closed: bool,
+    /// `stop` in corso: chi vuole riprendere la sessione aspetta che il processo sia del tutto terminato.
+    stopping: bool,
+    /// Il processo è uscito ed è stato raccolto (`wait`): il suo pid non va più usato.
+    reaped: bool,
+    /// Uscita gestita (stato salvato, eventi emessi): le righe stdout tardive vengono ignorate.
+    finished: bool,
+}
+
+
+impl Runtime {
+    fn request_id(&mut self) -> String {
+        self.next_req += 1;
+        format!("host_req_{}", self.next_req)
+    }
+}
+
+struct Inner {
+    launch: Arc<LaunchCell>,
+    store: Store,
+    sink: Arc<dyn EventSink>,
+    sessions_root: PathBuf,
+    image_dir: PathBuf,
+    convs: Mutex<HashMap<String, Arc<Conv>>>,
+    titles: OnceLock<super::titles::TitleQueue>,
+    /// Ultima uscita di un nostro processo per sessione (solo in memoria).
+    exits: Mutex<HashMap<String, Instant>>,
+    /// Sessioni con un turno rimasto a metà al riavvio dell'app; finché non si invia un nuovo messaggio la
+    /// conversazione mostra "Turno interrotto — Riprendi" (solo in memoria: dopo un'altra sessione dell'app il
+    /// turno non è più "appena interrotto").
+    interrupted: Mutex<HashSet<String>>,
+    /// Sessioni in eliminazione (dopo la conferma): `send`/`resume` le rifiutano, così nessun processo può
+    /// ricreare il file mentre lo si sposta nel Cestino.
+    deleting: Mutex<HashSet<String>>,
+}
+
+/// Segna una sessione "in eliminazione" finché vive; si toglie da sola a ogni uscita.
+struct Tombstone(Engine, String);
+
+impl Tombstone {
+    fn new(engine: &Engine, session_id: &str) -> Tombstone {
+        lock(&engine.0.deleting).insert(session_id.to_string());
+        Tombstone(engine.clone(), session_id.to_string())
+    }
+}
+
+impl Drop for Tombstone {
+    fn drop(&mut self) {
+        lock(&self.0 .0.deleting).remove(&self.1);
+    }
+}
+
+/// Stato condiviso dell'app (non della finestra): i processi sopravvivono alla chiusura della finestra.
+#[derive(Clone)]
+pub struct Engine(Arc<Inner>);
+
+impl Engine {
+    pub fn new(launch: Arc<LaunchCell>, store: Store, sink: Arc<dyn EventSink>, sessions_root: PathBuf, image_dir: PathBuf) -> Engine {
+        let interrupted = Self::recover(&store);
+        let inner = Arc::new(Inner {
+            launch,
+            store,
+            sink,
+            sessions_root,
+            image_dir,
+            convs: Mutex::new(HashMap::new()),
+            titles: OnceLock::new(),
+            exits: Mutex::new(HashMap::new()),
+            interrupted: Mutex::new(interrupted),
+            deleting: Mutex::new(HashSet::new()),
+        });
+        Engine(inner)
+    }
+
+    /// Avvio dell'app: nessun processo è vivo e nessun turno riparte da solo. Le conversazioni rimaste
+    /// `working` diventano `waiting`; restituisce i loro id (marcatore "Turno interrotto").
+    fn recover(store: &Store) -> HashSet<String> {
+        store.reset_working_conversations().unwrap_or_default().into_iter().collect()
+    }
+
+    /// Coda di titolazione (impostata una volta all'avvio dell'app): a fine turno decide se ritolare.
+    pub fn set_titles(&self, q: super::titles::TitleQueue) {
+        let _ = self.0.titles.set(q);
+    }
+
+    fn claude_path(&self) -> Option<PathBuf> {
+        let l = &**self.0.launch;
+        l.claude.clone().or_else(|| super::locate::find_claude(&l.env))
+    }
+
+    pub fn claude_check(&self) -> ClaudeCheck {
+        let path = self.claude_path();
+        let version = path.as_deref().and_then(|p| super::locate::claude_version(p, &self.0.launch.env));
+        ClaudeCheck { found: path.is_some(), version, path: path.map(|p| p.to_string_lossy().into_owned()) }
+    }
+
+    pub fn is_running(&self, session_id: &str) -> bool {
+        lock(&self.0.convs).contains_key(session_id)
+    }
+
+    /// Il file della sessione può essere stato scritto da noi: processo vivo, o uscito da meno di 60 s.
+    /// Serve a non mostrare "forse aperta altrove" per le nostre stesse scritture.
+    pub fn is_ours(&self, session_id: &str) -> bool {
+        self.is_running(session_id)
+            || lock(&self.0.exits).get(session_id).is_some_and(|t| t.elapsed() < OWN_WRITE_WINDOW)
+    }
+
+    /// Richieste ancora aperte della conversazione (eventi `Ask`, dalla più vecchia): servono a chi apre la
+    /// scheda dopo che la richiesta è già stata emessa.
+    pub fn pending_asks(&self, project_id: &str, session_id: &str) -> Result<Vec<ClaudeEvent>> {
+        self.owned_conv(project_id, session_id)?;
+        let Some(conv) = self.live(session_id) else { return Ok(self.interrupted_marker(session_id)) };
+        let rt = lock(&conv.rt);
+        let mut asks: Vec<&(u64, ClaudeEvent)> = rt.pending.values().collect();
+        asks.sort_by_key(|(seq, _)| *seq);
+        Ok(asks.into_iter().map(|(_, ev)| ev.clone()).collect())
+    }
+
+    /// La conversazione ha un processo vivo con almeno una richiesta aperta (permesso, domanda, piano).
+    pub fn has_open_ask(&self, session_id: &str) -> bool {
+        self.live(session_id).is_some_and(|c| !lock(&c.rt).pending.is_empty())
+    }
+
+    /// Elemento "Turno interrotto — Riprendi" per una conversazione il cui turno era a metà all'avvio.
+    fn interrupted_marker(&self, session_id: &str) -> Vec<ClaudeEvent> {
+        if lock(&self.0.interrupted).contains(session_id) {
+            vec![ClaudeEvent::Unknown { label: INTERRUPTED_LABEL.into(), json: String::new() }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Sessioni con un processo vivo, di tutti i progetti.
+    pub fn live_ids(&self) -> Vec<String> {
+        lock(&self.0.convs).keys().cloned().collect()
+    }
+
+    pub fn running(&self, project_id: &str) -> Vec<String> {
+        lock(&self.0.convs).iter().filter(|(_, c)| c.project_id == project_id).map(|(id, _)| id.clone()).collect()
+    }
+
+    fn project(&self, project_id: &str) -> Result<Project> {
+        self.0.store.get_project(project_id)?.ok_or_else(|| format!("progetto {project_id} inesistente"))
+    }
+
+    /// La conversazione esiste e appartiene al progetto della finestra chiamante.
+    fn owned_conv(&self, project_id: &str, session_id: &str) -> Result<Conversation> {
+        if !sessions::valid_session_id(session_id) {
+            return Err("sessione non valida".into());
+        }
+        match self.0.store.get_conversation(session_id)? {
+            Some(c) if c.project_id == project_id => Ok(c),
+            _ => Err("sessione non appartiene a questo progetto".into()),
+        }
+    }
+
+    fn live(&self, session_id: &str) -> Option<Arc<Conv>> {
+        lock(&self.0.convs).get(session_id).cloned()
+    }
+
+    fn default_mode(&self) -> String {
+        self.0
+            .store
+            .setting_get("default_permission_mode")
+            .ok()
+            .flatten()
+            .filter(|m| valid_permission_mode(m))
+            .unwrap_or_else(|| FALLBACK_PERMISSION_MODE.into())
+    }
+
+    // ---------- comandi ----------
+
+    pub fn start(&self, project_id: &str, opts: StartOpts) -> Result<String> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let project = self.project(project_id)?;
+        if let Some(m) = opts.model.as_deref().filter(|m| !valid_model(m)) {
+            return Err(format!("modello non valido: {m}"));
+        }
+        let mode = match opts.permission_mode {
+            Some(m) if valid_permission_mode(&m) => m,
+            Some(m) => return Err(format!("modalità permessi non valida: {m}")),
+            None => self.default_mode(),
+        };
+        let cwd = project.folders.first().ok_or("il progetto non ha cartelle")?;
+        self.claude_path().ok_or("claude non trovato")?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        self.0.store.insert_owned_conversation(project_id, &session_id, cwd, opts.model.as_deref(), &mode)?;
+        if let Err(e) = self.ensure_running(project_id, &session_id) {
+            // nessuna conversazione vuota lasciata indietro
+            let _ = self.0.store.delete_conversation(&session_id);
+            return Err(e);
+        }
+        Ok(session_id)
+    }
+
+    #[cfg(test)]
+    pub fn resume(&self, project_id: &str, session_id: &str) -> Result<()> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        self.owned_conv(project_id, session_id)?;
+        self.ensure_running(project_id, session_id).map(|_| ())
+    }
+
+    pub fn send(&self, project_id: &str, session_id: &str, text: &str, image_paths: &[String]) -> Result<()> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        self.owned_conv(project_id, session_id)?;
+        let project = self.project(project_id)?;
+        if image_paths.len() > IMAGES_MAX_PER_MESSAGE {
+            return Err(format!("al massimo {IMAGES_MAX_PER_MESSAGE} immagini per messaggio"));
+        }
+        let mut total = 0u64;
+        let mut images = Vec::new();
+        for p in image_paths {
+            let (img, size) = self.load_image(&project, p)?;
+            total += size;
+            if total > IMAGES_MAX_TOTAL_BYTES {
+                return Err(format!("immagini troppo grandi: al massimo {} MB per messaggio", IMAGES_MAX_TOTAL_BYTES / (1024 * 1024)));
+            }
+            images.push(img);
+        }
+        if text.trim().is_empty() && images.is_empty() {
+            return Err("messaggio vuoto".into());
+        }
+        let content = if images.is_empty() {
+            Value::String(text.to_string())
+        } else {
+            let mut blocks = vec![json!({"type": "text", "text": text})];
+            blocks.extend(images);
+            Value::Array(blocks)
+        };
+        let msg = json!({"type": "user", "session_id": "", "parent_tool_use_id": null,
+                         "message": {"role": "user", "content": content}});
+        let conv = self.ensure_running(project_id, session_id)?;
+        // lo stato passa a `working` prima della scrittura: un `result` velocissimo non deve arrivare prima
+        self.apply(session_id, Some(&conv), StateInput::UserSent, true);
+        if write_line(&conv, &msg).is_ok() {
+            lock(&self.0.interrupted).remove(session_id);
+            return Ok(());
+        }
+        // processo appena uscito ma non ancora ripulito: lo si dà per morto e si riprende la sessione
+        // (non se lo si sta fermando di proposito)
+        {
+            let mut rt = lock(&conv.rt);
+            if rt.stopping {
+                drop(rt);
+                // il messaggio non è partito: nessun `working` senza processo
+                self.apply(session_id, Some(&conv), StateInput::ProcessExited, false);
+                return Err("la conversazione è stata fermata".into());
+            }
+            rt.closed = true;
+        }
+        let conv = self.ensure_running(project_id, session_id)?;
+        self.apply(session_id, Some(&conv), StateInput::UserSent, true);
+        write_line(&conv, &msg)
+            .inspect_err(|_| self.apply(session_id, Some(&conv), StateInput::ProcessExited, false))
+            .map(|()| {
+                lock(&self.0.interrupted).remove(session_id);
+            })
+    }
+
+    pub fn answer(&self, project_id: &str, session_id: &str, request_id: &str, choice: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        let conv = self.live(session_id).ok_or("la conversazione non è attiva")?;
+        // la richiesta si chiude prima della scrittura (la CLI può proseguire subito), ma senza tenere il lock
+        // durante la scrittura: se fallisce torna aperta
+        let (ask, response) = {
+            let mut rt = lock(&conv.rt);
+            let (_, ask) = rt.pending.get(request_id).ok_or("richiesta non più aperta")?;
+            let response = answer_payload(ask, choice)?;
+            let (_, ask) = rt.pending.remove(request_id).ok_or("richiesta non più aperta")?;
+            rt.state = next_status(rt.state, StateInput::AskAnswered);
+            self.save(session_id, &rt.state, false);
+            (ask, response)
+        };
+        let written = write_line(
+            &conv,
+            &json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}),
+        );
+        if written.is_err() {
+            let mut rt = lock(&conv.rt);
+            if !rt.finished {
+                rt.state = next_status(rt.state, StateInput::Event(&ask));
+                rt.ask_seq += 1;
+                let seq = rt.ask_seq;
+                rt.pending.insert(request_id.to_string(), (seq, ask));
+                self.save(session_id, &rt.state, false);
+            }
+        }
+        self.emit_upsert(session_id);
+        written
+    }
+
+    /// Interrompe il turno. Le richieste aperte si chiudono subito (§7, §5.5): la CLI manderà
+    /// `control_cancel_request`, che a quel punto viene ignorato perché la richiesta non è più pendente.
+    pub fn interrupt(&self, project_id: &str, session_id: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        let Some(conv) = self.live(session_id) else { return Ok(()) };
+        let (req_id, cancelled) = {
+            let mut rt = lock(&conv.rt);
+            let ids: Vec<String> = rt.pending.drain().map(|(id, _)| id).collect();
+            let mut cancelled = Vec::new();
+            for id in ids {
+                let ev = ClaudeEvent::AskCancelled { request_id: id };
+                rt.state = next_status(rt.state, StateInput::Event(&ev));
+                cancelled.push(ev);
+            }
+            self.save(session_id, &rt.state, false);
+            (rt.request_id(), cancelled)
+        };
+        for ev in &cancelled {
+            self.emit_event(project_id, session_id, ev);
+        }
+        if !cancelled.is_empty() {
+            self.emit_upsert(session_id);
+        }
+        write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": {"subtype": "interrupt"}}))
+    }
+
+    pub fn set_model(&self, project_id: &str, session_id: &str, model: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        if !valid_model(model) {
+            return Err(format!("modello non valido: {model}"));
+        }
+        self.0.store.set_conversation_model(session_id, model)?;
+        self.emit_upsert(session_id);
+        self.control(session_id, json!({"subtype": "set_model", "model": model}))
+    }
+
+    pub fn set_permission_mode(&self, project_id: &str, session_id: &str, mode: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        if !valid_permission_mode(mode) {
+            return Err(format!("modalità permessi non valida: {mode}"));
+        }
+        self.0.store.set_conversation_permission_mode(session_id, mode)?;
+        self.emit_upsert(session_id);
+        self.control(session_id, json!({"subtype": "set_permission_mode", "mode": mode}))
+    }
+
+    pub fn mark_viewed(&self, project_id: &str, session_id: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        let conv = self.live(session_id);
+        self.apply(session_id, conv.as_ref(), StateInput::Viewed, false);
+        Ok(())
+    }
+
+    pub fn archive(&self, project_id: &str, session_id: &str, archived: bool) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        self.0.store.set_conversation_archived(session_id, archived)?;
+        self.emit_upsert(session_id);
+        if archived {
+            self.stop(session_id);
+        }
+        Ok(())
+    }
+
+    /// `conv_delete`: elimina la conversazione (richiesta del proprietario, eccezione voluta alla sola lettura di
+    /// `~/.claude`). Ordine: appartenenza, progetto fidato, individuazione dei file, conferma (`confirm`, il
+    /// dialogo nativo; riceve il titolo), poi processo fermato, titolazione tolta dalla coda, file nel Cestino
+    /// (`trasher`), riga dello store e cache dei metadati dimenticate, evento `conv:removed`.
+    /// Se il file non si può spostare non cambia nient'altro (a parte il processo, già fermato).
+    pub fn delete_conversation(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        cache: &sessions::MetaCache,
+        confirm: &dyn Fn(&str) -> bool,
+        trasher: &dyn super::delete::Trasher,
+    ) -> Result<super::delete::DeleteOutcome> {
+        use super::delete::{locate, retry_once, trash_files, DeleteOutcome, SIBLING_WARNING};
+        let conv = self.owned_conv(project_id, session_id)?;
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let project = self.project(project_id)?;
+        locate(&self.0.sessions_root, &project.folders, session_id)?; // rifiuta subito ciò che non si potrà spostare
+        if !confirm(&conv.title) {
+            return Ok(DeleteOutcome::Cancelled);
+        }
+        // Da qui nessun invio/ripresa: la conferma può aver aspettato a lungo, quindi tutto si ricontrolla.
+        let _tomb = Tombstone::new(self, session_id);
+        drop(lock(&self.0.convs)); // barriera: un avvio già sotto il lock ha ora il processo in mappa e lo fermiamo
+        self.owned_conv(project_id, session_id)?;
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let files = locate(&self.0.sessions_root, &project.folders, session_id)?;
+        self.stop(session_id);
+        if let Some(q) = self.0.titles.get() {
+            q.forget(session_id);
+        }
+        let mut sibling_ok = true;
+        if let Some(f) = &files {
+            let real = f.file.canonicalize().ok(); // il watcher usa il percorso canonico: da calcolare prima
+            sibling_ok = trash_files(trasher, f)?;
+            cache.forget(&f.file);
+            if let Some(real) = real {
+                cache.forget(&real);
+            }
+        }
+        if retry_once(|| self.0.store.delete_conversation(session_id)).is_err() {
+            // il file è già nel Cestino: la voce sparirà alla prossima sincronizzazione (`prune_vanished`)
+            lock(&self.0.exits).remove(session_id);
+            lock(&self.0.interrupted).remove(session_id);
+            return Err("La conversazione è nel Cestino, ma non si è potuta togliere dall'elenco: sparirà alla prossima sincronizzazione.".into());
+        }
+        lock(&self.0.exits).remove(session_id);
+        lock(&self.0.interrupted).remove(session_id);
+        self.0.sink.emit(project_id, "conv:removed", json!({"sessionId": session_id}));
+        Ok(if sibling_ok { DeleteOutcome::Deleted } else { DeleteOutcome::DeletedWithWarning { message: SIBLING_WARNING.into() } })
+    }
+
+    /// Messaggio di controllo a processo vivo (§8); senza processo il valore salvato vale alla ripresa.
+    fn control(&self, session_id: &str, request: Value) -> Result<()> {
+        let Some(conv) = self.live(session_id) else { return Ok(()) };
+        let req_id = lock(&conv.rt).request_id();
+        write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": request}))
+    }
+
+    /// Come `stop`, con il controllo del progetto (usato solo dai test).
+    #[cfg(test)]
+    pub fn stop_owned(&self, project_id: &str, session_id: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        self.stop(session_id);
+        Ok(())
+    }
+
+    /// Ferma il processo della conversazione: interrompe il turno se ce n'è uno, chiude stdin, aspetta fino a
+    /// 2 s e poi uccide il gruppo del processo. Lo stato diventa `waiting` se un turno è stato tagliato,
+    /// altrimenti non cambia. Senza processo non fa nulla.
+    ///
+    /// Sempre limitato nel tempo (`STOP_GRACE + KILL_WAIT`): interruzione e chiusura di stdin passano da un
+    /// thread a parte, perché il mutex di stdin può essere tenuto da uno scrittore bloccato su una pipe piena
+    /// (processo che non legge più). Ucciso il gruppo, quello scrittore riceve EPIPE e si sblocca.
+    pub fn stop(&self, session_id: &str) {
+        let Some(conv) = self.live(session_id) else { return };
+        let working = {
+            let mut rt = lock(&conv.rt);
+            rt.stopping = true;
+            rt.state.status == ConvStatus::Working
+        };
+        {
+            let conv = conv.clone();
+            std::thread::spawn(move || {
+                if working {
+                    let req_id = lock(&conv.rt).request_id();
+                    let _ = write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": {"subtype": "interrupt"}}));
+                }
+                *lock(&conv.stdin) = None;
+                lock(&conv.rt).closed = true;
+            });
+        }
+        if !wait_finished(&conv, STOP_GRACE) {
+            {
+                let rt = lock(&conv.rt);
+                if !rt.reaped {
+                    super::locate::kill_group(conv.pid);
+                }
+            }
+            wait_finished(&conv, KILL_WAIT);
+        }
+    }
+
+    /// Ferma tutti i processi in parallelo (all'uscita dell'app): limitato come un singolo `stop`.
+    pub fn stop_all(&self) {
+        let ids: Vec<String> = lock(&self.0.convs).keys().cloned().collect();
+        std::thread::scope(|s| {
+            for id in &ids {
+                s.spawn(move || self.stop(id));
+            }
+        });
+    }
+
+    // ---------- stato ----------
+
+    fn load_state(&self, session_id: &str) -> ConvState {
+        match self.0.store.conversation_state(session_id).ok().flatten() {
+            // `seen_turn` mai oltre `turn_count`: altrimenti i turni successivi finirebbero `idle` invece di `waiting`
+            Some((status, turns, seen)) => ConvState {
+                status: ConvStatus::parse(&status),
+                open_asks: 0,
+                turn_count: turns.max(0) as u32,
+                seen_turn: seen.unwrap_or(turns).clamp(0, turns.max(0)) as u32,
+            },
+            None => ConvState::default(),
+        }
+    }
+
+    fn save(&self, session_id: &str, s: &ConvState, touch: bool) {
+        let _ = self.0.store.save_conversation_state(session_id, s.status.as_str(), s.turn_count.into(), s.seen_turn.into(), touch);
+    }
+
+    /// Applica un ingresso alla macchina degli stati (in memoria se il processo è vivo, altrimenti dallo store).
+    /// Un processo la cui uscita è già stata gestita (`finished`) non conta come vivo: il suo stato in memoria è
+    /// vecchio, e scriverlo salverebbe uno stato senza processo.
+    fn apply(&self, session_id: &str, conv: Option<&Arc<Conv>>, input: StateInput, touch: bool) {
+        let live = conv.map(|c| lock(&c.rt)).filter(|rt| !rt.finished);
+        let (before, after) = match live {
+            Some(mut rt) => {
+                let before = rt.state;
+                rt.state = next_status(before, input);
+                self.save(session_id, &rt.state, touch);
+                (before, rt.state)
+            }
+            None => {
+                let before = self.load_state(session_id);
+                let after = next_status(before, input);
+                self.save(session_id, &after, touch);
+                (before, after)
+            }
+        };
+        if before != after || touch {
+            if let Ok(Some(c)) = self.0.store.get_conversation(session_id) {
+                self.emit_conversation(c);
+            }
+        }
+    }
+
+    // ---------- eventi ----------
+
+    fn emit_event(&self, project_id: &str, session_id: &str, ev: &ClaudeEvent) {
+        let event = serde_json::to_value(ev).unwrap_or(Value::Null);
+        self.0.sink.emit(project_id, "conv:event", json!({"sessionId": session_id, "event": event}));
+    }
+
+    fn emit_conversation(&self, mut c: Conversation) {
+        // le conversazioni emesse dal motore sono pilotate da noi
+        c.maybe_open_elsewhere = false;
+        let project_id = c.project_id.clone();
+        if let Ok(v) = serde_json::to_value(&c) {
+            self.0.sink.emit(&project_id, "conv:upsert", v);
+        }
+    }
+
+    /// `conv:upsert` di una conversazione letta dal disco (watcher delle sessioni): passa dallo stesso sink del
+    /// motore (Dock e notifiche), ma non per le sessioni con un processo vivo, di cui lo stato lo emette il motore.
+    pub fn emit_synced(&self, c: &Conversation) {
+        if self.is_running(&c.session_id) {
+            return;
+        }
+        if let Ok(v) = serde_json::to_value(c) {
+            self.0.sink.emit(&c.project_id, "conv:upsert", v);
+        }
+    }
+
+    fn emit_upsert(&self, session_id: &str) {
+        if let Ok(Some(c)) = self.0.store.get_conversation(session_id) {
+            self.emit_conversation(c);
+        }
+    }
+
+    // ---------- processi ----------
+
+    fn session_file_exists(&self, cwd: &str, session_id: &str) -> bool {
+        sessions::session_dirs_for(&self.0.sessions_root, &[cwd.to_string()])
+            .iter()
+            .any(|d| d.join(format!("{session_id}.jsonl")).is_file())
+    }
+
+    /// Avvia il processo della conversazione se non è già vivo (il controllo e l'avvio avvengono sotto lo
+    /// stesso lock: due invii simultanei non avviano due processi).
+    fn ensure_running(&self, project_id: &str, session_id: &str) -> Result<Arc<Conv>> {
+        // prima del lock: la prima risoluzione aspetta l'ambiente della shell di login
+        let claude = self.claude_path();
+        self.owned_conv(project_id, session_id)?;
+        let deadline = Instant::now() + REPLACE_WAIT;
+        let mut convs = loop {
+            let convs = lock(&self.0.convs);
+            // sotto il lock dei processi: chi supera questo controllo ha il processo in mappa prima che
+            // `delete_conversation` lo fermi (vedi la barriera lì)
+            if lock(&self.0.deleting).contains(session_id) {
+                return Err("la conversazione si sta eliminando".into());
+            }
+            let Some(c) = convs.get(session_id).cloned() else { break convs };
+            if !c.is_dead() {
+                return Ok(c);
+            }
+            // processo in chiusura (fermato, uscito o con stdin rotto): prima di avviarne un altro sulla stessa
+            // sessione si aspetta che sia del tutto terminato (la sua pulizia lo toglie dalla mappa)
+            drop(convs);
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !wait_finished(&c, left) {
+                return Err("la conversazione si sta ancora chiudendo, riprova tra poco".into());
+            }
+            let mut convs = lock(&self.0.convs);
+            if convs.get(session_id).is_some_and(|x| Arc::ptr_eq(x, &c)) {
+                convs.remove(session_id); // terminato ma non più "corrente" per la sua pulizia: non serve oltre
+            }
+        };
+        let claude = claude.ok_or("claude non trovato")?;
+        // difesa in profondità: ogni avvio di `claude` passa da qui
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let project = self.project(project_id)?;
+        self.0.store.mark_conversation_owned(session_id)?;
+        let row = self.owned_conv(project_id, session_id)?;
+        if !Path::new(&row.cwd).is_dir() {
+            return Err(format!("cartella della conversazione non trovata: {}", row.cwd));
+        }
+        let mode = if valid_permission_mode(&row.permission_mode) { row.permission_mode.clone() } else { self.default_mode() };
+        let mut args: Vec<String> = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--permission-prompts",
+            "host",
+            "--permission-prompt-tool",
+            "stdio",
+            "--permission-mode",
+        ]
+        .map(String::from)
+        .into();
+        args.push(mode);
+        if let Some(m) = row.model.as_deref().filter(|m| valid_model(m)) {
+            args.extend(["--model".into(), m.to_string()]);
+        }
+        // una sessione mai usata non ha ancora il file: `--resume` fallirebbe
+        let flag = if self.session_file_exists(&row.cwd, session_id) { "--resume" } else { "--session-id" };
+        args.extend([flag.to_string(), session_id.to_string()]);
+        for f in project.folders.iter().filter(|f| **f != row.cwd) {
+            args.extend(["--add-dir".into(), f.clone()]);
+        }
+        let mut cmd = Command::new(&claude);
+        // sessione propria: `stop` può uccidere anche i discendenti (server MCP, strumenti)
+        super::locate::in_new_session(&mut cmd);
+        let mut child = cmd
+            .args(&args)
+            .current_dir(&row.cwd)
+            .env_clear()
+            .envs(&self.0.launch.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("avvio di claude fallito: {e}"))?;
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let conv = Arc::new(Conv {
+            project_id: project_id.to_string(),
+            pid: child.id(),
+            stdin: Mutex::new(child.stdin.take()),
+            rt: Mutex::new(Runtime {
+                state: self.load_state(session_id),
+                pending: HashMap::new(),
+                ask_seq: 0,
+                next_req: 0,
+                closed: false,
+                stopping: false,
+                reaped: false,
+                finished: false,
+            }),
+            ended: Condvar::new(),
+        });
+        convs.insert(session_id.to_string(), conv.clone());
+        drop(convs);
+
+        // tre thread: stderr in un buffer circolare, stdout riga per riga, attesa dell'uscita del processo.
+        // Nessuno aspetta la chiusura di una pipe per gestire l'uscita (un discendente può tenerla aperta).
+        let tail = Arc::new(Mutex::new(Vec::new()));
+        {
+            let tail = tail.clone();
+            std::thread::spawn(move || collect_tail(stderr, &tail));
+        }
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (engine, c, sid) = (self.clone(), conv.clone(), session_id.to_string());
+        std::thread::spawn(move || {
+            engine.read_stdout(&sid, &c, stdout);
+            let _ = done_tx.send(());
+        });
+        let (engine, c, sid) = (self.clone(), conv.clone(), session_id.to_string());
+        std::thread::spawn(move || engine.wait_exit(&sid, &c, child, &done_rx, &tail));
+
+        // handshake facoltativo (§2.1): comandi slash e modelli arrivano subito come `ControlResponse`
+        let req_id = lock(&conv.rt).request_id();
+        let _ = write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": {"subtype": "initialize", "hooks": null}}));
+        self.emit_upsert(session_id);
+        Ok(conv)
+    }
+
+    fn read_stdout(&self, session_id: &str, conv: &Arc<Conv>, stdout: Option<std::process::ChildStdout>) {
+        let Some(out) = stdout else { return };
+        let mut reader = BufReader::new(out);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if lock(&conv.rt).finished => break,
+                Ok(_) => self.handle_line(session_id, conv, &String::from_utf8_lossy(&buf)),
+            }
+        }
+    }
+
+    /// Aspetta l'uscita del processo (non la chiusura delle sue pipe), poi salva lo stato ed emette gli eventi.
+    fn wait_exit(&self, session_id: &str, conv: &Arc<Conv>, mut child: Child, stdout_done: &mpsc::Receiver<()>, tail: &Mutex<Vec<u8>>) {
+        // attesa senza raccogliere il processo: finché è zombie il suo pgid non può essere riusato e si può
+        // uccidere il gruppo (discendenti rimasti orfani: server MCP, strumenti in background)
+        wait_exit_no_reap(conv.pid);
+        super::locate::kill_group(conv.pid);
+        // raccolta e `reaped` sotto lo stesso lock: `stop` non può uccidere un pid già raccolto
+        let success = {
+            let mut rt = lock(&conv.rt);
+            let ok = child.wait().is_ok_and(|s| s.success()); // immediato: il processo è già zombie
+            rt.reaped = true;
+            rt.closed = true;
+            ok
+        };
+        // chiusura di stdin senza aspettare uno scrittore bloccato (riceverà EPIPE)
+        if let Ok(mut stdin) = conv.stdin.try_lock() {
+            *stdin = None;
+        }
+        // le ultime righe già scritte arrivano ancora; poi si va avanti anche se la pipe resta aperta
+        let _ = stdout_done.recv_timeout(STDOUT_GRACE);
+        // stato salvato sotto il lock della mappa: una ripresa concorrente lo rilegge aggiornato, e una
+        // conversazione già sostituita da un nuovo processo non viene toccata
+        let current = {
+            let mut convs = lock(&self.0.convs);
+            let current = convs.get(session_id).is_some_and(|c| Arc::ptr_eq(c, conv));
+            let mut rt = lock(&conv.rt);
+            rt.finished = true;
+            rt.pending.clear();
+            if current {
+                rt.state = next_status(rt.state, StateInput::ProcessExited);
+                self.save(session_id, &rt.state, false);
+                convs.remove(session_id);
+            }
+            conv.ended.notify_all();
+            current
+        };
+        lock(&self.0.exits).insert(session_id.to_string(), Instant::now());
+        if !success {
+            let mut json = String::from_utf8_lossy(&lock(tail)).into_owned();
+            truncate_utf8(&mut json, UNKNOWN_JSON_CAP);
+            self.emit_event(&conv.project_id, session_id, &ClaudeEvent::Unknown { label: EXIT_LABEL.into(), json });
+        }
+        if current {
+            self.emit_upsert(session_id);
+        }
+    }
+
+    fn handle_line(&self, session_id: &str, conv: &Arc<Conv>, line: &str) {
+        for mut ev in parse_line(line) {
+            if let ClaudeEvent::Unknown { label, json } = &mut ev {
+                // richiesta della CLI che l'host non gestisce (solo `can_use_tool` lo è): risposta d'errore, così il
+                // turno non resta ad aspettare (docs/claude-protocol.md §5)
+                if label.starts_with("control_request/") {
+                    if let Some(id) = serde_json::from_str::<Value>(json).ok().and_then(|v| v["request_id"].as_str().map(String::from)) {
+                        let _ = write_line(conv, &unsupported_response(&id));
+                    }
+                }
+                truncate_utf8(json, UNKNOWN_JSON_CAP);
+            }
+            let mut changed = false;
+            let forward = {
+                let mut rt = lock(&conv.rt);
+                // dentro la sezione critica: una riga tardiva non sovrascrive lo stato salvato all'uscita
+                if rt.finished {
+                    return;
+                }
+                changed |= self.persist_metadata(session_id, &ev);
+                let forward = match &ev {
+                    ClaudeEvent::Ask { request_id, .. } => {
+                        rt.ask_seq += 1;
+                        let seq = rt.ask_seq;
+                        rt.pending.insert(request_id.clone(), (seq, ev.clone()));
+                        true
+                    }
+                    // annullamento di una richiesta già chiusa da noi (risposta o interruzione): ignorato
+                    ClaudeEvent::AskCancelled { request_id } => rt.pending.remove(request_id).is_some(),
+                    ClaudeEvent::TurnEnd { .. } => {
+                        if rt.state.status == ConvStatus::Working {
+                            rt.pending.clear(); // la macchina degli stati azzera `open_asks`
+                        }
+                        true
+                    }
+                    _ => true,
+                };
+                if forward {
+                    let before = rt.state;
+                    rt.state = next_status(before, StateInput::Event(&ev));
+                    let turn_end = matches!(ev, ClaudeEvent::TurnEnd { .. });
+                    if rt.state != before || turn_end {
+                        self.save(session_id, &rt.state, turn_end);
+                        changed = true;
+                    }
+                }
+                forward
+            };
+            if forward {
+                self.emit_event(&conv.project_id, session_id, &ev);
+            }
+            if changed {
+                self.emit_upsert(session_id);
+            }
+            if matches!(ev, ClaudeEvent::TurnEnd { .. }) {
+                self.0.titles.get().inspect(|q| q.enqueue_if_due(session_id));
+            }
+        }
+    }
+
+    /// Metadati della conversazione portati dagli eventi: modello e modalità (`Init`, `system/status`),
+    /// contesto usato (`TurnEnd`). Restituisce true se qualcosa è stato salvato.
+    fn persist_metadata(&self, session_id: &str, ev: &ClaudeEvent) -> bool {
+        let store = &self.0.store;
+        match ev {
+            ClaudeEvent::Init { model, permission_mode, .. } => {
+                let mut saved = false;
+                if valid_model(model) {
+                    saved |= store.set_conversation_model(session_id, model).is_ok();
+                }
+                if valid_permission_mode(permission_mode) {
+                    saved |= store.set_conversation_permission_mode(session_id, permission_mode).is_ok();
+                }
+                saved
+            }
+            ClaudeEvent::TurnEnd { context_used_pct: Some(p), .. } => store.set_conversation_context(session_id, f64::from(*p)).is_ok(),
+            ClaudeEvent::Unknown { label, json } if label == "system/status" => {
+                let mode = serde_json::from_str::<Value>(json).ok().and_then(|v| v["permissionMode"].as_str().map(String::from));
+                mode.filter(|m| valid_permission_mode(m))
+                    .is_some_and(|m| store.set_conversation_permission_mode(session_id, &m).is_ok())
+            }
+            _ => false,
+        }
+    }
+
+    /// Immagine da allegare: file esistente dentro la cartella immagini dell'app o dentro il progetto.
+    fn load_image(&self, project: &Project, path: &str) -> Result<(Value, u64)> {
+        let real = Path::new(path).canonicalize().map_err(|_| format!("immagine non trovata: {path}"))?;
+        let roots = std::iter::once(self.0.image_dir.clone()).chain(project.folders.iter().map(PathBuf::from));
+        let allowed = roots.filter_map(|r| r.canonicalize().ok()).any(|r| real.starts_with(&r));
+        if !allowed {
+            return Err(format!("immagine fuori dalle cartelle consentite: {path}"));
+        }
+        let ext = real.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let media_type = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return Err(format!("formato immagine non supportato: {path}")),
+        };
+        let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.len() > IMAGE_MAX_BYTES {
+            return Err(format!("immagine non valida o troppo grande: {path}"));
+        }
+        let bytes = std::fs::read(&real).map_err(|e| e.to_string())?;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok((json!({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}), meta.len()))
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    /// Chiude lo stdin di tutti i processi (che quindi terminano).
+    fn close_all(&self) {
+        for c in lock(&self.0.convs).values() {
+            *lock(&c.stdin) = None;
+        }
+    }
+}
+
+/// Risposta a una richiesta `can_use_tool` (§5.2–5.4).
+fn answer_payload(ask: &ClaudeEvent, choice: &str) -> Result<Value> {
+    let ClaudeEvent::Ask { ask_type, input, .. } = ask else { return Err("richiesta non valida".into()) };
+    let allow = |input: Value| json!({"behavior": "allow", "updatedInput": input});
+    let deny = |message: &str| json!({"behavior": "deny", "message": message});
+    match (ask_type, choice) {
+        (AskType::Permission, "allow") | (AskType::Plan, "approve") => Ok(allow(input.clone())),
+        (AskType::Permission, "deny") => Ok(deny(DENY_MESSAGE)),
+        (AskType::Plan, "reject") => Ok(deny(PLAN_REJECT_MESSAGE)),
+        (AskType::Question, c) if !c.trim().is_empty() => {
+            let mut updated = input.clone();
+            let answers = question_answers(input, c)?;
+            updated.as_object_mut().ok_or("input della domanda non valido")?.insert("answers".into(), answers);
+            Ok(allow(updated))
+        }
+        _ => Err(format!("risposta non valida: {choice}")),
+    }
+}
+
+/// `answers` di `AskUserQuestion` (§5.3: testo della domanda → risposta). `choice` è il testo della risposta
+/// (una sola domanda) oppure un oggetto JSON `{ "<domanda>": "<risposta>" | ["a", "b"] }` con una risposta per
+/// ogni domanda; le scelte multiple si uniscono con ", " (forma della documentazione dell'SDK). Testo libero
+/// ("Altro") accettato com'è.
+fn question_answers(input: &Value, choice: &str) -> Result<Value> {
+    let questions: Vec<&str> = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|q| q.get("question").and_then(Value::as_str)).collect())
+        .unwrap_or_default();
+    if questions.is_empty() {
+        return Err("domanda senza testo".into());
+    }
+    let map = match serde_json::from_str::<Value>(choice) {
+        Ok(Value::Object(m)) => m,
+        _ if questions.len() == 1 => return Ok(json!({ questions[0]: choice })),
+        _ => return Err("servono le risposte a tutte le domande".into()),
+    };
+    if map.keys().any(|k| !questions.contains(&k.as_str())) {
+        return Err("risposta a una domanda sconosciuta".into());
+    }
+    let mut out = serde_json::Map::new();
+    for q in questions {
+        let text = match map.get(q) {
+            Some(Value::String(t)) => t.trim().to_string(),
+            Some(Value::Array(a)) => {
+                let parts: Option<Vec<&str>> = a.iter().map(Value::as_str).collect();
+                parts.ok_or("risposta non valida")?.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(", ")
+            }
+            _ => String::new(),
+        };
+        if text.is_empty() {
+            return Err(format!("manca la risposta a: {q}"));
+        }
+        out.insert(q.to_string(), Value::String(text));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Risposta a una `control_request` della CLI che l'host non sa gestire.
+fn unsupported_response(request_id: &str) -> Value {
+    json!({"type": "control_response", "response": {"subtype": "error", "request_id": request_id, "error": "unsupported"}})
+}
+
+fn write_line(conv: &Conv, v: &Value) -> Result<()> {
+    let mut line = serde_json::to_string(v).map_err(|e| e.to_string())?;
+    line.push('\n');
+    let mut stdin = lock(&conv.stdin);
+    let pipe = stdin.as_mut().ok_or("il processo della conversazione non è attivo")?;
+    // (il mutex resta tenuto per tutta la scrittura: le righe non si mescolano; `stop` non ne dipende)
+    pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).map_err(|e| format!("scrittura verso claude fallita: {e}"))?;
+    Ok(())
+}
+
+/// Aspetta che l'uscita del processo sia stata gestita, al massimo `timeout`.
+fn wait_finished(conv: &Conv, timeout: Duration) -> bool {
+    let rt = lock(&conv.rt);
+    let (rt, _) = conv.ended.wait_timeout_while(rt, timeout, |r| !r.finished).unwrap_or_else(|p| p.into_inner());
+    rt.finished
+}
+
+/// Blocca finché il processo `pid` (nostro figlio) esce, lasciandolo zombie (`WNOWAIT`).
+fn wait_exit_no_reap(pid: u32) {
+    let id: libc::id_t = pid;
+    loop {
+        // SAFETY: `info` è una struttura valida in cui il kernel scrive; `WNOWAIT` non raccoglie il figlio.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if r == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
+/// Tiene gli ultimi `STDERR_TAIL` byte di stderr in un buffer condiviso (letto all'uscita senza aspettare la
+/// chiusura della pipe).
+fn collect_tail(stderr: Option<std::process::ChildStderr>, tail: &Mutex<Vec<u8>>) {
+    let Some(mut err) = stderr else { return };
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = err.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        let mut t = lock(tail);
+        t.extend_from_slice(&buf[..n]);
+        if t.len() > STDERR_TAIL {
+            let excess = t.len() - STDERR_TAIL;
+            t.drain(..excess);
+        }
+    }
+}
+
+// ---------- integrazione con Tauri ----------
+
+use tauri::AppHandle;
+
+/// Emette verso la finestra del progetto, con l'id del progetto nel nome dell'evento
+/// (`projects::project_event`); se la finestra è chiusa l'evento si perde (lo stato resta salvato).
+pub struct TauriSink(pub AppHandle);
+
+impl EventSink for TauriSink {
+    fn emit(&self, project_id: &str, event: &str, payload: Value) {
+        crate::projects::emit_to_project(&self.0, project_id, event, payload);
+    }
+}
+
+/// Ambiente di lancio dell'app: shell di login, calcolata in sottofondo all'avvio.
+pub fn app_launch() -> Arc<LaunchCell> {
+    let cell: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(|| {
+        let env = super::locate::login_env();
+        Launch { claude: super::locate::find_claude(&env), env }
+    })));
+    let warm = cell.clone();
+    std::thread::spawn(move || {
+        LazyLock::force(&warm);
+    });
+    cell
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Project;
+    use serde_json::json;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Capture(Mutex<Vec<(String, String, Value)>>);
+    impl EventSink for Capture {
+        fn emit(&self, project_id: &str, event: &str, payload: Value) {
+            self.0.lock().unwrap().push((project_id.into(), event.into(), payload));
+        }
+    }
+    impl Capture {
+        fn events(&self, session_id: &str) -> Vec<Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, e, p)| e == "conv:event" && p["sessionId"] == session_id)
+                .map(|(_, _, p)| p["event"].clone())
+                .collect()
+        }
+        fn has_kind(&self, session_id: &str, kind: &str) -> bool {
+            self.events(session_id).iter().any(|e| e["kind"] == kind)
+        }
+    }
+
+    struct Env {
+        _dir: tempfile::TempDir,
+        out: PathBuf,
+        folders: Vec<PathBuf>,
+        sessions_root: PathBuf,
+        images: PathBuf,
+        store: Store,
+        sink: Arc<Capture>,
+        engine: Engine,
+    }
+
+    /// I finti terminano a fine test: su macOS una pipe può finire ereditata da un processo avviato in
+    /// parallelo da un altro test, e resterebbe aperta finché quel processo vive.
+    impl Drop for Env {
+        fn drop(&mut self) {
+            self.engine.close_all();
+        }
+    }
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/stream/{name}.jsonl", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn setup(vars: &[(&str, &str)]) -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (out, sessions_root, images) = (root.join("out"), root.join("sessions"), root.join("images"));
+        let folders = vec![root.join("principale"), root.join("seconda")];
+        for d in [&out, &sessions_root, &images, &folders[0], &folders[1]] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let store = Store::open(&root.join("t.db")).unwrap();
+        store
+            .upsert_project(&Project {
+                id: "p1".into(),
+                name: "proj".into(),
+                folders: folders.iter().map(|f| f.to_string_lossy().into_owned()).collect(),
+            })
+            .unwrap();
+        store
+            .upsert_project(&Project { id: "p2".into(), name: "altro".into(), folders: vec![folders[1].to_string_lossy().into_owned()] })
+            .unwrap();
+        for f in &folders {
+            crate::trust::mark_trusted(&store, &f.to_string_lossy()).unwrap();
+        }
+        let mut env: HashMap<String, String> =
+            [("PATH".to_string(), "/usr/bin:/bin".to_string()), ("FAKE_CLAUDE_OUT".to_string(), out.to_string_lossy().into_owned())].into();
+        for (k, v) in vars {
+            env.insert(k.to_string(), v.to_string());
+        }
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_claude.sh");
+        let launch: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(move || Launch { claude: Some(fake), env })));
+        let sink = Arc::new(Capture::default());
+        let engine = Engine::new(launch, store.clone(), sink.clone(), sessions_root.clone(), images.clone());
+        Env { _dir: dir, out, folders, sessions_root, images, store, sink, engine }
+    }
+
+    fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(Instant::now() < deadline, "tempo scaduto aspettando: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn read(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+
+    fn stdin_lines(env: &Env, sid: &str) -> Vec<Value> {
+        read(&env.out.join(format!("{sid}.stdin"))).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    fn status(env: &Env, sid: &str) -> String {
+        env.store.get_conversation(sid).unwrap().unwrap().status
+    }
+
+    #[test]
+    fn startup_downgrades_working_to_waiting() {
+        let env = setup(&[]);
+        let sid = "11111111-1111-4111-8111-111111111111";
+        env.store.insert_owned_conversation("p1", sid, "/Users/dev/x", None, "default").unwrap();
+        env.store.save_conversation_state(sid, "working", 1, 0, false).unwrap();
+        // riavvio dell'app: nuovo motore sullo stesso archivio
+        let engine = Engine::new(env.engine.0.launch.clone(), env.store.clone(), env.sink.clone(), env.sessions_root.clone(), env.images.clone());
+        assert_eq!(status(&env, sid), "waiting");
+        assert!(!engine.is_running(sid), "nessun turno riparte da solo");
+        let marker = engine.pending_asks("p1", sid).unwrap();
+        assert!(matches!(&marker[..], [ClaudeEvent::Unknown { label, .. }] if label == INTERRUPTED_LABEL), "{marker:?}");
+        assert_eq!(env.store.waiting_total().unwrap(), 1);
+    }
+
+    #[test]
+    fn start_passes_cwd_add_dirs_and_permission_mode() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        let args_file = env.out.join(format!("{sid}.args"));
+        wait_until("argomenti scritti", || read(&env.out.join(format!("{sid}.cwd"))).ends_with('\n'));
+        let args: Vec<String> = read(&args_file).lines().map(String::from).collect();
+        let pair = |flag: &str, val: &str| args.windows(2).any(|w| w[0] == flag && w[1] == val);
+        assert!(pair("--add-dir", &env.folders[1].to_string_lossy()), "{args:?}");
+        assert!(pair("--permission-mode", "bypassPermissions"), "{args:?}");
+        assert!(pair("--session-id", &sid), "{args:?}");
+        assert!(pair("--permission-prompt-tool", "stdio"), "{args:?}");
+        for f in ["-p", "--verbose", "--include-partial-messages"] {
+            assert!(args.iter().any(|a| a == f), "{f} manca in {args:?}");
+        }
+        assert!(pair("--input-format", "stream-json") && pair("--output-format", "stream-json"));
+        assert!(!args.iter().any(|a| a == "--safe-mode" || a == "--resume"));
+        assert_eq!(read(&env.out.join(format!("{sid}.cwd"))).trim(), env.folders[0].to_string_lossy());
+        let conv = env.store.get_conversation(&sid).unwrap().unwrap();
+        assert!(conv.owned && conv.project_id == "p1" && conv.permission_mode == "bypassPermissions");
+        assert_eq!(env.engine.running("p1"), vec![sid.clone()]);
+        assert!(env.engine.running("p2").is_empty());
+        // handshake `initialize` inviato all'avvio
+        wait_until("initialize", || stdin_lines(&env, &sid).iter().any(|l| l["request"]["subtype"] == "initialize"));
+    }
+
+    #[test]
+    fn conv_start_in_untrusted_folder_is_rejected() {
+        let env = setup(&[]);
+        let folder = env.folders[0].parent().unwrap().join("non-fidata");
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = folder.to_string_lossy().into_owned();
+        env.store.upsert_project(&Project { id: "p3".into(), name: "nuovo".into(), folders: vec![folder.clone()] }).unwrap();
+        assert_eq!(env.engine.start("p3", StartOpts::default()).unwrap_err(), crate::trust::UNTRUSTED);
+        assert!(env.store.list_conversations("p3").unwrap().is_empty());
+        let sid = "33333333-3333-4333-8333-333333333333";
+        env.store.insert_owned_conversation("p3", sid, &folder, None, "default").unwrap();
+        assert_eq!(env.engine.resume("p3", sid).unwrap_err(), crate::trust::UNTRUSTED);
+        assert_eq!(env.engine.send("p3", sid, "ciao", &[]).unwrap_err(), crate::trust::UNTRUSTED);
+        assert!(env.engine.running("p3").is_empty());
+        crate::trust::mark_trusted(&env.store, &folder).unwrap();
+        let sid = env.engine.start("p3", StartOpts::default()).unwrap();
+        assert_eq!(env.engine.running("p3"), vec![sid]);
+    }
+
+    #[test]
+    fn valid_model_accepts_the_builtin_aliases_and_ids_but_not_options_or_spaces() {
+        for ok in ["fable", "opus", "sonnet", "haiku", "claude-opus-4-5", "sonnet[1m]"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        for bad in ["", "-fable", "--model", "fa ble", "fable;ls", "fable\n"] {
+            assert!(!valid_model(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn start_uses_requested_model_and_mode_and_validates_them() {
+        let env = setup(&[]);
+        let opts = StartOpts { model: Some("sonnet".into()), permission_mode: Some("plan".into()) };
+        let sid = env.engine.start("p1", opts).unwrap();
+        wait_until("argomenti", || read(&env.out.join(format!("{sid}.cwd"))).ends_with('\n'));
+        let args = read(&env.out.join(format!("{sid}.args")));
+        assert!(args.contains("--model\nsonnet\n") && args.contains("--permission-mode\nplan\n"), "{args}");
+        let bad_mode = StartOpts { permission_mode: Some("tutto; rm -rf".into()), ..Default::default() };
+        assert!(env.engine.start("p1", bad_mode).is_err());
+        let bad_model = StartOpts { model: Some("--dangerously".into()), ..Default::default() };
+        assert!(env.engine.start("p1", bad_model).is_err());
+        assert!(env.engine.start("nessuno", StartOpts::default()).is_err());
+    }
+
+    #[test]
+    fn send_emits_events_and_ends_waiting_until_viewed() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("fine turno", || env.sink.has_kind(&sid, "turnEnd"));
+        wait_until("stato waiting", || status(&env, &sid) == "waiting");
+        assert!(env.sink.has_kind(&sid, "init") && env.sink.has_kind(&sid, "textDelta"));
+        let user = stdin_lines(&env, &sid).into_iter().find(|l| l["type"] == "user").unwrap();
+        assert_eq!(user["message"], json!({"role": "user", "content": "ciao"}));
+        let conv = env.store.get_conversation(&sid).unwrap().unwrap();
+        assert_eq!(conv.model.as_deref(), Some("claude-haiku-5-5")); // da `Init`
+        assert!(conv.context_used_pct.is_some());
+        let upserts = env.sink.0.lock().unwrap().iter().filter(|(p, e, v)| p == "p1" && e == "conv:upsert" && v["sessionId"] == sid.as_str()).count();
+        assert!(upserts >= 2);
+        env.engine.mark_viewed("p1", &sid).unwrap();
+        assert_eq!(status(&env, &sid), "idle");
+        assert!(env.engine.mark_viewed("p2", &sid).is_err());
+    }
+
+    #[test]
+    fn turn_end_hands_the_conversation_to_the_title_queue() {
+        struct Spy;
+        impl super::super::titles::TitleRunner for Spy {
+            fn run(&self, _prompt: &str) -> Option<String> {
+                Some(r#"{"title":"Saluto iniziale","summary":"Si e' salutato."}"#.into())
+            }
+        }
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        env.engine.set_titles(super::super::titles::TitleQueue::new(
+            env.store.clone(),
+            env.sink.clone(),
+            env.sessions_root.clone(),
+            Arc::new(Spy),
+        ));
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        // il finto `claude` non scrive il file di sessione: ne serve uno con il testo da riassumere
+        let cwd = env.store.get_conversation(&sid).unwrap().unwrap().cwd;
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = json!({"type":"user","uuid":"u1","isSidechain":false,"cwd":cwd,"sessionId":sid,"timestamp":"2026-11-11T09:00:01.000Z","promptSource":"sdk","message":{"role":"user","content":"ciao"}});
+        std::fs::write(dir.join(format!("{sid}.jsonl")), format!("{line}\n")).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("titolo generato", || env.store.get_conversation(&sid).unwrap().unwrap().title == "Saluto iniziale");
+        assert_eq!(env.store.title_turn(&sid).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn permission_fixture_sets_waiting_then_answer_writes_to_stdin() {
+        let fx = fixture("permission-request");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "scrivi note.txt", &[]).unwrap();
+        wait_until("richiesta", || env.sink.has_kind(&sid, "ask"));
+        wait_until("stato waiting", || status(&env, &sid) == "waiting");
+        let rid = "c6b1b64f-8800-4372-b30a-5b4c4e3c465b";
+        assert!(env.engine.answer("p1", &sid, rid, "forse").is_err()); // scelta non valida: resta pendente
+        assert!(env.engine.answer("p1", &sid, "sconosciuta", "allow").is_err());
+        env.engine.answer("p1", &sid, rid, "allow").unwrap();
+        let allow = json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
+            "response": {"behavior": "allow", "updatedInput": {"file_path": "/Users/dev/proj/note.txt", "content": "hi"}}}});
+        wait_until("risposta allow su stdin", || stdin_lines(&env, &sid).contains(&allow));
+        // seconda richiesta (Bash): negata
+        let rid2 = "0477865f-c919-47c1-8f1e-8c069e660596";
+        wait_until("seconda richiesta", || env.sink.events(&sid).iter().any(|e| e["requestId"] == rid2));
+        env.engine.answer("p1", &sid, rid2, "deny").unwrap();
+        let deny = json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid2,
+            "response": {"behavior": "deny", "message": "The user denied this action."}}});
+        wait_until("risposta deny su stdin", || stdin_lines(&env, &sid).contains(&deny));
+        assert!(env.engine.answer("p1", &sid, rid2, "deny").is_err()); // già risposta
+    }
+
+    #[test]
+    fn question_and_plan_answers_follow_the_protocol() {
+        let fx = fixture("ask-user-question");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "chiedimi un colore", &[]).unwrap();
+        wait_until("domanda", || env.sink.has_kind(&sid, "ask"));
+        let ask = env.sink.events(&sid).into_iter().find(|e| e["kind"] == "ask").unwrap();
+        let rid = ask["requestId"].as_str().unwrap().to_string();
+        env.engine.answer("p1", &sid, &rid, "Blue").unwrap();
+        wait_until("risposta domanda", || {
+            stdin_lines(&env, &sid).iter().any(|l| {
+                l["response"]["request_id"] == rid.as_str()
+                    && l["response"]["response"]["behavior"] == "allow"
+                    && l["response"]["response"]["updatedInput"]["answers"] == json!({"Which color do you prefer?": "Blue"})
+                    && l["response"]["response"]["updatedInput"]["questions"] == ask["input"]["questions"]
+            })
+        });
+
+        let fx = fixture("plan-mode");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "fai un piano", &[]).unwrap();
+        wait_until("piano", || env.sink.events(&sid).iter().any(|e| e["askType"] == "plan"));
+        let ask = env.sink.events(&sid).into_iter().find(|e| e["askType"] == "plan").unwrap();
+        let rid = ask["requestId"].as_str().unwrap().to_string();
+        assert!(env.engine.answer("p1", &sid, &rid, "allow").is_err()); // per il piano: approve/reject
+        env.engine.answer("p1", &sid, &rid, "approve").unwrap();
+        wait_until("approvazione", || {
+            stdin_lines(&env, &sid).iter().any(|l| {
+                l["response"]["request_id"] == rid.as_str()
+                    && l["response"]["response"] == json!({"behavior": "allow", "updatedInput": ask["input"]})
+            })
+        });
+    }
+
+    #[test]
+    fn multi_question_answers_cover_every_question() {
+        let input = json!({"questions": [
+            {"question": "Quale database?", "header": "DB", "options": [{"label": "Postgres"}], "multiSelect": false},
+            {"question": "Quali test?", "header": "Test", "options": [{"label": "Unità"}, {"label": "Integrazione"}], "multiSelect": true}
+        ]});
+        let ask = ClaudeEvent::Ask {
+            request_id: "q".into(), ask_type: AskType::Question, prompt: "Quale database?".into(), options: vec![],
+            questions: vec![], tool_name: "AskUserQuestion".into(), input: input.clone(),
+        };
+        let choice = json!({"Quale database?": "Postgres", "Quali test?": ["Unità", "Integrazione"]}).to_string();
+        let r = answer_payload(&ask, &choice).unwrap();
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["questions"], input["questions"]);
+        assert_eq!(r["updatedInput"]["answers"], json!({"Quale database?": "Postgres", "Quali test?": "Unità, Integrazione"}));
+        // testo libero dentro l'oggetto
+        let free = json!({"Quale database?": "DuckDB", "Quali test?": ["Fumo"]}).to_string();
+        assert_eq!(answer_payload(&ask, &free).unwrap()["updatedInput"]["answers"]["Quale database?"], "DuckDB");
+        // incomplete, sconosciute o testo semplice con più domande: rifiutate
+        for bad in [
+            json!({"Quale database?": "Postgres"}).to_string(),
+            json!({"Quale database?": "Postgres", "Quali test?": []}).to_string(),
+            json!({"Quale database?": "Postgres", "Quali test?": ["x"], "Altro?": "y"}).to_string(),
+            json!({"Quale database?": 3, "Quali test?": ["x"]}).to_string(),
+            "Postgres".to_string(),
+        ] {
+            assert!(answer_payload(&ask, &bad).is_err(), "{bad}");
+        }
+        // una sola domanda: testo semplice (anche se somiglia a JSON) o oggetto
+        let one = ClaudeEvent::Ask {
+            request_id: "q".into(), ask_type: AskType::Question, prompt: "Colore?".into(), options: vec![], questions: vec![],
+            tool_name: "AskUserQuestion".into(), input: json!({"questions": [{"question": "Colore?", "options": []}]}),
+        };
+        assert_eq!(answer_payload(&one, "Blu").unwrap()["updatedInput"]["answers"], json!({"Colore?": "Blu"}));
+        assert_eq!(answer_payload(&one, "{blu}").unwrap()["updatedInput"]["answers"], json!({"Colore?": "{blu}"}));
+        assert_eq!(answer_payload(&one, &json!({"Colore?": "Rosso"}).to_string()).unwrap()["updatedInput"]["answers"], json!({"Colore?": "Rosso"}));
+    }
+
+    #[test]
+    fn pending_asks_lists_open_requests_until_answered() {
+        let fx = fixture("permission-request");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
+        env.engine.send("p1", &sid, "scrivi", &[]).unwrap();
+        wait_until("richiesta", || env.sink.has_kind(&sid, "ask"));
+        let asks = env.engine.pending_asks("p1", &sid).unwrap();
+        assert_eq!(asks.len(), 1);
+        assert!(matches!(&asks[0], ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b"));
+        assert!(env.engine.pending_asks("p2", &sid).is_err()); // altro progetto
+        env.engine.answer("p1", &sid, "c6b1b64f-8800-4372-b30a-5b4c4e3c465b", "allow").unwrap();
+        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupt_with_pending_ask_closes_it() {
+        let fx = fixture("permission-request");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "scrivi", &[]).unwrap();
+        wait_until("richiesta", || env.sink.has_kind(&sid, "ask"));
+        env.engine.interrupt("p1", &sid).unwrap();
+        wait_until("interrupt su stdin", || stdin_lines(&env, &sid).iter().any(|l| l["request"]["subtype"] == "interrupt"));
+        assert!(env.sink.events(&sid).iter().any(|e| e["kind"] == "askCancelled" && e["requestId"] == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b"));
+        assert_eq!(status(&env, &sid), "working"); // nessuna richiesta aperta: il prossimo `result` chiude il turno
+        assert!(env.engine.answer("p1", &sid, "c6b1b64f-8800-4372-b30a-5b4c4e3c465b", "allow").is_err());
+    }
+
+    #[test]
+    fn crash_mid_turn_sets_waiting_and_keeps_resumable() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx), ("FAKE_CLAUDE_CRASH_AFTER", "4")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("processo terminato", || env.engine.running("p1").is_empty());
+        wait_until("stato waiting", || status(&env, &sid) == "waiting");
+        wait_until("evento di uscita", || env.sink.events(&sid).iter().any(|e| e["label"] == "Processo terminato"));
+        let ev = env.sink.events(&sid).into_iter().find(|e| e["label"] == "Processo terminato").unwrap();
+        assert_eq!(ev["kind"], "unknown");
+        assert!(ev["json"].as_str().unwrap().contains("errore finto"));
+        assert!(!env.sink.has_kind(&sid, "turnEnd"));
+        // la CLI ha scritto la sessione: la ripresa usa --resume
+        let cwd = env.folders[0].to_string_lossy().into_owned();
+        let dir = env.sessions_root.join(crate::claude::sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{sid}.jsonl")), "{}\n").unwrap();
+        std::fs::remove_file(env.out.join(format!("{sid}.cwd"))).unwrap();
+        env.engine.resume("p1", &sid).unwrap();
+        wait_until("ripreso", || read(&env.out.join(format!("{sid}.cwd"))).ends_with('\n'));
+        let args = read(&env.out.join(format!("{sid}.args")));
+        assert!(args.contains(&format!("--resume\n{sid}\n")) && !args.contains("--session-id"), "{args}");
+        assert_eq!(env.engine.running("p1"), vec![sid.clone()]);
+        assert_eq!(status(&env, &sid), "waiting");
+    }
+
+    #[test]
+    fn two_conversations_run_in_parallel() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx), ("FAKE_CLAUDE_BARRIER", "2")]);
+        let a = env.engine.start("p1", StartOpts::default()).unwrap();
+        let b = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert_ne!(a, b);
+        let mut running = env.engine.running("p1");
+        running.sort();
+        let mut want = vec![a.clone(), b.clone()];
+        want.sort();
+        assert_eq!(running, want);
+        env.engine.send("p1", &a, "uno", &[]).unwrap();
+        env.engine.send("p1", &b, "due", &[]).unwrap();
+        for sid in [&a, &b] {
+            wait_until("stato waiting", || status(&env, sid) == "waiting");
+            assert_eq!(read(&env.out.join(format!("{sid}.barrier"))).trim(), "ok");
+            assert!(env.sink.has_kind(sid, "turnEnd"));
+        }
+    }
+
+    #[test]
+    fn send_resumes_a_stopped_conversation_and_checks_images() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        // sessione importata (non pilotata): conv_send la riprende
+        let sid = "44444444-4444-4444-8444-444444444444";
+        let cwd = env.folders[0].to_string_lossy().into_owned();
+        env.store.upsert_synced_conversation("p1", sid, &cwd, "vecchia", 0, 3).unwrap();
+        let outside = env._dir.path().join("fuori.png");
+        std::fs::write(&outside, [0x89, b'P', b'N', b'G']).unwrap();
+        assert!(env.engine.send("p1", sid, "guarda", &[outside.to_string_lossy().into_owned()]).is_err());
+        assert!(env.engine.send("p1", sid, "guarda", &["/etc/hosts".into()]).is_err());
+        assert!(env.engine.running("p1").is_empty());
+        let img = env.images.join("a.png");
+        std::fs::write(&img, [0x89, b'P', b'N', b'G']).unwrap();
+        env.engine.send("p1", sid, "guarda", &[img.to_string_lossy().into_owned()]).unwrap();
+        wait_until("stato waiting", || status(&env, sid) == "waiting");
+        assert!(env.store.get_conversation(sid).unwrap().unwrap().owned);
+        let user = stdin_lines(&env, sid).into_iter().find(|l| l["type"] == "user").unwrap();
+        let content = &user["message"]["content"];
+        assert_eq!(content[0], json!({"type": "text", "text": "guarda"}));
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBORw==");
+        assert!(env.engine.send("p2", sid, "x", &[]).is_err());
+    }
+
+    #[test]
+    fn model_and_mode_are_validated_persisted_and_sent_live() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert!(env.engine.set_model("p1", &sid, "a b").is_err());
+        assert!(env.engine.set_permission_mode("p1", &sid, "yolo").is_err());
+        env.engine.set_model("p1", &sid, "opus").unwrap();
+        env.engine.set_permission_mode("p1", &sid, "acceptEdits").unwrap();
+        let conv = env.store.get_conversation(&sid).unwrap().unwrap();
+        assert_eq!((conv.model.as_deref(), conv.permission_mode.as_str()), (Some("opus"), "acceptEdits"));
+        wait_until("controlli su stdin", || {
+            let l = stdin_lines(&env, &sid);
+            l.iter().any(|l| l["request"] == json!({"subtype": "set_model", "model": "opus"}))
+                && l.iter().any(|l| l["request"] == json!({"subtype": "set_permission_mode", "mode": "acceptEdits"}))
+        });
+        assert!(env.engine.set_model("p2", &sid, "opus").is_err());
+    }
+
+    fn spawns(env: &Env, sid: &str) -> usize {
+        read(&env.out.join(format!("{sid}.spawns"))).lines().count()
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: segnale 0 = solo verifica di esistenza
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn stray_child_holding_stderr_does_not_block_exit_and_send_resumes() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx), ("FAKE_CLAUDE_CRASH_AFTER", "4"), ("FAKE_CLAUDE_STRAY", "stderr")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        let t = Instant::now();
+        wait_until("uscita gestita", || !env.engine.is_running(&sid) && status(&env, &sid) == "waiting");
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        wait_until("evento di uscita", || env.sink.events(&sid).iter().any(|e| e["label"] == "Processo terminato"
+            && e["json"].as_str().unwrap_or("").contains("errore finto")));
+        assert!(env.engine.is_ours(&sid)); // appena uscito: le scritture recenti sono nostre
+        env.engine.send("p1", &sid, "di nuovo", &[]).unwrap();
+        wait_until("secondo avvio", || spawns(&env, &sid) == 2);
+        // il nuovo processo riceve il messaggio (poi, con lo stesso finto, esce di nuovo)
+        wait_until("messaggio ripreso", || stdin_lines(&env, &sid).iter().any(|l| l["message"]["content"] == "di nuovo"));
+    }
+
+    #[test]
+    fn send_right_after_exit_resumes_instead_of_erroring() {
+        // il primo processo esce subito lasciando lo stdout aperto a un discendente: per un attimo resta nella mappa
+        let env = setup(&[("FAKE_CLAUDE_EXIT_AT_START", "1"), ("FAKE_CLAUDE_STRAY", "stdout")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        wait_until("primo processo uscito", || env.out.join(format!("{sid}.exited")).exists());
+        std::thread::sleep(Duration::from_millis(50));
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("secondo avvio", || spawns(&env, &sid) == 2);
+        wait_until("messaggio ricevuto", || stdin_lines(&env, &sid).iter().any(|l| l["type"] == "user"));
+        assert!(env.engine.is_running(&sid));
+    }
+
+    #[test]
+    fn concurrent_sends_on_a_stopped_session_spawn_once() {
+        let env = setup(&[]);
+        let sid = "55555555-5555-4555-8555-555555555555";
+        env.store.upsert_synced_conversation("p1", sid, &env.folders[0].to_string_lossy(), "t", 0, 0).unwrap();
+        std::thread::scope(|s| {
+            for text in ["uno", "due"] {
+                let engine = env.engine.clone();
+                s.spawn(move || engine.send("p1", sid, text, &[]).unwrap());
+            }
+        });
+        wait_until("due messaggi", || stdin_lines(&env, sid).iter().filter(|l| l["type"] == "user").count() == 2);
+        std::thread::sleep(Duration::from_millis(200)); // un eventuale secondo avvio avrebbe già scritto
+        assert_eq!(spawns(&env, sid), 1);
+    }
+
+    #[test]
+    fn stop_closes_an_idle_process_and_keeps_status() {
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("fine turno", || status(&env, &sid) == "waiting");
+        env.engine.mark_viewed("p1", &sid).unwrap();
+        let t = Instant::now();
+        env.engine.stop_owned("p1", &sid).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed()); // stdin chiuso: esce da solo
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(status(&env, &sid), "idle");
+        assert!(!env.sink.events(&sid).iter().any(|e| e["label"] == "Processo terminato"));
+        assert!(env.engine.stop_owned("p2", &sid).is_err());
+        env.engine.stop_owned("p1", &sid).unwrap(); // senza processo: nulla
+    }
+
+    #[test]
+    fn stop_kills_a_stuck_turn_and_its_children() {
+        let env = setup(&[("FAKE_CLAUDE_HANG", "1")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "lavora", &[]).unwrap();
+        let hang = env.out.join(format!("{sid}.hang"));
+        wait_until("processo bloccato", || read(&hang).ends_with('\n'));
+        let child: i32 = read(&hang).trim().parse().unwrap();
+        assert_eq!(status(&env, &sid), "working");
+        let t = Instant::now();
+        env.engine.stop("66666666-6666-4666-8666-666666666666"); // sessione senza processo: nulla
+        env.engine.stop(&sid);
+        let took = t.elapsed();
+        assert!(took >= Duration::from_millis(1900) && took < Duration::from_secs(4), "{took:?}");
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(status(&env, &sid), "waiting"); // turno tagliato
+        wait_until("discendente ucciso con il gruppo", || !alive(child));
+    }
+
+    #[test]
+    fn stop_all_stops_every_process() {
+        let env = setup(&[]);
+        let a = env.engine.start("p1", StartOpts::default()).unwrap();
+        let b = env.engine.start("p2", StartOpts::default()).unwrap();
+        env.engine.stop_all();
+        assert!(!env.engine.is_running(&a) && !env.engine.is_running(&b));
+    }
+
+    #[test]
+    fn stop_is_bounded_when_the_child_does_not_read_stdin() {
+        let env = setup(&[("FAKE_CLAUDE_NO_STDIN", "1")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        let hang = env.out.join(format!("{sid}.hang"));
+        wait_until("processo fermo", || read(&hang).ends_with('\n'));
+        let child: i32 = read(&hang).trim().parse().unwrap();
+        // invio grande (ben oltre il buffer della pipe): lo scrittore resta bloccato tenendo il mutex di stdin
+        let img = env.images.join("grande.png");
+        std::fs::write(&img, vec![0u8; 4 * 1024 * 1024]).unwrap();
+        let sender = {
+            let (engine, sid, img) = (env.engine.clone(), sid.clone(), img.to_string_lossy().into_owned());
+            std::thread::spawn(move || engine.send("p1", &sid, "guarda", &[img]))
+        };
+        wait_until("turno avviato", || status(&env, &sid) == "working");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!sender.is_finished(), "la scrittura doveva restare bloccata");
+        let t = Instant::now();
+        env.engine.stop(&sid);
+        let took = t.elapsed();
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(status(&env, &sid), "waiting"); // turno tagliato
+        wait_until("gruppo ucciso", || !alive(child));
+        // lo scrittore bloccato riceve EPIPE e non riavvia la sessione fermata
+        assert!(sender.join().unwrap().is_err());
+        assert_eq!(spawns(&env, &sid), 1);
+    }
+
+    #[test]
+    fn send_during_stop_waits_for_the_old_process() {
+        let env = setup(&[("FAKE_CLAUDE_HANG", "1")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "lavora", &[]).unwrap();
+        let hang = env.out.join(format!("{sid}.hang"));
+        wait_until("processo bloccato", || read(&hang).ends_with('\n'));
+        let first_child: i32 = read(&hang).trim().parse().unwrap();
+        let stopper = {
+            let (engine, sid) = (env.engine.clone(), sid.clone());
+            std::thread::spawn(move || engine.stop(&sid))
+        };
+        std::thread::sleep(Duration::from_millis(300)); // dentro l'attesa di `stop`
+        let t = Instant::now();
+        env.engine.send("p1", &sid, "dopo", &[]).unwrap();
+        // l'invio ha aspettato che il vecchio processo fosse ucciso e ripulito, poi ne ha avviato uno solo
+        assert!(t.elapsed() >= Duration::from_millis(1500), "{:?}", t.elapsed());
+        stopper.join().unwrap();
+        wait_until("discendente del primo processo morto", || !alive(first_child));
+        wait_until("secondo avvio", || spawns(&env, &sid) == 2);
+        wait_until("messaggio al nuovo processo", || stdin_lines(&env, &sid).iter().any(|l| l["message"]["content"] == "dopo"));
+        env.engine.stop(&sid);
+    }
+
+    #[test]
+    fn archiving_stops_the_process() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.archive("p1", &sid, false).unwrap();
+        assert!(env.engine.is_running(&sid));
+        env.engine.archive("p1", &sid, true).unwrap();
+        assert!(!env.engine.is_running(&sid));
+        assert!(env.store.get_conversation(&sid).unwrap().unwrap().archived);
+    }
+
+    // ---------- eliminazione ----------
+
+    use crate::claude::delete::{DeleteOutcome, Trasher};
+    use crate::claude::sessions::MetaCache;
+
+    /// Finto Cestino: registra i percorsi e li toglie dal disco temporaneo (mai il vero Cestino).
+    type Probe = Box<dyn Fn(&Path) + Send>;
+    #[derive(Default)]
+    struct FakeTrash {
+        taken: Mutex<Vec<PathBuf>>,
+        fail_files: bool,
+        fail_dirs: bool,
+        /// Eseguito a ogni chiamata, prima dello spostamento (osserva lo stato del motore in quel momento).
+        probe: Mutex<Option<Probe>>,
+    }
+    impl Trasher for FakeTrash {
+        fn trash(&self, path: &Path) -> Result<()> {
+            if let Some(p) = self.probe.lock().unwrap().as_ref() {
+                p(path);
+            }
+            if (path.is_dir() && self.fail_dirs) || (!path.is_dir() && self.fail_files) {
+                return Err("finto errore del Cestino".into());
+            }
+            self.taken.lock().unwrap().push(path.to_path_buf());
+            if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
+        }
+    }
+    impl FakeTrash {
+        fn taken(&self) -> Vec<PathBuf> {
+            self.taken.lock().unwrap().clone()
+        }
+    }
+
+    const DEL_SID: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// Sessione importata dal disco: file `.jsonl` nella cartella delle sessioni di `folder`, riga sincronizzata.
+    fn disk_session(env: &Env, folder: usize, sid: &str, project: &str) -> PathBuf {
+        let cwd = env.folders[folder].to_string_lossy().into_owned();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"u\",\"isSidechain\":false,\"cwd\":{cwd:?},\"sessionId\":\"{sid}\",\"timestamp\":\"2026-11-11T09:00:00.000Z\",\"promptSource\":\"sdk\",\"message\":{{\"role\":\"user\",\"content\":\"ciao\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        env.store.upsert_synced_conversation(project, sid, &cwd, "Titolo", 1, 1).unwrap();
+        file
+    }
+
+    fn removed(env: &Env, sid: &str) -> usize {
+        env.sink.0.lock().unwrap().iter().filter(|(_, e, p)| e == "conv:removed" && p["sessionId"] == sid).count()
+    }
+
+    #[test]
+    fn delete_trashes_file_and_sibling_dir_drops_row_and_emits() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let sibling = file.parent().unwrap().join(DEL_SID);
+        std::fs::create_dir_all(sibling.join("subagents")).unwrap();
+        let (cache, trash) = (MetaCache::default(), FakeTrash::default());
+        cache.read(&file).unwrap();
+        let asked = Mutex::new(Vec::new());
+        let out = env
+            .engine
+            .delete_conversation("p1", DEL_SID, &cache, &|t| { asked.lock().unwrap().push(t.to_string()); true }, &trash)
+            .unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*asked.lock().unwrap(), vec!["Titolo".to_string()]);
+        assert_eq!(trash.taken(), vec![file.clone(), sibling.clone()]);
+        assert!(!file.exists() && !sibling.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+        assert_eq!(removed(&env, DEL_SID), 1);
+        let before = cache.full_reads.load(std::sync::atomic::Ordering::Relaxed);
+        std::fs::write(&file, "{}\n").unwrap();
+        cache.read(&file).unwrap();
+        assert_eq!(cache.full_reads.load(std::sync::atomic::Ordering::Relaxed), before + 1, "la cache non ricorda più il file");
+    }
+
+    #[test]
+    fn delete_cancelled_changes_nothing() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash::default();
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| false, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Cancelled);
+        assert!(trash.taken().is_empty() && file.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn delete_of_another_projects_session_is_refused_without_asking() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 1, DEL_SID, "p2");
+        let trash = FakeTrash::default();
+        let asked = Mutex::new(false);
+        let err = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| { *asked.lock().unwrap() = true; true }, &trash);
+        assert!(err.is_err());
+        assert!(!*asked.lock().unwrap() && trash.taken().is_empty() && file.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_in_untrusted_project_is_refused() {
+        let env = setup(&[]);
+        let cwd = env.folders[0].parent().unwrap().join("estranea");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let folder = cwd.to_string_lossy().into_owned();
+        env.store.upsert_project(&Project { id: "p3".into(), name: "x".into(), folders: vec![folder.clone()] }).unwrap();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&folder));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{DEL_SID}.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        env.store.upsert_synced_conversation("p3", DEL_SID, &folder, "T", 1, 1).unwrap();
+        let trash = FakeTrash::default();
+        let err = env.engine.delete_conversation("p3", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap_err();
+        assert_eq!(err, crate::trust::UNTRUSTED);
+        assert!(trash.taken().is_empty() && file.exists());
+    }
+
+    #[test]
+    fn delete_refuses_symlinked_file_and_invalid_ids() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let real = file.with_extension("orig");
+        std::fs::rename(&file, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        let trash = FakeTrash::default();
+        assert!(env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(env.engine.delete_conversation("p1", "../x", &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(trash.taken().is_empty() && real.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn failed_file_trash_leaves_everything_intact() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash { fail_files: true, ..Default::default() };
+        assert!(env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(file.exists() && env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+        // la tomba è tolta: la conversazione si può di nuovo usare
+        assert!(!lock(&env.engine.0.deleting).contains(DEL_SID));
+    }
+
+    #[test]
+    fn failed_sibling_trash_gives_a_warning_but_deletes() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let sibling = file.parent().unwrap().join(DEL_SID);
+        std::fs::create_dir_all(&sibling).unwrap();
+        let trash = FakeTrash { fail_dirs: true, ..Default::default() };
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert!(matches!(out, DeleteOutcome::DeletedWithWarning { ref message } if message.contains("sotto-agenti")), "{out:?}");
+        assert!(!file.exists() && sibling.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+        assert_eq!(removed(&env, DEL_SID), 1);
+    }
+
+    #[test]
+    fn missing_file_still_asks_then_drops_the_row() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        std::fs::remove_file(&file).unwrap();
+        let asked = Mutex::new(0);
+        let trash = FakeTrash::default();
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| { *asked.lock().unwrap() += 1; true }, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*asked.lock().unwrap(), 1);
+        assert!(trash.taken().is_empty() && env.store.get_conversation(DEL_SID).unwrap().is_none());
+    }
+
+    #[test]
+    fn send_is_refused_during_the_delete_window_and_after_it() {
+        let env = setup(&[]);
+        disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (engine, seen) = (env.engine.clone(), seen.clone());
+            *trash.probe.lock().unwrap() = Some(Box::new(move |_| {
+                seen.lock().unwrap().push(engine.send("p1", DEL_SID, "ancora", &[]).is_err());
+            }));
+        }
+        // durante il dialogo (prima della conferma) la conversazione resta usabile: lo provano gli altri test; qui la finestra dopo la conferma
+        env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![true], "invio rifiutato mentre si sposta il file");
+        assert_eq!(spawns(&env, DEL_SID), 0, "nessun processo avviato");
+        // dopo: la riga non c'è più, quindi non è più della finestra
+        assert!(env.engine.send("p1", DEL_SID, "tardi", &[]).is_err());
+        assert!(env.engine.resume("p1", DEL_SID).is_err());
+        assert_eq!(spawns(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn sync_drops_rows_whose_file_vanished() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        std::fs::remove_file(&file).unwrap();
+        // senza turni (conversazione appena avviata, file non ancora scritto) o in corso: la riga resta
+        let fresh = "33333333-3333-4333-8333-333333333333";
+        env.store.insert_owned_conversation("p1", fresh, &env.folders[0].to_string_lossy(), None, "default").unwrap();
+        let project = env.store.get_project("p1").unwrap().unwrap();
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &MetaCache::default(), &project, 0, &|_| false).unwrap();
+        assert_eq!(list.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>(), vec![fresh]);
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_stops_a_running_conversation_first() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert!(env.engine.is_running(&sid));
+        let cwd = env.folders[0].to_string_lossy().into_owned();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        let trash = FakeTrash::default();
+        let running_at_trash = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (engine, log, id) = (env.engine.clone(), running_at_trash.clone(), sid.clone());
+            *trash.probe.lock().unwrap() = Some(Box::new(move |_| log.lock().unwrap().push(engine.is_running(&id))));
+        }
+        let out = env.engine.delete_conversation("p1", &sid, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*running_at_trash.lock().unwrap(), vec![false], "il processo è fermato prima del Cestino");
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(trash.taken(), vec![file]);
+        assert!(env.store.get_conversation(&sid).unwrap().is_none());
+        assert_eq!(removed(&env, &sid), 1);
+    }
+
+    #[test]
+    fn deleted_conversation_is_not_reimported_by_a_later_sync() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let cache = MetaCache::default();
+        let project = env.store.get_project("p1").unwrap().unwrap();
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &cache, &project, 0, &|_| false).unwrap();
+        assert_eq!(list.len(), 1);
+        env.engine.delete_conversation("p1", DEL_SID, &cache, &|_| true, &FakeTrash::default()).unwrap();
+        assert!(!file.exists());
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &cache, &project, 0, &|_| false).unwrap();
+        assert!(list.is_empty());
+        // il watcher, vedendo sparire il file, lo salta (`is_file`): niente errore, niente riga
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+    }
+
+    #[test]
+    fn start_without_claude_leaves_no_conversation() {
+        let env = setup(&[]);
+        let launch: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(|| Launch { claude: None, env: HashMap::new() })));
+        let engine = Engine::new(launch, env.store.clone(), env.sink.clone(), env.sessions_root.clone(), env.images.clone());
+        assert!(engine.start("p1", StartOpts::default()).is_err());
+        assert!(env.store.list_conversations("p1").unwrap().is_empty());
+        // avvio che fallisce dopo l'inserimento (eseguibile inesistente): riga rimossa
+        let launch: Arc<LaunchCell> =
+            Arc::new(LazyLock::new(Box::new(|| Launch { claude: Some("/nonexistent/claude".into()), env: HashMap::new() })));
+        let engine = Engine::new(launch, env.store.clone(), env.sink.clone(), env.sessions_root.clone(), env.images.clone());
+        assert!(engine.start("p1", StartOpts::default()).is_err());
+        assert!(env.store.list_conversations("p1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn images_are_bounded_per_message() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        let paths: Vec<String> = (0..11)
+            .map(|i| {
+                let p = env.images.join(format!("{i}.png"));
+                std::fs::write(&p, [0x89, b'P', b'N', b'G']).unwrap();
+                p.to_string_lossy().into_owned()
+            })
+            .collect();
+        let err = env.engine.send("p1", &sid, "x", &paths).unwrap_err();
+        assert!(err.contains("10 immagini"), "{err}");
+        let big: Vec<String> = (0..2)
+            .map(|i| {
+                let p = env.images.join(format!("big{i}.png"));
+                std::fs::write(&p, vec![0u8; 16 * 1024 * 1024]).unwrap();
+                p.to_string_lossy().into_owned()
+            })
+            .collect();
+        let err = env.engine.send("p1", &sid, "x", &big).unwrap_err();
+        assert!(err.contains("30 MB"), "{err}");
+        assert!(!stdin_lines(&env, &sid).iter().any(|l| l["type"] == "user"));
+    }
+
+    #[test]
+    fn seen_turn_is_clamped_to_the_turn_count() {
+        let env = setup(&[]);
+        let sid = "77777777-7777-4777-8777-777777777777";
+        env.store.insert_owned_conversation("p1", sid, &env.folders[0].to_string_lossy(), None, "default").unwrap();
+        env.store.save_conversation_state(sid, "idle", 3, 7, false).unwrap();
+        let s = env.engine.load_state(sid);
+        assert_eq!((s.turn_count, s.seen_turn), (3, 3));
+        // il prossimo turno finisce `waiting` (non `idle`)
+        let s = next_status(next_status(s, StateInput::UserSent), StateInput::Event(&ClaudeEvent::TurnEnd { context_used_pct: None, is_error: false }));
+        assert_eq!(s.status, ConvStatus::Waiting);
+    }
+
+    #[test]
+    fn apply_on_a_finished_process_uses_the_store() {
+        let env = setup(&[("FAKE_CLAUDE_EXIT_AT_START", "1")]);
+        // il processo esce subito: si ritenta finché `live` lo prende prima della fine (mai un test vacuo)
+        let (sid, conv) = (0..50)
+            .find_map(|_| {
+                let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+                env.engine.live(&sid).map(|c| (sid, c))
+            })
+            .expect("nessun avvio ha lasciato un processo osservabile");
+        wait_until("uscita gestita", || !env.engine.is_running(&sid));
+        assert!(lock(&conv.rt).finished);
+        // lo store è andato avanti (un altro processo, una vista): il vecchio stato in memoria non lo sovrascrive
+        env.store.save_conversation_state(&sid, "waiting", 5, 4, false).unwrap();
+        env.engine.apply(&sid, Some(&conv), StateInput::Viewed, false);
+        assert_eq!(env.store.conversation_state(&sid).unwrap(), Some(("idle".into(), 5, Some(5))));
+    }
+
+    #[test]
+    fn unsupported_control_requests_get_an_error_response() {
+        // righe scritte a mano (sintetiche): una richiesta della CLI che l'host non gestisce, poi la fine del turno
+        let dir = tempfile::tempdir().unwrap();
+        let fx = dir.path().join("synthetic-control.jsonl");
+        std::fs::write(
+            &fx,
+            concat!(
+                r#"{"type":"control_request","request_id":"cli_req_9","request":{"subtype":"hook_callback","callback_id":"x"}}"#,
+                "\n",
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx.to_string_lossy())]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        let want = json!({"type": "control_response", "response": {"subtype": "error", "request_id": "cli_req_9", "error": "unsupported"}});
+        wait_until("risposta d'errore su stdin", || stdin_lines(&env, &sid).contains(&want));
+        wait_until("turno finito", || env.sink.has_kind(&sid, "turnEnd"));
+    }
+
+    #[test]
+    fn unknown_json_is_truncated_on_char_boundary() {
+        let mut s = format!("{}è{}", "a".repeat(4095), "b".repeat(100));
+        truncate_utf8(&mut s, 4096);
+        assert_eq!(s, "a".repeat(4095));
+        let mut short = "ok".to_string();
+        truncate_utf8(&mut short, 4096);
+        assert_eq!(short, "ok");
+    }
+}

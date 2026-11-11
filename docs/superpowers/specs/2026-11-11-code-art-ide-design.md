@@ -123,11 +123,13 @@ cartella di origine.
 
 ### Stile visivo
 
-- Finestra traslucida con sfocatura vera di macOS (vibrancy) sotto
-  l'interfaccia; pannelli come lastre di vetro: bordo luminoso sottile in
-  alto, ombra interna in basso, sfocatura e saturazione dello sfondo.
-- Sfondo "aurora" scuro (viola, petrolio, magenta spento, blu) molto
-  attenuato, che dà al vetro qualcosa da rifrangere anche a finestra piena.
+- Finestra completamente opaca (scelta dell'utente dopo averla provata: la
+  versione traslucida con vibrancy lasciava vedere il desktop e rendeva
+  tutto poco leggibile). L'effetto vetro resta dentro la finestra: pannelli
+  come lastre di vetro con bordo luminoso sottile in alto, ombra interna in
+  basso, sfocatura e saturazione dello sfondo.
+- Sfondo "aurora" scuro (viola, petrolio, magenta spento, blu) a piena
+  opacità su base `#0a0b12`, che dà ai pannelli qualcosa da rifrangere.
 - **L'area del codice e del terminale resta quasi opaca** per la leggibilità:
   il vetro è nella cornice, non sotto il testo.
 - Colori di stato: ambra = aspetta te, verde acqua pulsante = al lavoro,
@@ -154,7 +156,11 @@ Agent SDK (Node è già sulla macchina). Il resto del design non cambia.
 All'apertura di un progetto l'app legge le sessioni già presenti in
 `~/.claude/projects/<cartella-codificata>/*.jsonl` e le mostra come
 conversazioni riprendibili. L'app **non modifica mai** quei file: titoli e
-stati vivono nel suo SQLite, legati all'id di sessione.
+stati vivono nel suo SQLite, legati all'id di sessione. **Unica eccezione,
+richiesta dal proprietario dopo la prova** ("devo poter eliminare anche le
+conversazioni di Claude"): «Elimina conversazione» sposta nel Cestino di macOS
+il file di sessione e l'eventuale cartella `<id>/` accanto, mai cancellazione
+definitiva, solo dopo una conferma nativa mostrata dal core (vedi §11 bis).
 
 **Convivenza con VS Code e terminale** [scelta mia]: l'app sorveglia quelle
 cartelle di sessioni, quindi una conversazione creata o proseguita altrove
@@ -303,6 +309,54 @@ e usabile. Ordine proposto da Claude, visto da Davide.
   mostrato.
 - Connessioni SSH/DB cadute: riconnessione con un click, nessuna perdita delle
   query scritte.
+
+## 11 bis. Sicurezza
+
+Requisito di Davide (aggiunto in corso d'opera): "un IDE sicuro". Le misure
+concrete sono [scelte mie]:
+
+**Principio**: l'interfaccia è una pagina web che mostra contenuti non fidati
+(output di Claude, file, risultati di query, nomi di file). Va trattata come
+potenzialmente compromessa: il core Rust non si fida di ciò che gli chiede.
+
+- **Nessun contenuto remoto nell'interfaccia.** Content-Security-Policy
+  restrittiva: script e stili solo dal pacchetto dell'app, nessun `eval`,
+  nessuna connessione di rete dalla WebView. I link si aprono nel browser di
+  sistema, mai dentro l'app.
+- **Contenuti non fidati sempre neutralizzati.** Markdown di Claude, testo dei
+  file, risultati di strumenti e query sono resi come testo o come markdown
+  sanificato: mai HTML grezzo, mai `{@html}` su dati non sanificati.
+- **Comandi del core con confini.** Ogni comando su file accetta solo percorsi
+  dentro le cartelle del progetto della finestra che lo chiama (dopo
+  risoluzione di `..` e link simbolici). I permessi Tauri sono il minimo
+  necessario, per finestra.
+- **Eccezione alla sola lettura di `~/.claude` (richiesta del proprietario).**
+  `conv_delete` sposta nel Cestino il file di sessione (e la cartella `<id>/`
+  accanto) di una conversazione del progetto della finestra, solo se il
+  progetto è fidato: il file si trova unendo le cartelle di sessione note del
+  progetto con `<id>.jsonl` (mai un percorso dalla pagina), si rifiutano link
+  simbolici e percorsi fuori dalla radice delle sessioni, e la conferma è un
+  dialogo nativo aperto dal core (titolo fisso, «Annulla» predefinito) che la
+  WebView non può aggirare. È l'unico punto in cui l'app scrive in `~/.claude`.
+- **Processi senza shell.** `claude`, `git`, `gh` e simili sono avviati con
+  lista di argomenti, mai componendo una riga di comando da testo.
+- **Segreti solo nel Portachiavi macOS.** Password SSH e DB non finiscono mai
+  in SQLite, file, log o messaggi di errore.
+- **Bypass permissions resta una scelta visibile.** È il default voluto da
+  Davide, ma la modalità attiva è sempre in vista (ambra) e alla prima
+  apertura di una cartella mai vista l'app chiede conferma che sia fidata
+  prima di avviare Claude lì dentro.
+- **SSH** (tappa 3): verifica della chiave del server contro `known_hosts`,
+  con conferma esplicita per server nuovi e blocco se la chiave cambia.
+- **Database** (tappa 4): TLS quando il server lo offre; parametri sempre
+  separati dal testo SQL nelle istruzioni generate dalla griglia; conferma
+  prima di istruzioni distruttive senza `WHERE`.
+- **Nessuna telemetria**, nessuna chiamata di rete dell'app che non sia
+  chiesta dall'utente.
+- **Dipendenze controllate**: `cargo audit` e `pnpm audit` a ogni fine tappa;
+  versioni bloccate dai lockfile.
+- **Repository pubblico**: nessun segreto, percorso personale o dato reale nel
+  codice, nei test o nelle fixture.
 
 ## 12. Verifica
 

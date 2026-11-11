@@ -1,0 +1,270 @@
+# Sicurezza di Code Art
+
+Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
+
+## Modello di minaccia (in dieci righe)
+
+1. La WebView mostra contenuti non fidati: output di Claude, file, nomi di file, risultati di strumenti.
+2. Va quindi trattata come potenzialmente compromessa (XSS da markdown, file o nomi costruiti ad arte).
+3. Una WebView compromessa può chiamare qualunque comando Tauri con argomenti arbitrari.
+4. Il core Rust è il confine: valida ogni argomento e non si fida di percorsi o id arrivati dalla pagina.
+5. Il core avvia `claude` in bypass permissions dentro le cartelle del progetto: lì si esegue codice.
+6. Una cartella appena clonata può essere ostile (istruzioni per il modello, script, hook).
+7. Quindi Claude, terminale e scritture su disco solo in cartelle fidate, scelte o confermate con UI nativa.
+8. L'ambiente della shell di login (con i segreti dell'utente) passa solo ai processi figli, mai alla pagina.
+9. Nessuna rete dalla WebView: niente script, stili, immagini o connessioni remote.
+10. Il repository è pubblico: nessun segreto, percorso personale o dato reale nei file tracciati.
+
+## Misure attive
+
+- **CSP restrittiva** (`src-tauri/tauri.conf.json`), verificata da `csp_has_no_unsafe_eval_or_remote_origin`.
+  Queste misure contro la compromissione della WebView (CSP, nessun contenuto remoto, markdown sanificato,
+  testo reso come testo) sono quelle che reggono il peso: in una finestra fidata una pagina compromessa può
+  eseguire qualunque cosa come l'utente (vedi "Rischi residui").
+- **Markdown sanificato**: `renderMarkdown` (`src/lib/safe-markdown.ts`, marked + DOMPurify con whitelist)
+  è l'unica sorgente di `{@html}`; l'HTML grezzo è scartato, nella conversazione le immagini non si caricano mai (nell'anteprima di un file solo
+  quelle locali del progetto, come `blob:`, vedi sotto), sopravvivono solo
+  link `http(s)` con `rel="noopener noreferrer"`, intercettati (`src/lib/conv/links.ts`) e aperti nel browser
+  di sistema. `src/lib/html-sites.test.ts` fallisce se compare un `{@html}` non sanificato o un
+  `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`.
+- **Anteprime di file** (markdown, immagini, PDF, audio/video; `src/lib/viewers.ts`): il contenuto arriva solo
+  da `fs_read_bytes` (confinato, ≤ 50 MB) e diventa un URL `blob:` con tipo MIME da tabella fissa per
+  estensione (mai sniffing, mai il nome del file in HTML). Le immagini (anche SVG) sono mostrate con `<img>`:
+  gli script in un SVG non vengono eseguiti. Il PDF è reso da `pdfjs-dist` (caricato al primo uso, worker
+  locale) su `<canvas>`, senza scripting, XFA né livello delle annotazioni (quindi nessun link nel PDF) e senza richieste di
+  rete (`disableAutoFetch`, `disableStream`, niente `cMapUrl`/font/wasm esterni). Che nulla venga valutato
+  come codice lo garantisce la CSP (nessun `unsafe-eval`; il bundle di pdf.js non usa `eval`/`new Function`). Il markdown passa
+  solo da `renderMarkdown`; con un risolutore di immagini opzionale (solo percorsi relativi al file, niente
+  schema, `//`, percorso assoluto o `..` che esce dal progetto) le immagini locali diventano `<img src="blob:…">`
+  (DOMPurify ammette `<img>` con solo `src` `blob:`, `alt`, `title`, `width`, `height`); le immagini remote o
+  `data:` restano scartate. Limiti per documento (`src/lib/image-budget.ts`): al massimo 4 caricamenti alla
+  volta, 100 immagini distinte, 10 MB l'una (`maxBytes` di `fs_read_bytes`, deciso dai metadati) e 60 MB in
+  totale; solo estensioni immagine della tabella MIME; le immagini si caricano quando si avvicinano alla vista;
+  le altre mostrano "immagine non caricata". Documenti markdown oltre 400 KB: si aprono in "Modifica" e
+  l'anteprima (render sincrono) si fa solo su richiesta; tra 100 e 400 KB l'aggiornamento dal vivo rallenta a
+  600 ms. La conversazione chiama `renderMarkdown` senza risolutore: immagini sempre scartate.
+- **La WebView non lascia mai la pagina dell'app**: ogni finestra ha una guardia di navigazione
+  (`projects::allow_navigation`, `on_navigation`): ammesse solo l'origine dell'app (`tauri://localhost`,
+  `http(s)://tauri.localhost`) e, nelle build di sviluppo, l'URL del server di Vite; `window.open` è negato
+  (`on_new_window`). Un file o un link trascinati fuori dalle zone di rilascio non navigano: a livello di finestra
+  `dragover`/`drop` sono annullati (`src/lib/dropguard.ts`, anche nel benvenuto). Tutti i link esterni (markdown,
+  terminale, ⌘-clic in Monaco con `registerLinkOpener`) passano da `openExternal` (`src/lib/external.ts`): solo
+  http(s), nel browser di sistema. Test: `navigation_stays_on_the_app_origin`, `dropguard.test.ts`, `external.test.ts`.
+- **Confinamento dei file**: i comandi `fs_*` e `pty_spawn` accettano solo percorsi assoluti dentro le
+  cartelle del progetto della finestra chiamante (`fs_tree::ensure_inside`: canonicalizzazione, `..`,
+  link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`
+  (passa dallo stesso passo etichetta → radici dei comandi, `fs_tree::mutable_path`).
+- **Cartelle nel progetto solo da UI nativa**: una cartella entra in un progetto solo dal selettore nativo
+  aperto dal core (`project_pick_and_open`, `project_pick_and_add_folder`, `project_pick_relocate`), dai
+  recenti/ripristino (store) o dal menu dell'app. Nessun comando accetta un percorso o un id di progetto
+  dalla WebView; i vecchi `project_open_folder`, `project_add_folder`, `project_relocate` sono stati rimossi.
+- **Cartelle fidate** (`src-tauri/src/trust.rs`, tabella `trusted_folders`): fidata = scelta col selettore
+  nativo oppure confermata con la domanda nativa "Ti fidi di questa cartella? Claude potrà eseguire comandi
+  al suo interno senza chiedere" (Mi fido / Apri in sola consultazione; il pulsante predefinito, quello di Invio, è "Apri in sola consultazione" e solo un clic esplicito su "Mi fido" concede la fiducia), mostrata dal core come foglio della
+  finestra (`trust_accept`): una pagina compromessa non può dichiarare fidata una cartella da sola. Le cartelle
+  già nello store prima di questa funzione non sono fidate (domanda all'apertura). Finché il progetto ha una
+  cartella non fidata `conv_start`/`conv_send` (e ogni avvio di `claude` in
+  `Engine::ensure_running`), `pty_spawn` e la titolazione automatica sono rifiutati con `untrusted_folder`;
+  albero, lettura, ricerca ed editor (in sola lettura) funzionano. La finestra mostra "Cartella non fidata — sola
+  lettura; Claude e terminale disattivati · Mi fido". Il dialogo ha un titolo fisso ("Cartella non fidata", non il
+  nome del progetto) e mostra i percorsi come testo. Un rifiuto vale per il resto dell'avvio per quel progetto:
+  nessuna nuova domanda automatica all'apertura delle finestre, e il "Mi fido" del banner è ignorato per 10 s
+  dopo il rifiuto (`trust::may_prompt`, testato); una domanda alla volta per progetto.
+- **Sola consultazione = sola lettura reale**: in un progetto con anche una sola cartella non fidata ogni comando
+  che modifica il disco (`fs_write`, `fs_create`, `fs_rename`, `fs_trash`) è rifiutato con `untrusted_folder`
+  da un unico punto (`fs_tree::mutable_path` → `writable_roots_for_label`). Senza questo una pagina compromessa
+  potrebbe piantare file eseguiti altrove: hook in `.git/hooks` o `.claude/settings.json` di una cartella fidata
+  annidata, oppure `~/.zshrc` (letto da ogni terminale) se la cartella non fidata è la home. Nell'interfaccia
+  editor Monaco `readOnly`, salvataggio disattivato, voci di modifica dell'albero disabilitate.
+  Test: `untrusted_project_is_read_only`.
+- **Fiducia per percorso**: la fiducia è legata al percorso (normalizzato, senza `/` finale), non all'inode.
+  Se una cartella fidata viene cancellata o sostituita (anche da un link simbolico) con altro contenuto allo
+  stesso percorso, resta fidata; spostandola o rinominandola invece non lo è più nel nuovo percorso (la si
+  riposiziona col selettore, che la rende fidata). La fiducia non si eredita: né sottocartelle né genitori.
+- **Permessi Tauri al minimo**, per tipo di finestra (sotto); verificati da `capabilities_grant_no_shell_or_fs_plugin`.
+- **Processi senza shell**: sempre lista di argomenti (sotto).
+- **Impostazioni**: `settings_get`/`settings_set` accettano solo chiavi in whitelist (`default_permission_mode`)
+  con valore validato.
+- **Eliminazione delle conversazioni (unica eccezione alla sola lettura di `~/.claude`)**: richiesta del
+  proprietario dopo la prova. `conv_delete` (`src-tauri/src/claude/delete.rs`, `Engine::delete_conversation`)
+  sposta nel Cestino di macOS (mai cancellazione definitiva, recuperabile) il file di sessione e l'eventuale
+  cartella `<id>/` accanto. Misure: conversazione del progetto della finestra chiamante e progetto fidato
+  (`untrusted_folder` altrimenti); `sessionId` validato con `valid_session_id`; il file si individua solo unendo
+  le cartelle di sessione note del progetto (`session_dirs_for`) con `<id>.jsonl`, mai da un percorso della
+  pagina; rifiutato se è un link simbolico o se, canonicalizzato, esce dalla radice delle sessioni (la cartella
+  `<id>/` si sposta solo se è una vera cartella dentro la radice); conferma NATIVA aperta dal core ("Eliminare la
+  conversazione?", titolo della conversazione come testo semplice, "Sposta nel Cestino" / "Annulla" con "Annulla"
+  predefinito), che la WebView non può aggirare né rispondere; un solo dialogo alla volta per finestra. Poi:
+  processo fermato, titolazione tolta dalla coda, riga dello store e cache dei metadati rimosse, evento
+  `conv:removed` (Dock ricalcolato). Il watcher vede sparire il file e lo ignora; una sincronizzazione successiva
+  non lo reimporta. Dopo la conferma (che può aspettare a lungo) la sessione è "in eliminazione": `send`/`resume`
+  sono rifiutati finché dura, e proprietà, fiducia e file sono ricontrollati, così nessun processo può ricreare il
+  file. Se la cartella `<id>/` non si sposta l'esito è `deletedWithWarning` (avviso all'utente); se la riga non si
+  toglie dallo store (due tentativi) l'errore lo dice e la sincronizzazione successiva scarta le righe con turni il cui
+  file non esiste più e senza processo. Il Cestino usa `NSFileManager` (`src-tauri/src/trasher.rs`, lo stesso di `fs_trash`),
+  non Finder/AppleScript (niente permesso di Automazione). Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
+- **Inventario dei comandi**: `every_command_is_registered_and_listed` verifica che ogni `#[tauri::command]`
+  sia registrato in `lib.rs` ed elencato nella tabella qui sotto.
+
+## Comandi Tauri
+
+Ambito: **finestra** = progetto ricavato dall'etichetta della finestra chiamante (`proj-<id>`), mai da un
+argomento; le chiamate dalla finestra di benvenuto falliscono. **globale** = non legato a un progetto.
+Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete proprie; `claude` sì, per suo conto).
+
+| Comando | Dalla WebView | Validazione | Ambito | Effetti |
+|---|---|---|---|---|
+| `project_current` | — | — | finestra | — |
+| `project_rename` | `name` | non vuoto dopo trim | finestra | titolo finestra, menu |
+| `project_pick_and_open` | — | il percorso viene dal selettore nativo; diventa fidato | globale | apre una finestra |
+| `project_pick_and_add_folder` | — | percorso dal selettore nativo (foglio della finestra); diventa fidato | finestra | allarga il confinamento F |
+| `project_pick_relocate` | `old` | deve essere una cartella del progetto; nuovo percorso dal selettore nativo, diventa fidato | finestra | sostituisce una radice F |
+| `project_missing_folders` | — | — | finestra | F (stat delle radici, fuori dal thread principale) |
+| `project_branch` | — | — | finestra | F (legge `.git/HEAD`, fuori dal thread principale) |
+| `settings_get` | `key` | whitelist | globale | — |
+| `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`) | globale | — |
+| `fs_list` | `path` | `ensure_inside` | finestra | F |
+| `fs_create` | `path`, `isDir` | `ensure_inside`; progetto fidato; non sovrascrive | finestra | F |
+| `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente; `from` mai una cartella del progetto (`movable_path`) | finestra | F |
+| `fs_trash` | `path` | `ensure_inside`; progetto fidato; mai una cartella del progetto (`movable_path`); Cestino, non cancellazione | finestra | F |
+| `fs_read` | `path` | `ensure_inside`; ≤ 5 MB, solo UTF-8 | finestra | F |
+| `fs_read_bytes` | `path`, `maxBytes?` | `ensure_inside` (stesso confinamento di `fs_read`, link simbolici compresi); solo file regolari; ≤ 50 MB e ≤ `maxBytes` se dato (`too_large`, deciso dai metadati prima di leggere); lettura, quindi ammessa anche in progetti non fidati; risposta binaria dell'IPC | finestra | F (lettura) |
+| `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |
+| `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
+| `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
+| `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
+| `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
+| `pty_resize` | `id`, `cols`, `rows` | PTY della stessa finestra; 1–1000 | finestra | P |
+| `pty_kill` | `id` | PTY della stessa finestra | finestra | P |
+| `conv_list` | `projectId` | deve coincidere con la finestra | finestra | F (legge `~/.claude`, sola lettura); titolazione solo se fidato |
+| `conv_history` | `sessionId` | UUID; conversazione del progetto | finestra | F (sola lettura) |
+| `conv_search` | `query` | 2–200 caratteri; tempo massimo 3 s | finestra | F (sola lettura) |
+| `claude_check` | — | — | globale | P (`claude --version`) |
+| `conv_start` | `projectId`, `opts` | coincide con la finestra; `model` (`valid_model`: niente spazi né `-` iniziale), `permissionMode` in whitelist; progetto fidato | finestra | P (`claude`), R |
+| `conv_send` | `sessionId`, `text`, `imagePaths` | UUID; del progetto; fidato; ≤ 10 immagini, ≤ 20 MB l'una e 30 MB in tutto, solo png/jpg/gif/webp canonicalizzate dentro la cartella immagini dell'app o del progetto | finestra | P, F (lettura immagini) |
+| `conv_answer` | `sessionId`, `requestId`, `choice` | del progetto; richiesta ancora aperta; scelta ammessa per il tipo (domande: testo per una domanda, oppure oggetto JSON con una risposta per ogni domanda e nessuna domanda sconosciuta) | finestra | P (stdin di `claude`) |
+| `conv_interrupt` | `sessionId` | del progetto | finestra | P |
+| `conv_set_model` | `sessionId`, `model` | del progetto; `valid_model` | finestra | P |
+| `conv_set_permission_mode` | `sessionId`, `mode` | del progetto; whitelist | finestra | P |
+| `conv_mark_viewed` | `sessionId` | del progetto | finestra | — |
+| `conv_archive` | `sessionId`, `archived` | del progetto | finestra | — |
+| `conv_save_image` | corpo binario, header `ext` | finestra di progetto; estensione in whitelist, byte iniziali coerenti, ≤ 20 MB; nome casuale, cartella 0700, file 0600 | finestra | F (cartella temporanea dell'app) |
+| `conv_delete` | `sessionId` | UUID; del progetto; fidato; file trovato solo dalle cartelle di sessione del progetto, no link simbolici né fuori radice; conferma nativa del core | finestra | F (sposta nel Cestino il file di sessione in `~/.claude`: unica scrittura lì), P (ferma il processo) |
+| `conv_pending` | `sessionId` | del progetto | finestra | — |
+| `conv_rename` | `sessionId`, `title` | del progetto; lunghezza e caratteri di controllo | finestra | — |
+| `conv_unlock_title` | `sessionId` | del progetto | finestra | — |
+| `editor_set_dirty` | `count` | finestra di progetto; ≤ 10 000; per finestra, dimenticato alla sua distruzione | finestra | — (la chiusura e l'uscita chiedono conferma) |
+| `trust_check` | — | — | finestra | — |
+| `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
+
+## CSP
+
+```
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
+media-src 'self' blob:; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none';
+base-uri 'none'; form-action 'none'
+```
+
+Rilassamenti e perché:
+- `style-src 'unsafe-inline'`: Monaco e xterm creano stili in linea ed elementi `<style>`; anche le
+  transizioni di Svelte. Gli script restano solo `'self'` (Tauri aggiunge da sé gli hash dei propri script).
+- `img-src data: blob:`: le icone di Monaco sono `data:` nel suo CSS; le anteprime delle immagini incollate
+  nel compositore sono URL `blob:`. Nessuna origine remota: la conversazione non carica immagini, l'anteprima di un file solo quelle locali del progetto.
+- `media-src 'self' blob:`: l'anteprima di audio e video usa `<audio>`/`<video>` con un URL `blob:` creato dai
+  byte letti con `fs_read_bytes` (confinati nel progetto, tipo MIME da una tabella fissa per estensione).
+  Nessuna origine remota: `blob:` può contenere solo ciò che la pagina stessa ha costruito.
+- `worker-src 'self' blob:`: i worker di Monaco (`?worker` di Vite, file in `assets/`); `blob:` per il
+  meccanismo di riserva di Monaco.
+- `connect-src ipc: http://ipc.localhost`: solo il canale IPC di Tauri.
+- `devCsp` (solo `pnpm tauri dev`): in più `ws://localhost:1420` per l'HMR di Vite.
+- Nessun `unsafe-eval` (verificato: il bundle non usa `eval`/`new Function`), nessuna origine remota,
+  `withGlobalTauri` spento, `dangerousDisableAssetCspModification: false`, asset protocol non abilitato.
+
+## Permessi Tauri (capabilities)
+
+`src-tauri/capabilities/project.json` (finestre `proj-*`):
+- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `pty:*`).
+  Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
+
+**Come arrivano gli eventi di un progetto.** In Tauri 2 `emit_to(etichetta)` filtra solo gli ascoltatori
+registrati *per quella finestra*: un ascoltatore globale (`listen` senza finestra) di qualunque finestra li riceve
+tutti. Per questo:
+- ogni evento di progetto porta l'id del progetto nel **nome**: `conv:event:<id>`, `conv:upsert:<id>`,
+  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
+  costruisce il nome (`projects::project_event` / `emit_to_project` nel core, `src/lib/events.ts` nell'interfaccia,
+  che lo ricava dal proprio progetto); il core lo emette con `emit_to` verso la sola finestra del progetto;
+- l'interfaccia ascolta solo con `getCurrentWebviewWindow().listen` (finestra corrente), mai con il `listen`
+  globale (`src/lib/events.test.ts` fallisce se un sorgente lo importa).
+- Test: `project_events_carry_the_project_id_in_the_name` (e nessun `emit_to` con nome fisso fuori dall'helper),
+  `listenProject` in `src/lib/events.test.ts`.
+- Rischio residuo: una pagina compromessa che conosce l'id (UUID) di un altro progetto può registrare un ascoltatore
+  globale su quel nome e leggerne gli eventi (output del terminale, testo delle conversazioni). Le altre finestre non
+  ricevono mai l'id di un progetto diverso dal proprio; la finestra di benvenuto non ha il permesso di ascolto.
+- `core:window:allow-start-dragging`, `core:window:allow-internal-toggle-maximize` — barra del titolo
+  (`data-tauri-drag-region`, doppio clic).
+- `opener:allow-open-url` limitato a `http://*` e `https://*` — link esterni nel browser di sistema.
+
+`src-tauri/capabilities/welcome.json` (finestra `welcome`): solo i due permessi della barra del titolo.
+
+Tolti rispetto a prima: `core:default` (comprendeva menu, emit, webview, app…), `dialog:default` (ora i
+dialoghi li apre solo il core). Nessun permesso `shell:` o `fs:`. I comandi dell'app non sono filtrati
+per finestra dall'ACL di Tauri: il confine è il controllo dell'etichetta nel core (tabella sopra).
+
+## Processi
+
+Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
+- `claude` (`engine.rs`): argomenti costanti + `--permission-mode` (whitelist), `--model` (`valid_model`),
+  `--resume`/`--session-id` (UUID validato), `--add-dir` (cartelle del progetto dallo store, fidate);
+  `current_dir` = cwd della conversazione, che la sincronizzazione accetta solo dentro le cartelle del progetto.
+  Ambiente: `env_clear()` + ambiente della shell di login.
+- `claude` per i titoli (`titles.rs`): argomenti costanti, cartella temporanea vuota, prompt su stdin;
+  mai per progetti non fidati.
+- `claude --version` (`locate.rs`): costante. L'eseguibile si cerca nel `PATH` della shell di login, poi in
+  `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local` (solo file eseguibili).
+- Ambiente della shell di login (`locate.rs`): `$SHELL -l -i -c env`, comando costante; `$SHELL` solo se assoluto.
+- Terminale (`pty.rs`): `$SHELL -l` (solo se percorso assoluto esistente, altrimenti `/bin/zsh`), cwd confinato.
+
+## Segreti e log
+
+- L'ambiente della shell di login (contiene i segreti dell'utente) vive solo in `Launch.env` in memoria:
+  il tipo non è serializzabile, non viene loggato né scritto su disco, e passa solo ai figli via `envs()`.
+  `claude_check` restituisce solo `found`, `version`, `path`.
+- Log: tre `eprintln!`: progetto non riapribile (nome e errore) e due misure di avvio attive solo con
+  `CODEART_TIMING=1` (millisecondi ed etichetta della finestra). Nessun contenuto di messaggi, file o variabili
+  d'ambiente nei log.
+- SQLite (`codeart.db`): progetti (nomi, percorsi), impostazioni, metadati delle conversazioni (titolo,
+  riassunto, stato), cartelle fidate. Nessuna credenziale. Schema versionato con `PRAGMA user_version`
+  (migrazioni in `store.rs`).
+- Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
+
+## Dipendenze (2026-11-11)
+
+- `pnpm audit --prod`: 5 avvisi (1 critico, 1 alto, 3 bassi) su `dompurify` 3.4.15 portato da
+  `monaco-editor`. Risolti con l'override `monaco-editor>dompurify: ^3.4.17` in `package.json`.
+  Esito dopo: nessuna vulnerabilità nota. Rimosso `@tauri-apps/plugin-dialog` (non più usato dalla pagina).
+- `cargo audit` (cargo-audit 0.23, 1453 avvisi nel database): nessuna vulnerabilità. 5 avvisi informativi
+  (non mantenuti: `proc-macro-error`, `zbus_names`, `zvariant`, `zvariant_derive`; unsound: `glib` 0.18):
+  tutte dipendenze transitive di Tauri/wry per Linux (GTK, D-Bus), non compilate su macOS. Nessuna azione.
+
+## Repository pubblico
+
+Scansione dei file tracciati: nessun percorso personale (solo `/Users/dev` e `/Users/a` nei test), nessuna
+email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `.gitignore` copre anche
+`.env*`, database locali (`*.db`, `*.sqlite`), chiavi (`*.pem`, `*.key`) e `.claude/settings.local.json`.
+
+## Rischi residui
+
+- **Fidarsi di una cartella significa fidarsi della pagina in quella finestra.** In una finestra di progetto
+  fidato una WebView compromessa può avviare un terminale (`pty_spawn` + `pty_write`) ed eseguire qualunque
+  comando come l'utente, ovunque, leggendone l'output da `pty:data`; lo stesso tramite `claude` in bypass
+  permissions (`conv_start`/`conv_send`). Una finestra fidata compromessa equivale alla compromissione
+  dell'account. Il confine reale è: **le cartelle non fidate e la finestra di benvenuto non possono eseguire
+  codice né modificare il disco**. Per le finestre fidate il peso lo reggono le misure che impediscono la
+  compromissione della WebView: nessun contenuto remoto, CSP restrittiva, markdown sanificato, tutto il resto
+  reso come testo.
+- La CLI `claude` in bypass permissions, in una cartella fidata, può fare tutto ciò che può fare l'utente:
+  è la scelta voluta, resa visibile (modalità in ambra, domanda di fiducia).
+- Fiducia per percorso, non per inode (vedi "Misure attive").
+- Eventi di progetto: una pagina compromessa che conosce l'UUID di un altro progetto può ascoltarne gli eventi
+  (vedi "Come arrivano gli eventi di un progetto").
+- La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).
