@@ -4,8 +4,13 @@
   import { windowRange, WINDOW_THRESHOLD } from '../lib/conv/order'
   import ConvCard from './ConvCard.svelte'
 
-  /** Altezza fissa di una riga (scheda + spazio) usata dalla finestra di rendering oltre 50 schede. */
-  const ROW = 112
+  /** Altezza fissa della scheda (con "era:" il riassunto scende a una riga, quindi l'altezza non cambia) e spazio tra le schede.
+   *  Stessi valori con e senza finestra di rendering. */
+  const CARD = 100
+  const GAP = 8
+  const ROW = CARD + GAP
+  const MENU_W = 170
+  const MENU_H = 112
 
   let now = $state(Date.now())
   let renamingId = $state<string | null>(null)
@@ -21,10 +26,15 @@
   onMount(() => {
     const tick = setInterval(() => (now = Date.now()), 60_000)
     const close = () => (menu = null)
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && (menu = null)
     window.addEventListener('click', close)
+    window.addEventListener('keydown', esc)
+    window.addEventListener('blur', close)
     return () => {
       clearInterval(tick)
       window.removeEventListener('click', close)
+      window.removeEventListener('keydown', esc)
+      window.removeEventListener('blur', close)
     }
   })
 
@@ -40,7 +50,7 @@
   <div class="h">
     <span>Conversazioni</span>
     <span class="actions">
-      <button class="link" class:on={conversations.showArchived} onclick={() => (conversations.showArchived = !conversations.showArchived)}>Archiviate</button>
+      <button class="link" class:on={conversations.showArchived} title={conversations.showArchived ? 'Torna a tutte le conversazioni' : 'Mostra solo le archiviate'} onclick={() => (conversations.showArchived = !conversations.showArchived)}>{conversations.showArchived ? '← Tutte' : 'Archiviate'}</button>
       <button class="link" onclick={() => void conversations.create()}>＋ nuova</button>
     </span>
   </div>
@@ -51,7 +61,7 @@
     {:else if virtual}
       <div style:height="{list.length * ROW}px" style:position="relative">
         {#each visible as c, i (c.sessionId)}
-          <div class="row" style:position="absolute" style:top="{(range.start + i) * ROW}px" style:height="{ROW}px" style:left="0" style:right="0">
+          <div class="row" style:position="absolute" style:top="{(range.start + i) * ROW}px" style:left="0" style:right="0">
             {@render card(c)}
           </div>
         {/each}
@@ -81,7 +91,7 @@
     oncontextmenu={(ev) => {
       ev.preventDefault()
       ev.stopPropagation()
-      menu = { x: ev.clientX, y: ev.clientY, id: c.sessionId, archived: c.archived, locked: c.titleLocked }
+      menu = { x: Math.max(4, Math.min(ev.clientX, window.innerWidth - MENU_W - 4)), y: Math.max(4, Math.min(ev.clientY, window.innerHeight - MENU_H - 4)), id: c.sessionId, archived: c.archived, locked: c.titleLocked }
     }}
   />
 {/snippet}
@@ -99,6 +109,7 @@
 {/if}
 
 <style>
+  /* altezza/spazio devono restare uguali a CARD/GAP nello script */
   .wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .h {
     font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint);
@@ -108,8 +119,7 @@
   .link { background: none; border: 0; padding: 0; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; }
   .link:hover, .link.on { color: var(--accent); }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; }
-  .row { margin-bottom: 7px; }
-  .row:last-child { margin-bottom: 0; }
+  .row { height: 100px; margin-bottom: 8px; }
   .empty, .err { margin: 8px 2px; font-size: 12px; color: var(--faint); }
   .err { color: var(--wait); }
   .menu {

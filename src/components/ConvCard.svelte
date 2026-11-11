@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import type { Conversation } from '../lib/types'
   import { relativeTime } from '../lib/conv/time'
 
@@ -21,12 +22,6 @@
 
   let draft = $state('')
   let finished = false
-  $effect(() => {
-    if (renaming) {
-      draft = conv.title
-      finished = false
-    }
-  })
 
   function commit() {
     if (finished) return
@@ -39,7 +34,13 @@
     finished = true
     oncancelrename?.()
   }
+  // La bozza si inizializza solo alla comparsa del campo: gli upsert di `conv` durante la digitazione non la toccano.
   function focusSelect(node: HTMLInputElement) {
+    untrack(() => {
+      draft = conv.title
+      finished = false
+    })
+    node.value = draft
     node.focus()
     node.select()
   }
@@ -92,7 +93,7 @@
     <div class="prev" title={conv.prevTitle}>era: {conv.prevTitle}</div>
   {/if}
   {#if conv.summary}
-    <div class="s">{conv.summary}</div>
+    <div class="s" class:one={!!conv.prevTitle}>{conv.summary}</div>
   {/if}
   <div class="m">
     {#if label}<span class="badge {conv.status}">{label}</span>{:else}<span></span>{/if}
@@ -132,6 +133,7 @@
     color: var(--dim); font-size: 11.5px; margin: 3px 0 0 16px; overflow: hidden;
     display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
   }
+  .s.one { -webkit-line-clamp: 1; line-clamp: 1; }
   .m { color: var(--faint); font-size: 10.5px; margin: 4px 0 0 16px; display: flex; justify-content: space-between; align-items: center; }
   .badge { font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
   .badge.waiting { color: var(--wait); }

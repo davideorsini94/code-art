@@ -26,14 +26,15 @@ class ConversationStore {
     const gen = ++this.generation
     let loading = true
     const early: Conversation[] = []
-    const un = await listen<Conversation>('conv:upsert', (ev) => {
-      if (gen !== this.generation || ev.payload.projectId !== projectId) return
-      if (loading) early.push(ev.payload)
-      else this.upsert(ev.payload)
-    })
-    if (gen !== this.generation) return un()
-    this.unlisten = un
+    this.error = null
     try {
+      const un = await listen<Conversation>('conv:upsert', (ev) => {
+        if (gen !== this.generation || ev.payload.projectId !== projectId) return
+        if (loading) early.push(ev.payload)
+        else this.upsert(ev.payload)
+      })
+      if (gen !== this.generation) return un()
+      this.unlisten = un
       this.all = await convList(projectId)
     } catch (e) {
       this.error = String(e)

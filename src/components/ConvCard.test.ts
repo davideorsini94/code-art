@@ -101,4 +101,12 @@ describe('ConvCard', () => {
     expect(onrename).not.toHaveBeenCalled()
     expect(oncancelrename).toHaveBeenCalledOnce()
   })
+
+  it('la bozza di rinomina sopravvive a un nuovo oggetto conv (upsert) durante la digitazione', async () => {
+    const { rerender } = render(ConvCard, { conv: base, now, renaming: true })
+    const input = screen.getByLabelText('Titolo della conversazione') as HTMLInputElement
+    await fireEvent.input(input, { target: { value: 'Sto scrivendo' } })
+    await rerender({ conv: { ...base, title: 'Titolo rigenerato', summary: 'Altro riassunto', lastActivity: now }, now, renaming: true })
+    expect((screen.getByLabelText('Titolo della conversazione') as HTMLInputElement).value).toBe('Sto scrivendo')
+  })
 })
