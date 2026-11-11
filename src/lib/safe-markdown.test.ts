@@ -24,11 +24,15 @@ describe('renderMarkdown', () => {
     expect(out).toContain('const a = 1 &lt; 2')
   })
   it('renders safe links with rel noopener noreferrer', () => {
-    for (const url of ['https://example.com/a', 'http://example.com', 'mailto:a@example.com']) {
+    for (const url of ['https://example.com/a', 'http://example.com']) {
       const out = renderMarkdown(`[x](${url})`)
       expect(out).toContain(`href="${url}"`)
       expect(out).toContain('rel="noopener noreferrer"')
     }
+  })
+  it('keeps only http(s) links (the opener permission allows nothing else)', () => {
+    expect(renderMarkdown('[x](mailto:a@example.com)')).not.toContain('href=')
+    expect(renderMarkdown('[x](vbscript:msgbox)')).not.toContain('href=')
   })
   it('does not render raw html as html', () => {
     const out = renderMarkdown('<b>grassetto</b> e <iframe src="https://x"></iframe><form action="/x"><input></form>')

@@ -2,14 +2,19 @@ import { invoke } from '@tauri-apps/api/core'
 import type { Project } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
-export const projectOpenFolder = (path: string) => invoke<Project>('project_open_folder', { path })
+// Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
 export const projectPickAndOpen = () => invoke<void>('project_pick_and_open')
-export const projectRename = (id: string, name: string) => invoke<Project>('project_rename', { id, name })
-export const projectAddFolder = (id: string, path: string) => invoke<Project>('project_add_folder', { id, path })
-export const projectRelocate = (id: string, old: string, newPath: string) =>
-  invoke<Project>('project_relocate', { id, old, new: newPath })
-export const projectMissingFolders = (id: string) => invoke<string[]>('project_missing_folders', { id })
-export const projectBranch = (id: string) => invoke<string | null>('project_branch', { id })
+/** `null` = selezione annullata. */
+export const projectPickAndAddFolder = () => invoke<Project | null>('project_pick_and_add_folder')
+/** Sceglie (selettore nativo) la nuova posizione della cartella `old` del progetto; `null` = annullato. */
+export const projectPickRelocate = (old: string) => invoke<Project | null>('project_pick_relocate', { old })
+export const projectRename = (name: string) => invoke<Project>('project_rename', { name })
+export const projectMissingFolders = () => invoke<string[]>('project_missing_folders')
+export const projectBranch = () => invoke<string | null>('project_branch')
+/** Cartelle del progetto della finestra non ancora fidate (Claude e terminale disattivati finché ce n'è una). */
+export const trustCheck = () => invoke<string[]>('trust_check')
+/** Mostra la domanda nativa "Ti fidi di questa cartella?"; vero se ora il progetto è fidato. */
+export const trustAccept = () => invoke<boolean>('trust_accept')
 export const settingsGet = (key: string) => invoke<string | null>('settings_get', { key })
 export const settingsSet = (key: string, value: string) => invoke<void>('settings_set', { key, value })
 

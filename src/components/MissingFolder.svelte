@@ -1,11 +1,8 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog'
   import { projectStore } from '../lib/stores/project.svelte'
 
-  async function choose(old: string) {
-    const picked = await open({ directory: true, multiple: false, title: 'Scegli la nuova posizione' })
-    if (typeof picked === 'string') await projectStore.relocate(old, picked)
-  }
+  // il selettore lo apre il core: il percorso scelto non passa dalla WebView
+  const choose = (old: string) => void projectStore.relocate(old).catch(() => {})
 </script>
 
 {#if projectStore.missing.length > 0}

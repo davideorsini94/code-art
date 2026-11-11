@@ -2,6 +2,7 @@
   import Titlebar from './components/Titlebar.svelte'
   import Rail from './components/Rail.svelte'
   import MissingFolder from './components/MissingFolder.svelte'
+  import TrustBanner from './components/TrustBanner.svelte'
   import FileTree from './components/FileTree.svelte'
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
@@ -125,6 +126,7 @@
       </div>
     </main>
   {:else}
+  <TrustBanner />
   <main class="body" style:grid-template-columns={template}>
     <div class="slot rail"><Rail {collapsed} ontoggle={toggle} /></div>
     {#each cols as { col, label } (col)}

@@ -9,6 +9,7 @@
   import { conversations } from '../lib/stores/conversations.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { convInterrupt, convSaveImage, convSend, convSetModel, convSetPermissionMode } from '../lib/ipc'
+  import { errorText } from '../lib/errors'
   import { BUILTIN_COMMANDS, completeSlash, slashMatches } from '../lib/conv/slash'
   import { displayedModel } from '../lib/conv/model'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
@@ -169,7 +170,7 @@
         clearDraft(sessionId)
       }
     } catch (e) {
-      error = String(e)
+      error = errorText(e)
     } finally {
       busy = false
     }

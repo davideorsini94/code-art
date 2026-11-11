@@ -1,9 +1,11 @@
 mod claude;
-mod fs_tree;
+/// Pubblico per i test di integrazione (`tests/security.rs`): il confinamento dei percorsi.
+pub mod fs_tree;
 mod lifecycle;
 mod projects;
 mod pty;
 mod store;
+mod trust;
 
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -65,11 +67,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            projects::project_open_folder,
             projects::project_current,
             projects::project_rename,
-            projects::project_add_folder,
-            projects::project_relocate,
+            projects::project_pick_and_add_folder,
+            projects::project_pick_relocate,
             projects::project_missing_folders,
             projects::project_pick_and_open,
             projects::project_branch,
@@ -105,6 +106,8 @@ pub fn run() {
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
+            trust::trust_check,
+            trust::trust_accept,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

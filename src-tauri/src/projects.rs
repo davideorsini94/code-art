@@ -12,7 +12,7 @@ const WELCOME_LABEL: &str = "welcome";
 
 // ---------- logica pura ----------
 
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let t = path.trim_end_matches('/');
     if t.is_empty() { "/".to_string() } else { t.to_string() }
 }
@@ -186,13 +186,17 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     let _ = handle_window_closed(&app.state::<Store>(), label, quitting);
 }
 
+/// Selettore nativo "Apri cartella": unica via (con menu e recenti) per aprire una cartella come progetto.
+/// La cartella scelta qui diventa fidata.
 pub fn pick_and_open(app: &AppHandle) {
     let app = app.clone();
     app.dialog().file().pick_folder({
         let app = app.clone();
         move |picked| {
             if let Some(path) = picked.and_then(|p| p.into_path().ok()) {
-                let _ = open_path(&app, &path.to_string_lossy());
+                let path = path.to_string_lossy();
+                let _ = crate::trust::mark_trusted(&app.state::<Store>(), &path);
+                let _ = open_path(&app, &path);
             }
         }
     });
@@ -202,6 +206,24 @@ fn open_path(app: &AppHandle, path: &str) -> Result<Project> {
     let project = open_folder(&app.state::<Store>(), path)?;
     show_project_window(app, &project)?;
     Ok(project)
+}
+
+/// Selettore nativo come foglio della finestra, aperto dal core: il percorso non arriva mai dalla WebView.
+/// La cartella scelta diventa fidata. `None` = annullato.
+async fn pick_folder_for(app: &AppHandle, window: &WebviewWindow, title: &str) -> Result<Option<String>> {
+    let dialog = app.dialog().file().set_title(title).set_parent(window);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    let path = path.to_string_lossy().into_owned();
+    crate::trust::mark_trusted(&app.state::<Store>(), &path)?;
+    Ok(Some(path))
+}
+
+/// Progetto della finestra chiamante (dall'etichetta, mai da un argomento).
+fn window_project_id(window: &WebviewWindow) -> Result<String> {
+    window.label().strip_prefix(PROJECT_PREFIX).map(String::from).ok_or_else(|| "questa finestra non è un progetto".into())
 }
 
 // ---------- menu ----------
@@ -274,47 +296,50 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
 }
 
 // ---------- comandi (involucri sottili) ----------
-
-#[tauri::command]
-pub fn project_open_folder(app: AppHandle, path: String) -> Result<Project> {
-    open_path(&app, &path)
-}
+// Nessun comando accetta un percorso o un id di progetto dalla WebView: il progetto è quello della finestra
+// chiamante, le cartelle nuove arrivano solo dal selettore nativo.
 
 #[tauri::command]
 pub fn project_current(window: WebviewWindow, store: State<Store>) -> Result<Project> {
-    let id = window.label().strip_prefix(PROJECT_PREFIX).ok_or("questa finestra non è un progetto")?;
-    must_get(&store, id)
+    must_get(&store, &window_project_id(&window)?)
 }
 
 #[tauri::command]
-pub fn project_rename(app: AppHandle, store: State<Store>, id: String, name: String) -> Result<Project> {
-    let p = rename(&store, &id, &name)?;
-    if let Some(w) = app.get_webview_window(&window_label(&id)) {
-        let _ = w.set_title(&p.name);
-    }
+pub fn project_rename(app: AppHandle, window: WebviewWindow, store: State<Store>, name: String) -> Result<Project> {
+    let p = rename(&store, &window_project_id(&window)?, &name)?;
+    let _ = window.set_title(&p.name);
     let _ = rebuild_menu(&app);
     Ok(p)
 }
 
+/// Aggiunge al progetto della finestra una cartella scelta con il selettore nativo. `None` = annullato.
 #[tauri::command]
-pub fn project_add_folder(app: AppHandle, store: State<Store>, id: String, path: String) -> Result<Project> {
-    let p = add_folder(&store, &id, &path)?;
+pub async fn project_pick_and_add_folder(app: AppHandle, window: WebviewWindow) -> Result<Option<Project>> {
+    let id = window_project_id(&window)?;
+    let Some(path) = pick_folder_for(&app, &window, "Aggiungi cartella al progetto").await? else { return Ok(None) };
+    let p = add_folder(&app.state::<Store>(), &id, &path)?;
     crate::fs_tree::watch_project(&app, &p);
     crate::claude::sessions::watch_project(&app, &p);
-    Ok(p)
+    Ok(Some(p))
+}
+
+/// Sostituisce la cartella `old` del progetto della finestra con una scelta dal selettore nativo. `None` = annullato.
+#[tauri::command]
+pub async fn project_pick_relocate(app: AppHandle, window: WebviewWindow, old: String) -> Result<Option<Project>> {
+    let id = window_project_id(&window)?;
+    if !must_get(&app.state::<Store>(), &id)?.folders.contains(&normalize(&old)) {
+        return Err("cartella non trovata nel progetto".into());
+    }
+    let Some(path) = pick_folder_for(&app, &window, "Scegli la nuova posizione").await? else { return Ok(None) };
+    let p = relocate(&app.state::<Store>(), &id, &old, &path)?;
+    crate::fs_tree::watch_project(&app, &p);
+    crate::claude::sessions::watch_project(&app, &p);
+    Ok(Some(p))
 }
 
 #[tauri::command]
-pub fn project_relocate(app: AppHandle, store: State<Store>, id: String, old: String, new: String) -> Result<Project> {
-    let p = relocate(&store, &id, &old, &new)?;
-    crate::fs_tree::watch_project(&app, &p);
-    crate::claude::sessions::watch_project(&app, &p);
-    Ok(p)
-}
-
-#[tauri::command]
-pub fn project_missing_folders(store: State<Store>, id: String) -> Result<Vec<String>> {
-    missing_folders(&store, &id)
+pub fn project_missing_folders(window: WebviewWindow, store: State<Store>) -> Result<Vec<String>> {
+    missing_folders(&store, &window_project_id(&window)?)
 }
 
 #[tauri::command]
@@ -323,17 +348,32 @@ pub fn project_pick_and_open(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn project_branch(store: State<Store>, id: String) -> Result<Option<String>> {
-    branch(&store, &id)
+pub fn project_branch(window: WebviewWindow, store: State<Store>) -> Result<Option<String>> {
+    branch(&store, &window_project_id(&window)?)
+}
+
+/// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
+const WEB_SETTINGS: &[(&str, fn(&str) -> bool)] =
+    &[("default_permission_mode", crate::claude::engine::valid_permission_mode)];
+
+fn web_setting(key: &str) -> Result<fn(&str) -> bool> {
+    WEB_SETTINGS.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).ok_or_else(|| format!("impostazione sconosciuta: {key}"))
+}
+
+/// Valida chiave e valore di un'impostazione scritta dalla WebView.
+pub fn check_web_setting(key: &str, value: &str) -> Result<()> {
+    if web_setting(key)?(value) { Ok(()) } else { Err(format!("valore non valido per {key}")) }
 }
 
 #[tauri::command]
 pub fn settings_get(store: State<Store>, key: String) -> Result<Option<String>> {
+    web_setting(&key)?;
     store.setting_get(&key)
 }
 
 #[tauri::command]
 pub fn settings_set(store: State<Store>, key: String, value: String) -> Result<()> {
+    check_web_setting(&key, &value)?;
     store.setting_set(&key, &value)
 }
 
@@ -425,6 +465,13 @@ mod tests {
         assert_eq!(s.get_project(&p.id).unwrap().unwrap().folders.len(), 2);
         relocate(&s, &p.id, "/tmp/x/a", "/tmp/y/a").unwrap();
         assert_eq!(s.get_project(&p.id).unwrap().unwrap().folders[0], "/tmp/y/a");
+    }
+
+    #[test]
+    fn web_settings_are_whitelisted_and_validated() {
+        assert!(check_web_setting("default_permission_mode", "plan").is_ok());
+        assert!(check_web_setting("default_permission_mode", "tutto").is_err());
+        assert!(check_web_setting("claude_path", "/tmp/x").is_err());
     }
 
     #[test]

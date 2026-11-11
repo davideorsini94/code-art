@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { convArchive, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
+import { errorText } from '../errors'
 import { activeCount, sortConversations, upsertConversation, waitingCount } from '../conv/order'
 import { clearDraft } from '../conv/draft'
 import type { Conversation } from '../types'
@@ -47,7 +48,7 @@ class ConversationStore {
       this.unlistenFocus = unFocus
       this.all = await convList(projectId)
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     }
     if (gen !== this.generation) return
     loading = false
@@ -76,7 +77,7 @@ class ConversationStore {
     try {
       await convMarkViewed(id)
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     }
   }
 
@@ -88,7 +89,7 @@ class ConversationStore {
       await this.select(id)
       return id
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
       return null
     }
   }
@@ -98,7 +99,7 @@ class ConversationStore {
     try {
       await op()
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     }
   }
 

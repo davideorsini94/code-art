@@ -3,6 +3,7 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
   import { openUrl } from '@tauri-apps/plugin-opener'
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
+  import { UNTRUSTED } from '../lib/errors'
   import { projectStore } from '../lib/stores/project.svelte'
 
   type XTerm = import('@xterm/xterm').Terminal
@@ -141,8 +142,12 @@
       if (pendingExit.delete(id)) markExited(id)
       term.onData((d) => void ptyWrite(id, d).catch(() => {}))
       term.onResize(({ cols, rows }) => void ptyResize(id, cols, rows).catch(() => {}))
-    } catch {
-      term.write('\x1b[31mImpossibile avviare la shell\x1b[0m\r\n')
+    } catch (e) {
+      term.write(
+        String(e) === UNTRUSTED
+          ? '\x1b[33mCartella non fidata: terminale disattivato\x1b[0m\r\n'
+          : '\x1b[31mImpossibile avviare la shell\x1b[0m\r\n',
+      )
       const t = tabs.find((x) => x.key === key)
       if (t) t.exited = true
     }

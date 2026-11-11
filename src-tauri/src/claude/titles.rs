@@ -308,6 +308,10 @@ impl TitleQueue {
         if !due(&conv, title_turn) {
             return true;
         }
+        // la titolazione avvia `claude`: mai per un progetto non fidato (scartata, non un fallimento)
+        if crate::trust::ensure_project_trusted(store, &conv.project_id).is_err() {
+            return true;
+        }
         let Some(items) = self.read_items(&conv) else { return false };
         // senza titolo generato quello salvato è provvisorio (primo prompt): non conta come "attuale"
         let current = title_turn.is_some().then_some(conv.title.as_str()).filter(|t| !t.is_empty());
@@ -708,6 +712,8 @@ mod tests {
         let sink = Arc::new(FakeSink::default());
         let queue = TitleQueue::new(store.clone(), sink.clone(), root.clone(), fake.clone());
         let project = Project { id: "p1".into(), name: "proj".into(), folders: vec!["/Users/dev/proj".into()] };
+        store.upsert_project(&project).unwrap();
+        crate::trust::mark_trusted(&store, "/Users/dev/proj").unwrap();
         Env { _d: d, root, store, sink, queue, fake, project }
     }
 
@@ -745,6 +751,18 @@ mod tests {
         assert!(ev.iter().any(|(p, n, v)| p == "p1" && n == "conv:upsert" && v["title"] == "Titolo nuovo"));
         // il titolo provvisorio non è presentato come "attuale"
         assert!(e.fake.prompts.lock().unwrap()[0].contains("<current_title></current_title>"));
+    }
+
+    #[test]
+    fn untrusted_project_is_never_titled() {
+        let e = env(Fake::new(REPLY));
+        e.store.upsert_project(&Project { id: "p1".into(), name: "proj".into(), folders: vec!["/Users/dev/altro".into()] }).unwrap();
+        let id = sid(1);
+        seed(&e, &id, 1);
+        e.queue.enqueue_if_due(&id);
+        e.queue.wait_idle();
+        assert_eq!(e.fake.calls(), 0);
+        assert_eq!(e.store.get_conversation(&id).unwrap().unwrap().title, "provvisorio");
     }
 
     #[test]

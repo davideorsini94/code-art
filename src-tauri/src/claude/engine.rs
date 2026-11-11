@@ -288,6 +288,7 @@ impl Engine {
     // ---------- comandi ----------
 
     pub fn start(&self, project_id: &str, opts: StartOpts) -> Result<String> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         let project = self.project(project_id)?;
         if let Some(m) = opts.model.as_deref().filter(|m| !valid_model(m)) {
             return Err(format!("modello non valido: {m}"));
@@ -310,11 +311,13 @@ impl Engine {
     }
 
     pub fn resume(&self, project_id: &str, session_id: &str) -> Result<()> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         self.owned_conv(project_id, session_id)?;
         self.ensure_running(project_id, session_id).map(|_| ())
     }
 
     pub fn send(&self, project_id: &str, session_id: &str, text: &str, image_paths: &[String]) -> Result<()> {
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         self.owned_conv(project_id, session_id)?;
         let project = self.project(project_id)?;
         if image_paths.len() > IMAGES_MAX_PER_MESSAGE {
@@ -620,6 +623,8 @@ impl Engine {
             }
         };
         let claude = claude.ok_or("claude non trovato")?;
+        // difesa in profondità: ogni avvio di `claude` passa da qui
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
         let project = self.project(project_id)?;
         self.0.store.mark_conversation_owned(session_id)?;
         let row = self.owned_conv(project_id, session_id)?;
@@ -1051,6 +1056,9 @@ mod tests {
         store
             .upsert_project(&Project { id: "p2".into(), name: "altro".into(), folders: vec![folders[1].to_string_lossy().into_owned()] })
             .unwrap();
+        for f in &folders {
+            crate::trust::mark_trusted(&store, &f.to_string_lossy()).unwrap();
+        }
         let mut env: HashMap<String, String> =
             [("PATH".to_string(), "/usr/bin:/bin".to_string()), ("FAKE_CLAUDE_OUT".to_string(), out.to_string_lossy().into_owned())].into();
         for (k, v) in vars {
@@ -1122,6 +1130,25 @@ mod tests {
         assert!(env.engine.running("p2").is_empty());
         // handshake `initialize` inviato all'avvio
         wait_until("initialize", || stdin_lines(&env, &sid).iter().any(|l| l["request"]["subtype"] == "initialize"));
+    }
+
+    #[test]
+    fn conv_start_in_untrusted_folder_is_rejected() {
+        let env = setup(&[]);
+        let folder = env.folders[0].parent().unwrap().join("non-fidata");
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = folder.to_string_lossy().into_owned();
+        env.store.upsert_project(&Project { id: "p3".into(), name: "nuovo".into(), folders: vec![folder.clone()] }).unwrap();
+        assert_eq!(env.engine.start("p3", StartOpts::default()).unwrap_err(), crate::trust::UNTRUSTED);
+        assert!(env.store.list_conversations("p3").unwrap().is_empty());
+        let sid = "33333333-3333-4333-8333-333333333333";
+        env.store.insert_owned_conversation("p3", sid, &folder, None, "default").unwrap();
+        assert_eq!(env.engine.resume("p3", sid).unwrap_err(), crate::trust::UNTRUSTED);
+        assert_eq!(env.engine.send("p3", sid, "ciao", &[]).unwrap_err(), crate::trust::UNTRUSTED);
+        assert!(env.engine.running("p3").is_empty());
+        crate::trust::mark_trusted(&env.store, &folder).unwrap();
+        let sid = env.engine.start("p3", StartOpts::default()).unwrap();
+        assert_eq!(env.engine.running("p3"), vec![sid]);
     }
 
     #[test]

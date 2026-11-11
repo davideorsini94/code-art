@@ -148,7 +148,8 @@ fn save_image_in(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result<Strin
 /// Salva un'immagine incollata/trascinata nella cartella temporanea dell'app; ritorna il percorso da passare a `conv_send`.
 /// I byte arrivano come corpo binario della richiesta (niente array JSON); l'estensione nell'header `ext`.
 #[tauri::command]
-pub async fn conv_save_image(request: tauri::ipc::Request<'_>) -> Result<String> {
+pub async fn conv_save_image(window: WebviewWindow, request: tauri::ipc::Request<'_>) -> Result<String> {
+    window_project_id(&window)?; // solo le finestre di progetto
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("corpo della richiesta non binario".into());
     };

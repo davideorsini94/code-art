@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   seen_turn INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
+CREATE TABLE IF NOT EXISTS trusted_folders (
+  path TEXT PRIMARY KEY
+);
 ";
 
 fn now_ms() -> i64 {
@@ -379,6 +382,19 @@ impl Store {
     #[cfg(test)]
     pub fn exec_for_test(&self, sql: &str, arg: &str) {
         self.conn().execute(sql, [arg]).unwrap();
+    }
+
+    pub fn folder_trusted(&self, path: &str) -> Result<bool> {
+        self.conn()
+            .query_row("SELECT 1 FROM trusted_folders WHERE path = ?1", [path], |_| Ok(()))
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(err)
+    }
+
+    pub fn trust_folder(&self, path: &str) -> Result<()> {
+        self.conn().execute("INSERT OR IGNORE INTO trusted_folders(path) VALUES (?1)", [path]).map_err(err)?;
+        Ok(())
     }
 
     pub fn setting_get(&self, key: &str) -> Result<Option<String>> {

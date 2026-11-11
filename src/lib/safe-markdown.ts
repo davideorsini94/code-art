@@ -5,7 +5,7 @@ import { Marked } from 'marked'
  * Unico punto da cui può nascere HTML per `{@html}`: markdown non fidato (risposte, piani) -> HTML sanificato.
  * - l'HTML grezzo nel sorgente non viene interpretato: scartato (i tag nudi come `<String>` restano visibili come testo);
  * - le immagini non vengono caricate (niente richieste di rete dall'interfaccia): resta il testo alternativo;
- * - sopravvivono solo link http:, https: e mailto:, con rel="noopener noreferrer".
+ * - sopravvivono solo link http: e https: (gli unici che il permesso dell'opener lascia aprire), con rel="noopener noreferrer".
  */
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -33,7 +33,7 @@ const CONFIG = {
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span',
   ],
   ALLOWED_ATTR: ['href', 'rel', 'class', 'align'],
-  ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i,
+  ALLOWED_URI_REGEXP: /^https?:/i,
   ALLOW_DATA_ATTR: false,
   ALLOW_ARIA_ATTR: false,
 }
@@ -45,5 +45,5 @@ export function renderMarkdown(src: string): string {
 
 /** Vero se l'indirizzo si può aprire nel browser di sistema. */
 export function isSafeLink(href: string): boolean {
-  return /^(?:https?:|mailto:)/i.test(href.trim())
+  return /^https?:/i.test(href.trim())
 }

@@ -1,5 +1,4 @@
-import { open } from '@tauri-apps/plugin-dialog'
-import { projectAddFolder, projectPickAndOpen } from '../ipc'
+import { projectPickAndAddFolder, projectPickAndOpen } from '../ipc'
 import { conversations } from '../stores/conversations.svelte'
 import { projectStore } from '../stores/project.svelte'
 
@@ -150,10 +149,11 @@ export const commands: Command[] = [
     title: 'Aggiungi cartella al progetto',
     run: () =>
       void (async () => {
-        const project = projectStore.project
-        if (!project) return
-        const picked = await open({ directory: true, multiple: false, title: 'Aggiungi cartella al progetto' })
-        if (typeof picked === 'string') projectStore.project = await projectAddFolder(project.id, picked)
+        if (!projectStore.project) return
+        const p = await projectPickAndAddFolder()
+        if (!p) return
+        projectStore.project = p
+        await projectStore.refreshTrust()
       })().catch(() => {}),
   },
   { id: 'project.rename', title: 'Rinomina progetto', run: () => hooks.renameProject() },
