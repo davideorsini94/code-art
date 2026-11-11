@@ -56,7 +56,7 @@ struct FsChanged {
 
 // ---------- logica pura ----------
 
-fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())

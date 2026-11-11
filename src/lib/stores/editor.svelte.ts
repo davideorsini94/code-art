@@ -60,6 +60,10 @@ class EditorStore {
   /** Schede con modifiche non salvate (il core lo sa, per chiedere prima di chiudere la finestra o uscire). */
   dirtyCount = $derived(this.tabs.filter((t) => t.dirty).length)
   split = $state(false)
+  /** Posizione da mostrare appena la scheda `key` ha il suo modello (la consuma `EditorPane`). */
+  reveal = $state<{ key: string; line: number; col: number } | null>(null)
+  /** Testo selezionato nell'editor con il focus (lo imposta `EditorPane`); vuoto altrimenti. */
+  activeSelection: (() => string) | null = null
   /** Modo di visualizzazione dei file markdown, ricordato per file finché l'app resta aperta. */
   private modes = $state<Record<string, MarkdownMode>>({})
   private reloadTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -125,6 +129,14 @@ class EditorStore {
     }
     this.tabs = [...this.tabs.filter((t) => t.key !== tab.key), tab]
     this.active = tab.key
+  }
+
+  /** Apre il file e porta il cursore su riga e colonna (1-based, come Monaco). I markdown si aprono in "Modifica". */
+  async openAt(path: string, line: number, col: number) {
+    if (viewerFor(baseName(path)) === 'markdown') this.setMode(path, 'edit')
+    await this.open(path)
+    const t = this.find(path)
+    if (t && !t.error) this.reveal = { key: t.key, line, col }
   }
 
   /** Diff in una scheda propria accanto al file (una sola per file): la scheda del file, anche con modifiche, resta. */

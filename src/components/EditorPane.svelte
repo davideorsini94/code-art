@@ -115,6 +115,12 @@
     if (!monaco || !mainEl || !diffEl || main) return
     main = monaco.editor.create(mainEl, { ...options, readOnly })
     addSave(main, monaco)
+    const ed = main
+    editor.activeSelection = () => {
+      const sel = ed.getSelection()
+      const model = ed.getModel()
+      return ed.hasTextFocus() && sel && model && !sel.isEmpty() ? model.getValueInRange(sel) : ''
+    }
     diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, renderSideBySide: true })
   })
 
@@ -217,6 +223,22 @@
       const pair = diffModels.get(a.id)
       if (pair) diffEd?.setModel({ original: pair[0], modified: pair[1] })
     }
+  })
+
+  // "Apri su riga/colonna" (risultati di ricerca): dopo la sincronizzazione dei modelli, quando quello della scheda è nell'editor
+  $effect(() => {
+    const r = editor.reveal
+    void modelTick
+    if (!r || !main || !monaco) return
+    const t = active
+    if (!t || t.key !== r.key || !isTextTab(t)) return
+    const model = models.get(t.id)?.model
+    if (!model || main.getModel() !== model) return
+    const pos = model.validatePosition({ lineNumber: r.line, column: r.col })
+    main.setPosition(pos)
+    main.revealPositionInCenter(pos)
+    main.focus()
+    editor.reveal = null
   })
 </script>
 

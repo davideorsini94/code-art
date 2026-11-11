@@ -67,3 +67,10 @@ export type ConvDeleteOutcome =
   | { kind: 'deletedWithWarning'; message: string }
   | { kind: 'cancelled' }
   | { kind: 'busy' }
+
+// ---- ricerca nel progetto (specchio di src-tauri/src/search.rs) ----
+export type SearchQuery = { text: string; regex: boolean; caseSensitive: boolean; wholeWord: boolean; include: string[]; exclude: string[] }
+/** `col` e `previewCol`/`previewLen`: unità UTF-16, come le stringhe JS (`preview.slice(previewCol, previewCol + previewLen)`). */
+export type SearchHit = { path: string; line: number; col: number; len: number; preview: string; previewCol: number; previewLen: number }
+export type SearchSummary = { files: number; hits: number; truncated: boolean; cancelled: boolean; error: string | null }
+export type ReplaceOutcome = { files: number; replacements: number; skipped: string[]; cancelled: boolean }

@@ -84,3 +84,12 @@ export const fsAllFiles = () => invoke<string[]>('fs_all_files')
 export type ConvSearchHit = { sessionId: string; snippet: string }
 /** Cerca nel testo dei messaggi delle conversazioni del progetto (anche archiviate); al massimo 30, una per sessione. */
 export const convSearch = (query: string) => invoke<ConvSearchHit[]>('conv_search', { query })
+
+// ---- ricerca nel progetto ----
+import type { ReplaceOutcome, SearchQuery } from './types'
+/** Avvia la ricerca (annulla la precedente della finestra); risultati sugli eventi `search:hits` / `search:done` con questo id. */
+export const searchStart = (query: SearchQuery) => invoke<number>('search_start', { query })
+export const searchCancel = (id: number) => invoke<void>('search_cancel', { id })
+/** Sostituisce nei file indicati dopo una conferma NATIVA del core; solo progetto fidato. Le corrispondenze si ricalcolano sul disco. */
+export const searchReplace = (query: SearchQuery, replacement: string, paths: string[]) =>
+  invoke<ReplaceOutcome>('search_replace', { query, replacement, paths })

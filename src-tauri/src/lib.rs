@@ -134,6 +134,7 @@ pub fn run() {
             tools::tools_check,
             search::search_start,
             search::search_cancel,
+            search::search_replace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

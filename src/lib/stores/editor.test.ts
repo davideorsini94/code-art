@@ -98,3 +98,11 @@ describe('editor tabs with unsaved changes', () => {
     expect(editor.closing).toBe('/p/a.ts')
   })
 })
+
+describe('openAt', () => {
+  it('apre il file e chiede di mostrare riga e colonna sulla sua scheda', async () => {
+    await editor.openAt('/p/src/a.ts', 12, 5)
+    expect(editor.active).toBe('/p/src/a.ts')
+    expect(editor.reveal).toEqual({ key: editor.active, line: 12, col: 5 })
+  })
+})

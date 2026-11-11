@@ -18,6 +18,7 @@
   import { projectStore } from './lib/stores/project.svelte'
   import { editorSetDirty, projectPickAndOpen } from './lib/ipc'
   import { editor } from './lib/stores/editor.svelte'
+  import { search } from './lib/stores/search.svelte'
   import { guardWindowDrops } from './lib/dropguard'
   import { onMount } from 'svelte'
   import { tooltip } from './lib/tooltip'
@@ -103,6 +104,12 @@
       if (!view) return
       e.preventDefault()
       e.stopPropagation()
+      if (view === 'search') {
+        // testo selezionato (una sola riga) nell'editor con il focus: diventa la ricerca
+        const sel = editor.activeSelection?.().trim() ?? ''
+        if (sel && !sel.includes('\n') && sel.length <= 200) search.setText(sel, true)
+        search.focusTick++
+      }
       sidebar.setView(view)
       if (collapsed.has('sidebar')) toggle('sidebar')
     }

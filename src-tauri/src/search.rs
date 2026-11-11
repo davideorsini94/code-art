@@ -1,5 +1,5 @@
 //! Ricerca nel progetto: in sola lettura, a blocchi e annullabile.
-use grep_matcher::Matcher;
+use grep_matcher::{Captures, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::overrides::{Override, OverrideBuilder};
@@ -346,6 +346,168 @@ pub fn search_cancel(window: WebviewWindow, searches: State<'_, Searches>, id: u
     Ok(())
 }
 
+
+// ---------- sostituzione ----------
+
+const MAX_REPLACE_PATHS: usize = 10_000;
+const MAX_REPLACEMENT_CHARS: usize = 5000;
+pub const BTN_REPLACE: &str = "Sostituisci";
+pub const BTN_CANCEL: &str = "Annulla";
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceOutcome {
+    pub files: u32,
+    pub replacements: u32,
+    /// File non modificati (non UTF-8, troppo grandi, cambiati su disco dopo la lettura, illeggibili).
+    pub skipped: Vec<String>,
+    /// L'utente ha risposto «Annulla» alla conferma: nessun file toccato.
+    pub cancelled: bool,
+}
+
+/// Sostituisce riga per riga (come la ricerca: nessuna corrispondenza attraversa un a capo, nessuna riga vuota
+/// sostituita); `None` se il testo non contiene corrispondenze. Senza `regex` il testo nuovo è letterale, con
+/// `regex` valgono `$1`, `${nome}` e `$$`.
+fn replace_text(matcher: &RegexMatcher, q: &SearchQuery, replacement: &str, text: &str) -> Result<Option<(String, u32)>, String> {
+    let mut caps = matcher.new_captures().map_err(|e| e.to_string())?;
+    let (mut out, mut count) = (String::with_capacity(text.len()), 0u32);
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let eol = &line[body.len()..];
+        let mut dst: Vec<u8> = Vec::with_capacity(body.len());
+        let mut n = 0u32;
+        matcher
+            .replace_with_captures(body.as_bytes(), &mut caps, &mut dst, |caps, dst| {
+                if caps.get(0).is_some_and(|m| m.end() > m.start()) {
+                    n += 1;
+                    if q.regex {
+                        caps.interpolate(|name| matcher.capture_index(name), body.as_bytes(), replacement.as_bytes(), dst);
+                    } else {
+                        dst.extend_from_slice(replacement.as_bytes());
+                    }
+                } else if let Some(m) = caps.get(0) {
+                    dst.extend_from_slice(&body.as_bytes()[m.start()..m.end()]);
+                }
+                true
+            })
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            out.push_str(line);
+        } else {
+            count += n;
+            out.push_str(&String::from_utf8(dst).map_err(|_| "Sostituzione non valida".to_string())?);
+            out.push_str(eol);
+        }
+    }
+    Ok((count > 0).then_some((out, count)))
+}
+
+/// Ricalcola le corrispondenze sul disco per ogni file di `paths` (già confinati), chiede conferma con
+/// `confirm(file, occorrenze)` e scrive con `fs_tree::write` (rifiutato se il file è cambiato dopo la lettura).
+pub fn replace_in_files(paths: &[PathBuf], q: &SearchQuery, replacement: &str, confirm: &dyn Fn(u32, u32) -> bool) -> Result<ReplaceOutcome, String> {
+    let mut out = ReplaceOutcome::default();
+    if q.text.is_empty() {
+        return Ok(out);
+    }
+    let matcher = build_matcher(q)?;
+    let mut plan: Vec<(&PathBuf, String, u32, i64)> = Vec::new();
+    for p in paths {
+        let read = || -> Option<(String, i64)> {
+            let meta = std::fs::metadata(p).ok().filter(|m| m.is_file() && m.len() <= MAX_FILE_BYTES)?;
+            let text = String::from_utf8(std::fs::read(p).ok()?).ok().filter(|t| !t.contains('\0'))?;
+            Some((text, crate::fs_tree::mtime_ms(&meta)))
+        };
+        let Some((text, mtime)) = read() else {
+            out.skipped.push(nfc(p));
+            continue;
+        };
+        if let Some((new, n)) = replace_text(&matcher, q, replacement, &text)? {
+            plan.push((p, new, n, mtime));
+        }
+    }
+    let total: u32 = plan.iter().map(|x| x.2).sum();
+    if plan.is_empty() {
+        return Ok(out);
+    }
+    if !confirm(plan.len() as u32, total) {
+        out.cancelled = true;
+        return Ok(out);
+    }
+    for (p, new, n, mtime) in plan {
+        match crate::fs_tree::write(p, &new, Some(mtime)) {
+            Ok(_) => {
+                out.files += 1;
+                out.replacements += n;
+            }
+            Err(_) => out.skipped.push(nfc(p)),
+        }
+    }
+    Ok(out)
+}
+
+/// Sostituisce `query` con `replacement` nei file `paths` del progetto della finestra chiamante: solo progetto
+/// fidato, percorsi confinati, conferma NATIVA del core («Annulla» predefinito). Le corrispondenze si ricalcolano
+/// sul disco: i risultati della pagina non sono fidati.
+#[tauri::command]
+pub async fn search_replace(
+    app: AppHandle,
+    window: WebviewWindow,
+    store: State<'_, Store>,
+    query: SearchQuery,
+    replacement: String,
+    paths: Vec<String>,
+) -> Result<ReplaceOutcome, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    validate(&query)?;
+    if query.text.is_empty() {
+        return Err("Testo da cercare vuoto".into());
+    }
+    if replacement.chars().count() > MAX_REPLACEMENT_CHARS || paths.len() > MAX_REPLACE_PATHS {
+        return Err("Sostituzione troppo grande".into());
+    }
+    let resolved = replace_targets(&store, window.label(), &paths)?;
+    let Some(_guard) = app.state::<crate::claude::delete::DeletePrompts>().acquire(window.label()) else {
+        return Err("Un'altra conferma è già aperta".into());
+    };
+    let (handle, win) = (app.clone(), window.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let confirm = |files: u32, n: u32| {
+            let answer = handle
+                .dialog()
+                .message(replace_message(files, n))
+                .title("Sostituire nel progetto?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_REPLACE.into()))
+                .parent(&win)
+                .blocking_show_with_result();
+            matches!(answer, MessageDialogResult::Custom(l) if l == BTN_REPLACE)
+        };
+        replace_in_files(&resolved, &query, &replacement, &confirm)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Percorsi da modificare per la finestra `label`: progetto fidato, percorsi dentro il progetto (link simbolici
+/// risolti), senza doppioni.
+fn replace_targets(store: &Store, label: &str, paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    let project_id = crate::projects::project_id_of_label(label).ok_or("questa finestra non è un progetto")?;
+    crate::trust::ensure_project_trusted(store, project_id)?;
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        let r = crate::fs_tree::mutable_path(store, label, p).map_err(|e| e.message)?;
+        if !resolved.contains(&r) {
+            resolved.push(r);
+        }
+    }
+    Ok(resolved)
+}
+
+fn replace_message(files: u32, n: u32) -> String {
+    let occ = if n == 1 { "occorrenza" } else { "occorrenze" };
+    format!("Sostituire {n} {occ} in {files} file?")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +774,120 @@ mod tests {
         }
         let (hits, s) = run(d.path(), &q("a"));
         assert_eq!((hits.len(), s.truncated), (MAX_HITS, true));
+    }
+
+    // ---- sostituzione ----
+
+    fn rq(text: &str, regex: bool) -> SearchQuery {
+        SearchQuery { text: text.into(), regex, case_sensitive: true, ..Default::default() }
+    }
+
+    fn yes(_: u32, _: u32) -> bool {
+        true
+    }
+
+    #[test]
+    fn replace_rewrites_only_matches() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "uno needle\r\ndue\nneedle needle \u{e8}\u{1F600}\nNeedle\n");
+        w(d.path(), "b.txt", "niente\n");
+        let (a, b) = (d.path().join("a.txt"), d.path().join("b.txt"));
+        let asked = std::cell::Cell::new((0, 0));
+        let out = replace_in_files(&[a.clone(), b.clone()], &rq("needle", false), "$1 x", &|f, n| {
+            asked.set((f, n));
+            true
+        })
+        .unwrap();
+        assert_eq!(asked.get(), (1, 3));
+        assert_eq!((out.files, out.replacements, out.skipped.len(), out.cancelled), (1, 3, 0, false));
+        // restano a capo CRLF, maiuscole non cercate e il resto del testo; in modo letterale `$1` non si espande
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "uno $1 x\r\ndue\n$1 x $1 x \u{e8}\u{1F600}\nNeedle\n");
+        assert_eq!(std::fs::read_to_string(b).unwrap(), "niente\n");
+    }
+
+    #[test]
+    fn replace_with_regex_groups() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "fn foo(a)\nfn bar(b)\n");
+        let a = d.path().join("a.txt");
+        let out = replace_in_files(&[a.clone()], &rq(r"fn (\w+)\((\w)\)", true), "$2 <- ${1}()", &yes).unwrap();
+        assert_eq!(out.replacements, 2);
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "a <- foo()\nb <- bar()\n");
+    }
+
+    #[test]
+    fn replace_ignores_empty_matches_and_keeps_lines_apart() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "ab\nb\n");
+        let a = d.path().join("a.txt");
+        let out = replace_in_files(&[a.clone()], &rq("x*", true), "Z", &yes).unwrap();
+        assert_eq!((out.files, out.replacements), (0, 0));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "ab\nb\n");
+        // `\s+` non attraversa gli a capo, come nella ricerca
+        w(d.path(), "c.txt", "a \n b\n");
+        let c = d.path().join("c.txt");
+        replace_in_files(&[c.clone()], &rq(r"\s+", true), "_", &yes).unwrap();
+        assert_eq!(std::fs::read_to_string(c).unwrap(), "a_\n_b\n");
+    }
+
+    #[test]
+    fn replace_cancelled_touches_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "needle\n");
+        let a = d.path().join("a.txt");
+        let out = replace_in_files(&[a.clone()], &rq("needle", false), "x", &|_, _| false).unwrap();
+        assert!(out.cancelled);
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "needle\n");
+    }
+
+    #[test]
+    fn replace_skips_non_text_and_files_changed_since() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "bin.dat", b"needle\0\xff");
+        w(d.path(), "latin.txt", b"needle \xe8\n");
+        w(d.path(), "a.txt", "needle\n");
+        let paths: Vec<PathBuf> = ["bin.dat", "latin.txt", "a.txt"].iter().map(|n| d.path().join(n)).collect();
+        // il file cambia mentre la conferma è aperta: la scrittura è rifiutata dal controllo dell'mtime
+        let a = paths[2].clone();
+        let out = replace_in_files(&paths, &rq("needle", false), "x", &|_, _| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(&a, "needle altro\n").unwrap();
+            let t = std::fs::metadata(&a).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+            std::fs::File::options().write(true).open(&a).unwrap().set_modified(t).unwrap();
+            true
+        })
+        .unwrap();
+        assert_eq!((out.files, out.replacements), (0, 0));
+        assert_eq!(out.skipped.len(), 3);
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "needle altro\n");
+        assert_eq!(std::fs::read(d.path().join("latin.txt")).unwrap(), b"needle \xe8\n");
+    }
+
+    #[test]
+    fn replace_refused_when_untrusted_or_outside_project() {
+        use crate::projects::PROJECT_PREFIX;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let (proj, outside) = (base.join("progetto"), base.join("fuori"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        w(&proj, "a.txt", "needle\n");
+        w(&outside, "s.txt", "needle\n");
+        let store = Store::open(&base.join("t.db")).unwrap();
+        let folder = proj.to_string_lossy().into_owned();
+        store.upsert_project(&crate::store::Project { id: "p1".into(), name: "p".into(), folders: vec![folder.clone()] }).unwrap();
+        let label = format!("{PROJECT_PREFIX}p1");
+        let inside = vec![proj.join("a.txt").to_string_lossy().into_owned()];
+        assert_eq!(replace_targets(&store, &label, &inside).unwrap_err(), crate::trust::UNTRUSTED);
+        crate::trust::mark_trusted(&store, &folder).unwrap();
+        assert_eq!(replace_targets(&store, &label, &inside).unwrap().len(), 1);
+        assert!(replace_targets(&store, &label, &[outside.join("s.txt").to_string_lossy().into_owned()]).is_err());
+        assert!(replace_targets(&store, "main", &inside).is_err());
+    }
+
+    #[test]
+    fn replace_message_is_singular_or_plural() {
+        assert_eq!(replace_message(1, 1), "Sostituire 1 occorrenza in 1 file?");
+        assert_eq!(replace_message(3, 12), "Sostituire 12 occorrenze in 3 file?");
     }
 }
