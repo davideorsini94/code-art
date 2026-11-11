@@ -16,6 +16,8 @@ export const trustCheck = () => invoke<string[]>('trust_check')
 /** Mostra la domanda nativa "Ti fidi di questa cartella?"; vero se ora il progetto è fidato.
  *  `fromClick`: richiesta dal "Mi fido" del banner (altrimenti automatica all'apertura). */
 export const trustAccept = (fromClick = false) => invoke<boolean>('trust_accept', { fromClick })
+/** Numero di schede con modifiche non salvate nella finestra: il core lo usa per chiedere prima di chiudere o uscire. */
+export const editorSetDirty = (count: number) => invoke<void>('editor_set_dirty', { count })
 export const settingsGet = (key: string) => invoke<string | null>('settings_get', { key })
 export const settingsSet = (key: string, value: string) => invoke<void>('settings_set', { key, value })
 

@@ -4,6 +4,7 @@ import { flushSync } from 'svelte'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
+vi.mock('../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 vi.mock('../lib/ipc', () => ({
   fsRead: vi.fn(async () => ({ text: '# Titolo\n\nciao', mtimeMs: 1 })),
@@ -34,7 +35,7 @@ vi.mock('../lib/monaco', () => {
 
 import EditorPane from './EditorPane.svelte'
 import { editor } from '../lib/stores/editor.svelte'
-import { fsRead } from '../lib/ipc'
+import { fsRead, fsWrite } from '../lib/ipc'
 
 beforeAll(() => {
   window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -91,5 +92,36 @@ describe('EditorPane markdown tabs', () => {
     expect(editor.activeTab?.viewer).toBe('text')
     expect(fsRead).toHaveBeenCalledTimes(1)
     expect(editor.tabs.filter((t) => t.path.endsWith('logo.svg'))).toHaveLength(1)
+  })
+
+  it('⌘S saves the active tab at window level, but not a second time when Monaco has the focus', async () => {
+    render(EditorPane)
+    await editor.open('/Users/dev/app/main.rs')
+    flushSync()
+    const t = editor.activeTab!
+    editor.bind(t.id, { snapshot: () => ({ text: 'nuovo', commit() {} }) })
+    vi.mocked(fsWrite).mockClear()
+    await fireEvent.keyDown(document.body, { key: 's', metaKey: true })
+    expect(fsWrite).toHaveBeenCalledTimes(1)
+    const inMonaco = document.createElement('div')
+    inMonaco.className = 'monaco-editor'
+    const area = document.createElement('textarea')
+    inMonaco.appendChild(area)
+    document.body.appendChild(inMonaco)
+    area.focus()
+    await fireEvent.keyDown(area, { key: 's', metaKey: true })
+    expect(fsWrite).toHaveBeenCalledTimes(1)
+    inMonaco.remove()
+  })
+
+  it('closing a dirty tab shows the inline "Modifiche non salvate" bar', async () => {
+    render(EditorPane)
+    await editor.open('/Users/dev/app/main.rs')
+    editor.setDirty(editor.activeTab!.id, true)
+    flushSync()
+    await fireEvent.click(screen.getByRole('button', { name: 'Chiudi main.rs' }))
+    expect(screen.getByText('Modifiche non salvate in main.rs')).toBeTruthy()
+    await fireEvent.click(screen.getByText('Scarta'))
+    expect(editor.tabs).toHaveLength(0)
   })
 })

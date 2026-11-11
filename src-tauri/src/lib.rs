@@ -125,6 +125,7 @@ pub fn run() {
             claude::titles::conv_unlock_title,
             trust::trust_check,
             trust::trust_accept,
+            lifecycle::editor_set_dirty,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

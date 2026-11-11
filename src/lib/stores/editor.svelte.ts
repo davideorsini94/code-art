@@ -16,12 +16,15 @@ export function onDiskChange(tab: { dirty: boolean; baseText: string }, disk: Fi
   return tab.dirty ? 'prompt' : 'reload'
 }
 
+/** Chiave di una tab: il percorso per i file, `diff:` + percorso per i diff (così un diff si apre accanto al file). */
+export const tabKey = (path: string, diff: boolean) => (diff ? `diff:${path}` : path)
+
 /** Sposta le tab il cui percorso è `from` o sta dentro `from` (cartella rinominata/spostata). */
-export function repath<T extends { path: string; name: string; diff: unknown }>(tabs: T[], from: string, to: string): T[] {
+export function repath<T extends { path: string; name: string; diff: unknown; key?: string }>(tabs: T[], from: string, to: string): T[] {
   return tabs.map((t) => {
     if (t.path !== from && !t.path.startsWith(from + '/')) return t
     const path = to + t.path.slice(from.length)
-    return { ...t, path, name: t.diff ? `${baseName(path)} (diff)` : baseName(path) }
+    return { ...t, path, key: tabKey(path, !!t.diff), name: t.diff ? `${baseName(path)} (diff)` : baseName(path) }
   })
 }
 
@@ -30,6 +33,7 @@ export type Binding = { snapshot: () => { text: string; commit: () => void } }
 
 export type Tab = {
   id: number // stabile anche dopo rinomina
+  key: string // identità della scheda (`tabKey`): file e diff dello stesso file sono schede diverse
   path: string
   name: string
   baseText: string // ultimo testo noto su disco (anche testo da caricare nel modello)
@@ -49,7 +53,12 @@ let nextId = 1
 
 class EditorStore {
   tabs = $state<Tab[]>([])
+  /** Chiave della scheda attiva (`tabKey`). */
   active = $state<string | null>(null)
+  /** Scheda con modifiche non salvate di cui si è chiesta la chiusura: barra "Salva / Scarta / Annulla". */
+  closing = $state<string | null>(null)
+  /** Schede con modifiche non salvate (il core lo sa, per chiedere prima di chiudere la finestra o uscire). */
+  dirtyCount = $derived(this.tabs.filter((t) => t.dirty).length)
   split = $state(false)
   /** Modo di visualizzazione dei file markdown, ricordato per file finché l'app resta aperta. */
   private modes = $state<Record<string, MarkdownMode>>({})
@@ -58,7 +67,7 @@ class EditorStore {
   private bindings = new Map<number, Binding>()
 
   get activeTab(): Tab | undefined {
-    return this.tabs.find((t) => t.path === this.active)
+    return this.tabs.find((t) => t.key === this.active)
   }
 
   modeOf(path: string): MarkdownMode {
@@ -67,10 +76,6 @@ class EditorStore {
 
   setMode(path: string, mode: MarkdownMode) {
     this.modes[path] = mode
-  }
-
-  isDirty(t: Tab) {
-    return t.dirty
   }
 
   bind(id: number, b: Binding | null) {
@@ -83,27 +88,29 @@ class EditorStore {
     if (t && t.dirty !== dirty) t.dirty = dirty
   }
 
+  /** Scheda del file (non di un diff) con quel percorso. */
   private find(path: string) {
-    return this.tabs.find((t) => t.path === path)
+    return this.tabs.find((t) => t.key === tabKey(path, false))
   }
 
   private blank(path: string): Tab {
-    return { id: nextId++, path, name: baseName(path), baseText: '', rev: 0, dirty: false, mtimeMs: null, error: null, prompt: false, diff: null, viewer: viewerFor(baseName(path)) }
+    return { id: nextId++, key: tabKey(path, false), path, name: baseName(path), baseText: '', rev: 0, dirty: false, mtimeMs: null, error: null, prompt: false, diff: null, viewer: viewerFor(baseName(path)) }
   }
 
   /** `asText`: apre come testo (es. un SVG da modificare) anche se il tipo avrebbe un'anteprima. */
   async open(path: string, asText = false) {
     const existing = this.find(path)
-    if (existing && !existing.diff && !(asText && existing.viewer !== 'text')) {
-      this.active = path
+    if (existing && !(asText && existing.viewer !== 'text')) {
+      this.active = existing.key
       return
     }
+    // riaprire come testo un file già aperto: la scheda si sostituisce (non ha modifiche: era un'anteprima)
     const tab = this.blank(path)
     if (asText) tab.viewer = 'text'
     // immagini, PDF, audio/video e binari: i byte li legge il visualizzatore (fs_read_bytes), niente testo
     if (isBinaryViewer(tab.viewer)) {
-      this.tabs = [...this.tabs.filter((t) => t.path !== path), tab]
-      this.active = path
+      this.tabs = [...this.tabs.filter((t) => t.key !== tab.key), tab]
+      this.active = tab.key
       return
     }
     try {
@@ -116,14 +123,15 @@ class EditorStore {
       const err = asFsError(e)
       tab.error = err.code === 'too_large' || err.code === 'not_text' || err.code === 'forbidden' ? err.code : 'io'
     }
-    this.tabs = [...this.tabs.filter((t) => t.path !== path), tab]
-    this.active = path
+    this.tabs = [...this.tabs.filter((t) => t.key !== tab.key), tab]
+    this.active = tab.key
   }
 
+  /** Diff in una scheda propria accanto al file (una sola per file): la scheda del file, anche con modifiche, resta. */
   openDiff(path: string, before: string, after: string) {
-    const tab: Tab = { ...this.blank(path), name: `${baseName(path)} (diff)`, baseText: after, diff: { before, after } }
-    this.tabs = [...this.tabs.filter((t) => t.path !== path), tab]
-    this.active = path
+    const tab: Tab = { ...this.blank(path), key: tabKey(path, true), name: `${baseName(path)} (diff)`, baseText: after, diff: { before, after } }
+    this.tabs = [...this.tabs.filter((t) => t.key !== tab.key), tab]
+    this.active = tab.key
   }
 
   /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". */
@@ -143,26 +151,58 @@ class EditorStore {
     }
   }
 
-  close(path: string) {
-    const i = this.tabs.findIndex((t) => t.path === path)
+  /** Chiude la scheda (chiave) senza chiedere. */
+  close(key: string) {
+    const i = this.tabs.findIndex((t) => t.key === key)
     if (i < 0) return
-    this.tabs = this.tabs.filter((t) => t.path !== path)
-    clearTimeout(this.reloadTimers.get(path))
-    this.reloadTimers.delete(path)
-    if (this.active === path) this.active = this.tabs[Math.min(i, this.tabs.length - 1)]?.path ?? null
+    const t = this.tabs[i]
+    this.tabs = this.tabs.filter((x) => x.key !== key)
+    if (this.closing === key) this.closing = null
+    if (!t.diff) {
+      clearTimeout(this.reloadTimers.get(t.path))
+      this.reloadTimers.delete(t.path)
+    }
+    if (this.active === key) this.active = this.tabs[Math.min(i, this.tabs.length - 1)]?.key ?? null
+  }
+
+  /** Chiusura chiesta dall'utente (× o clic centrale): con modifiche non salvate prima la barra di conferma. */
+  requestClose(key: string) {
+    const t = this.tabs.find((x) => x.key === key)
+    if (!t) return
+    if (!t.dirty) return this.close(key)
+    this.active = key
+    this.closing = key
+  }
+
+  /** Risposta alla barra "Modifiche non salvate": salva e chiude (se il salvataggio riesce), scarta e chiude, o annulla. */
+  async resolveClose(choice: 'save' | 'discard' | 'cancel') {
+    const key = this.closing
+    const t = this.tabs.find((x) => x.key === key)
+    if (!key || !t || choice === 'cancel') {
+      this.closing = null
+      return
+    }
+    if (choice === 'save') {
+      try {
+        await this.save(t.path)
+      } catch {
+        return // errore di scrittura: la scheda resta, con la barra
+      }
+      if (t.dirty || t.prompt) return // conflitto o sola lettura: la scheda resta
+    }
+    this.close(key)
   }
 
   /** Chiude le tab di un file o di tutti i file dentro una cartella (dopo "sposta nel Cestino"). */
   closeUnder(path: string) {
-    for (const t of [...this.tabs]) if (t.path === path || t.path.startsWith(path + '/')) this.close(t.path)
+    for (const t of [...this.tabs]) if (t.path === path || t.path.startsWith(path + '/')) this.close(t.key)
   }
 
   /** Dopo rinomina/spostamento: le tab seguono il nuovo percorso. */
   repath(from: string, to: string) {
+    const active = this.activeTab
     this.tabs = repath(this.tabs, from, to)
-    if (this.active && (this.active === from || this.active.startsWith(from + '/'))) {
-      this.active = to + this.active.slice(from.length)
-    }
+    if (active) this.active = this.tabs.find((t) => t.id === active.id)?.key ?? this.active
   }
 
   /** Scarta le modifiche locali e ricarica da disco. */

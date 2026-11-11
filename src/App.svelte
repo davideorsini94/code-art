@@ -15,13 +15,20 @@
   import { conversations } from './lib/stores/conversations.svelte'
   import { chat } from './lib/stores/chat.svelte'
   import { projectStore } from './lib/stores/project.svelte'
-  import { projectPickAndOpen } from './lib/ipc'
+  import { editorSetDirty, projectPickAndOpen } from './lib/ipc'
+  import { editor } from './lib/stores/editor.svelte'
   import { guardWindowDrops } from './lib/dropguard'
   import { onMount } from 'svelte'
   import { tooltip } from './lib/tooltip'
   import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
+
+  // il core chiede conferma alla chiusura o all'uscita se ci sono file non salvati
+  $effect(() => {
+    const n = editor.dirtyCount
+    if (projectStore.project) void editorSetDirty(n).catch(() => {})
+  })
 
   // file o link rilasciati fuori dalle zone di rilascio non devono far navigare la WebView (anche nel benvenuto)
   onMount(() => guardWindowDrops())

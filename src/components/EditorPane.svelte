@@ -76,12 +76,15 @@
     }
   })
 
-  // ⌘S con la sola anteprima in vista (l'editor non ha il focus): salva comunque
+  // ⌘S a livello di finestra per la scheda attiva modificabile (anche con il focus nell'albero, su una scheda o con la
+  // sola anteprima in vista). Con il focus in Monaco salva il suo comando: qui niente, per non salvare due volte.
   function onWindowKey(e: KeyboardEvent) {
-    if (e.metaKey && e.key === 's' && mdActive && mdMode === 'preview') {
-      e.preventDefault()
-      void editor.save(mdActive.path)
-    }
+    if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 's') return
+    if (e.defaultPrevented || (document.activeElement as Element | null)?.closest?.('.monaco-editor')) return
+    const t = editor.activeTab
+    if (!t || !isTextTab(t)) return
+    e.preventDefault()
+    void editor.save(t.path).catch(() => {})
   }
 
   // Monaco si carica solo quando si apre il primo file di testo
@@ -222,12 +225,13 @@
 <div class="pane">
   <div class="tabs" role="tablist">
     {#each editor.tabs as t (t.id)}
-      <div class="tab" class:on={t.path === editor.active} role="tab" use:tooltip={t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.path === editor.active} tabindex="0"
-        onclick={() => (editor.active = t.path)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.path)}>
+      <div class="tab" class:on={t.key === editor.active} role="tab" use:tooltip={t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.key === editor.active} tabindex="0"
+        onclick={() => (editor.active = t.key)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.key)}
+        onauxclick={(e) => { if (e.button === 1) { e.preventDefault(); editor.requestClose(t.key) } }}>
         {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
-        {#if editor.isDirty(t)}<span class="dot" role="img" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
-        <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.close(t.path) }}>×</button>
+        {#if t.dirty}<span class="dot" role="img" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
+        <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.requestClose(t.key) }}>×</button>
       </div>
     {/each}
     <span class="grow"></span>
@@ -241,6 +245,15 @@
       {#each MODES as [m, label, tip] (m)}
         <button class="seg" class:on={mdMode === m} use:tooltip={tip} role="radio" aria-checked={mdMode === m} onclick={() => editor.setMode(mdActive.path, m)}>{label}</button>
       {/each}
+    </div>
+  {/if}
+
+  {#if editor.closing && active && editor.closing === active.key}
+    <div class="bar" role="alert">
+      <span>Modifiche non salvate in {active.name}</span>
+      <button use:tooltip={{ text: 'Salva il file e chiudi la scheda', shortcut: '⌘S' }} aria-disabled={readOnly} onclick={() => !readOnly && void editor.resolveClose('save')}>Salva</button>
+      <button use:tooltip={'Chiudi la scheda perdendo le modifiche'} onclick={() => void editor.resolveClose('discard')}>Scarta</button>
+      <button use:tooltip={'Tieni la scheda aperta'} onclick={() => void editor.resolveClose('cancel')}>Annulla</button>
     </div>
   {/if}
 

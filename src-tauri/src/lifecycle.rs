@@ -18,8 +18,12 @@ const BTN_BACKGROUND: &str = "Lascia finire in sottofondo";
 const BTN_INTERRUPT: &str = "Interrompi";
 const BTN_CANCEL: &str = "Annulla";
 const BTN_QUIT: &str = "Esci";
+const BTN_DISCARD: &str = "Chiudi senza salvare";
 const QUIT_MESSAGE: &str = "Ci sono conversazioni al lavoro. Uscire le interromperà.";
 const CLOSE_MESSAGE: &str = "Ci sono conversazioni al lavoro o in attesa di una tua risposta.";
+const DIRTY_MESSAGE: &str = "Ci sono file con modifiche non salvate.";
+/// Tetto del numero di schede con modifiche dichiarato dalla pagina (`editor_set_dirty`).
+pub const DIRTY_MAX: u32 = 10_000;
 /// Notifiche ricordate per il click (le più vecchie si scartano).
 const NOTIFICATIONS_KEPT: usize = 64;
 
@@ -53,13 +57,16 @@ pub struct ClosePlan {
     /// Processi vivi che non vanno fermati in silenzio: turno in corso (`working`) o richiesta aperta
     /// (permesso, domanda, piano) che andrebbe persa.
     pub working: Vec<String>,
-    /// Serve la domanda "sottofondo / interrompi / annulla".
+    /// La finestra ha schede con modifiche non salvate.
+    pub dirty: bool,
+    /// Serve una domanda prima di chiudere (conversazioni al lavoro o file non salvati).
     pub ask: bool,
 }
 
 /// Piano di chiusura di una finestra a partire da `(sessionId, stato, processo vivo, richiesta aperta)` delle
-/// conversazioni del suo progetto. Le conversazioni senza processo non contano.
-pub fn plan_window_close(convs: &[(String, ConvStatus, bool, bool)]) -> ClosePlan {
+/// conversazioni del suo progetto e dal numero di schede con modifiche non salvate. Le conversazioni senza processo
+/// non contano.
+pub fn plan_window_close(convs: &[(String, ConvStatus, bool, bool)], dirty: u32) -> ClosePlan {
     let mut stop = Vec::new();
     let mut working = Vec::new();
     for (id, status, running, has_ask) in convs {
@@ -68,14 +75,26 @@ pub fn plan_window_close(convs: &[(String, ConvStatus, bool, bool)]) -> ClosePla
         }
         if *status == ConvStatus::Working || *has_ask { working.push(id.clone()) } else { stop.push(id.clone()) }
     }
-    let ask = decide_close(working.len()) == CloseAction::Ask;
-    ClosePlan { stop, working, ask }
+    let ask = decide_close(working.len()) == CloseAction::Ask || dirty > 0;
+    ClosePlan { stop, working, dirty: dirty > 0, ask }
+}
+
+/// Testo della domanda di chiusura della finestra.
+pub fn close_message(working: bool, dirty: bool) -> String {
+    [(working, CLOSE_MESSAGE), (dirty, DIRTY_MESSAGE)].iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect::<Vec<_>>().join("\n")
+}
+
+/// Testo della domanda d'uscita.
+pub fn quit_message(working: bool, dirty: bool) -> String {
+    [(working, QUIT_MESSAGE), (dirty, DIRTY_MESSAGE)].iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect::<Vec<_>>().join("\n")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseChoice {
     Background,
     Interrupt,
+    /// Solo file non salvati: chiudere perdendoli.
+    Discard,
     Cancel,
 }
 
@@ -85,6 +104,7 @@ fn close_choice(r: &MessageDialogResult) -> CloseChoice {
     match r {
         MessageDialogResult::Custom(l) if l == BTN_BACKGROUND => CloseChoice::Background,
         MessageDialogResult::Custom(l) if l == BTN_INTERRUPT => CloseChoice::Interrupt,
+        MessageDialogResult::Custom(l) if l == BTN_DISCARD => CloseChoice::Discard,
         _ => CloseChoice::Cancel,
     }
 }
@@ -133,6 +153,8 @@ pub struct Lifecycle {
     permission: Mutex<Option<bool>>,
     /// Serializza calcolo e invio del numero sul Dock.
     badge: Mutex<()>,
+    /// Schede con modifiche non salvate per finestra (etichetta), dichiarate dalla pagina.
+    dirty: Mutex<HashMap<String, u32>>,
 }
 
 impl Lifecycle {
@@ -151,6 +173,28 @@ impl Lifecycle {
         lock(&self.pending).remove(session_id);
         lock(&self.notifications).retain(|(_, s, _)| s != session_id);
         lock(&self.silenced).remove(session_id);
+    }
+
+    pub fn set_dirty(&self, label: &str, count: u32) -> crate::store::Result<()> {
+        if count > DIRTY_MAX {
+            return Err("numero di file non valido".into());
+        }
+        let mut d = lock(&self.dirty);
+        if count == 0 { d.remove(label) } else { d.insert(label.to_string(), count) };
+        Ok(())
+    }
+
+    pub fn dirty_of(&self, label: &str) -> u32 {
+        lock(&self.dirty).get(label).copied().unwrap_or(0)
+    }
+
+    pub fn dirty_total(&self) -> u32 {
+        lock(&self.dirty).values().sum()
+    }
+
+    /// Finestra distrutta: le sue schede non contano più.
+    pub fn window_gone(&self, label: &str) {
+        lock(&self.dirty).remove(label);
     }
 
     fn remember_notification(&self, session_id: &str, project_id: &str) -> i32 {
@@ -403,6 +447,7 @@ fn stop_in_background(app: &AppHandle, ids: Vec<String>) {
 }
 
 fn project_plan(app: &AppHandle, project_id: &str) -> ClosePlan {
+    let dirty = app.state::<Arc<Lifecycle>>().dirty_of(&projects::window_label(project_id));
     let engine = app.state::<Engine>();
     let live: HashSet<String> = engine.running(project_id).into_iter().collect();
     let rows: Vec<(String, ConvStatus, bool, bool)> = app
@@ -416,7 +461,7 @@ fn project_plan(app: &AppHandle, project_id: &str) -> ClosePlan {
             (c.session_id.clone(), status_of(&c.status), running, has_ask)
         })
         .collect();
-    plan_window_close(&rows)
+    plan_window_close(&rows, dirty)
 }
 
 /// `CloseRequested` di una finestra progetto. Senza lavoro in corso né richieste aperte la finestra si chiude
@@ -440,11 +485,18 @@ pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
     api.prevent_close();
     lock(&life.closing).insert(project_id.to_string());
     let (win, handle, pid) = (window.clone(), app.clone(), project_id.to_string());
+    let working = !plan.working.is_empty();
+    // il primo pulsante è il predefinito (Invio): sempre quello che non perde nulla di irrecuperabile
+    let (title, buttons) = if working {
+        ("Conversazioni al lavoro", MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()))
+    } else {
+        ("File non salvati", MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_DISCARD.into()))
+    };
     app.dialog()
-        .message(CLOSE_MESSAGE)
-        .title("Conversazioni al lavoro")
+        .message(close_message(working, plan.dirty))
+        .title(title)
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()))
+        .buttons(buttons)
         .show_with_result(move |r| {
             lock(&handle.state::<Arc<Lifecycle>>().closing).remove(&pid);
             let choice = close_choice(&r);
@@ -453,7 +505,8 @@ pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
             }
             // stato di adesso, non quello di quando la domanda è comparsa
             let plan = project_plan(&handle, &pid);
-            let ids = if choice == CloseChoice::Background { plan.stop } else { [plan.stop, plan.working].concat() };
+            // "Chiudi senza salvare" non tocca le conversazioni al lavoro comparse nel frattempo (restano in sottofondo)
+            let ids = if choice == CloseChoice::Interrupt { [plan.stop, plan.working].concat() } else { plan.stop };
             let _ = win.destroy();
             stop_in_background(&handle, ids);
         });
@@ -483,14 +536,16 @@ fn quit_now(app: &AppHandle) {
     });
 }
 
-/// ⌘Q / "Esci da Code Art": con conversazioni al lavoro in qualunque progetto chiede conferma.
+/// ⌘Q / "Esci da Code Art": con conversazioni al lavoro in qualunque progetto o file non salvati chiede conferma.
 pub fn request_quit(app: &AppHandle) {
-    if decide_close(working_total(app)) == CloseAction::CloseNow {
+    let working = decide_close(working_total(app)) == CloseAction::Ask;
+    let dirty = app.state::<Arc<Lifecycle>>().dirty_total() > 0;
+    if !working && !dirty {
         return quit_now(app);
     }
     let handle = app.clone();
     app.dialog()
-        .message(QUIT_MESSAGE)
+        .message(quit_message(working, dirty))
         .title("Uscire da Code Art?")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_QUIT.into()))
@@ -499,6 +554,15 @@ pub fn request_quit(app: &AppHandle) {
                 quit_now(&handle);
             }
         });
+}
+
+// ---------- comandi ----------
+
+/// La pagina dichiara quante schede hanno modifiche non salvate: la chiusura della finestra e l'uscita lo chiedono.
+#[tauri::command]
+pub fn editor_set_dirty(window: tauri::WebviewWindow, life: tauri::State<Arc<Lifecycle>>, count: u32) -> crate::store::Result<()> {
+    projects::window_project_id(&window)?;
+    life.set_dirty(window.label(), count)
 }
 
 #[cfg(test)]
@@ -524,6 +588,31 @@ mod tests {
         for r in [R::Custom(BTN_CANCEL.into()), R::Custom("altro".into()), R::Ok, R::Yes, R::No, R::Cancel] {
             assert!(!is_quit_answer(&r), "{r:?}");
         }
+    }
+
+    #[test]
+    fn unsaved_files_need_asking_on_close_and_quit() {
+        let plan = plan_window_close(&[row("a", Idle, true)], 2);
+        assert_eq!(plan, ClosePlan { stop: vec!["a".into()], working: vec![], dirty: true, ask: true });
+        assert_eq!(close_message(false, true), DIRTY_MESSAGE);
+        assert_eq!(close_message(true, true), format!("{CLOSE_MESSAGE}\n{DIRTY_MESSAGE}"));
+        assert_eq!(close_message(true, false), CLOSE_MESSAGE);
+        assert_eq!(quit_message(false, true), "Ci sono file con modifiche non salvate.");
+        assert_eq!(quit_message(true, true), format!("{QUIT_MESSAGE}\n{DIRTY_MESSAGE}"));
+        assert_eq!(close_choice(&MessageDialogResult::Custom(BTN_DISCARD.into())), CloseChoice::Discard);
+    }
+
+    #[test]
+    fn dirty_counts_are_per_window_and_bounded() {
+        let l = Lifecycle::default();
+        l.set_dirty("proj-a", 2).unwrap();
+        l.set_dirty("proj-b", 1).unwrap();
+        assert_eq!((l.dirty_of("proj-a"), l.dirty_total()), (2, 3));
+        assert!(l.set_dirty("proj-a", DIRTY_MAX + 1).is_err());
+        assert_eq!(l.dirty_of("proj-a"), 2);
+        l.set_dirty("proj-a", 0).unwrap();
+        l.window_gone("proj-b");
+        assert_eq!(l.dirty_total(), 0);
     }
 
     #[test]
@@ -560,13 +649,13 @@ mod tests {
 
     #[test]
     fn close_plan_without_work_stops_idle_processes_and_closes() {
-        let plan = plan_window_close(&[row("a", Idle, true), row("b", Waiting, true), row("c", Idle, false)]);
-        assert_eq!(plan, ClosePlan { stop: vec!["a".into(), "b".into()], working: vec![], ask: false });
+        let plan = plan_window_close(&[row("a", Idle, true), row("b", Waiting, true), row("c", Idle, false)], 0);
+        assert_eq!(plan, ClosePlan { stop: vec!["a".into(), "b".into()], working: vec![], dirty: false, ask: false });
     }
 
     #[test]
     fn close_plan_asks_when_a_turn_is_running() {
-        let plan = plan_window_close(&[row("a", Working, true), row("b", Idle, true), row("c", Waiting, true)]);
+        let plan = plan_window_close(&[row("a", Working, true), row("b", Idle, true), row("c", Waiting, true)], 0);
         assert!(plan.ask);
         assert_eq!(plan.working, vec!["a".to_string()]);
         assert_eq!(plan.stop, vec!["b".to_string(), "c".to_string()]);
@@ -578,7 +667,7 @@ mod tests {
             ("a".into(), Waiting, true, true),
             ("b".into(), Waiting, true, false),
             ("c".into(), Idle, false, true),
-        ]);
+        ], 0);
         assert!(plan.ask);
         assert_eq!(plan.working, vec!["a".to_string()]);
         assert_eq!(plan.stop, vec!["b".to_string()]);
@@ -614,9 +703,9 @@ mod tests {
     #[test]
     fn close_plan_ignores_conversations_without_a_process() {
         // `working` salvato ma senza processo (non dovrebbe succedere): niente domanda
-        let plan = plan_window_close(&[row("a", Working, false)]);
-        assert_eq!(plan, ClosePlan { stop: vec![], working: vec![], ask: false });
-        assert_eq!(plan_window_close(&[]).ask, false);
+        let plan = plan_window_close(&[row("a", Working, false)], 0);
+        assert_eq!(plan, ClosePlan { stop: vec![], working: vec![], dirty: false, ask: false });
+        assert_eq!(plan_window_close(&[], 0).ask, false);
     }
 
     fn conv(id: &str, status: &str, archived: bool) -> Conversation {

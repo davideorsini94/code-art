@@ -210,6 +210,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
         crate::claude::sessions::unwatch_project(app, id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
+    app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);
     let quitting = app.state::<Quitting>().0.load(Ordering::SeqCst);
     let _ = handle_window_closed(&app.state::<Store>(), label, quitting);
 }
