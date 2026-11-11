@@ -7,6 +7,7 @@
   import TerminalPane from './components/TerminalPane.svelte'
   import ClaudeMissing from './components/ClaudeMissing.svelte'
   import ConvList from './components/ConvList.svelte'
+  import ConvPane from './components/ConvPane.svelte'
   import { conversations } from './lib/stores/conversations.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
@@ -111,6 +112,7 @@
       {#if !collapsed.has(col)}
         <section class="glass col" data-slot={col} aria-label={label}>
           {#if col === 'sidebar'}<FileTree />{/if}
+          {#if col === 'conv'}<ConvPane />{/if}
           {#if col === 'convlist'}
             <ClaudeMissing onresult={(f) => (claudeFound = f)} />
             {#if claudeFound}<ConvList />{/if}
