@@ -79,3 +79,11 @@ describe('renderMarkdown with an image resolver', () => {
     expect(out).not.toContain('<input')
   })
 })
+
+describe('conversation pane rendering (no resolver)', () => {
+  it('has no <input> and no images even with task lists and image syntax', () => {
+    const out = renderMarkdown('- [x] a\n- [ ] b\n\n![x](img/a.png) ![y](https://example.com/a.png) ![z](blob:test/1)')
+    expect(out).not.toContain('<input')
+    expect(out).not.toContain('<img')
+  })
+})

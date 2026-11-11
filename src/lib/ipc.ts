@@ -27,7 +27,10 @@ export const fsRename = (from: string, to: string) => invoke<void>('fs_rename', 
 export const fsTrash = (path: string) => invoke<void>('fs_trash', { path })
 export const fsRead = (path: string) => invoke<FileContent>('fs_read', { path })
 /** Byte grezzi di un file del progetto (anteprime; ≤ 50 MB). Il core risponde con un corpo binario. */
-export const fsReadBytes = async (path: string) => new Uint8Array(await invoke<ArrayBuffer>('fs_read_bytes', { path }))
+export const fsReadBytes = async (path: string, maxBytes?: number) =>
+  new Uint8Array(await invoke<ArrayBuffer>('fs_read_bytes', { path, maxBytes: maxBytes ?? null }))
+/** Dimensione di un file del progetto, senza leggerlo. */
+export const fsStat = (path: string) => invoke<{ size: number; isFile: boolean }>('fs_stat', { path })
 export const fsWrite = (path: string, text: string, expectedMtimeMs: number | null) =>
   invoke<number>('fs_write', { path, text, expectedMtimeMs })
 

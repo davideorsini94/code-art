@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { iconFor } from '../lib/fileicons'
   import { isBinaryViewer, type MarkdownMode } from '../lib/viewers'
+  import { previewPolicy } from '../lib/md-policy'
   import FileIcon from './FileIcon.svelte'
+  import { tooltip } from '../lib/tooltip'
+  import { relativeToFolders } from '../lib/conv/paths'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -34,13 +37,21 @@
   const showPreview = $derived(!!mdActive && mdMode !== 'edit')
   const showBinary = $derived(!!active && !active.diff && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
   const showViewer = $derived(!!active && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
-  const MODES: [MarkdownMode, string][] = [['preview', 'Anteprima'], ['edit', 'Modifica'], ['split', 'Affiancate']]
+  const MODES: [MarkdownMode, string, string][] = [['preview', 'Anteprima', 'Mostra solo l\'anteprima'], ['edit', 'Modifica', 'Mostra solo il codice'], ['split', 'Affiancate', 'Codice e anteprima affiancati']]
 
   onMount(() => editor.watch())
 
   // testo dell'anteprima markdown: quello corrente dell'editor (modifiche non salvate comprese), con 150 ms di attesa
   let mdText = $state('')
   let modelTick = $state(0)
+  // documenti grandi: il render è sincrono, quindi l'anteprima si fa solo su richiesta (una volta, poi "Aggiorna")
+  const policy = $derived(previewPolicy(mdText.length))
+  let manual = $state<{ id: number; text: string } | null>(null)
+  function renderNow() {
+    const t = mdActive
+    if (!t) return
+    manual = { id: t.id, text: models.get(t.id)?.model.getValue() ?? t.baseText }
+  }
   $effect(() => {
     const t = mdActive
     void modelTick
@@ -54,7 +65,7 @@
     let timer: ReturnType<typeof setTimeout> | undefined
     const sub = entry.model.onDidChangeContent(() => {
       clearTimeout(timer)
-      timer = setTimeout(() => (mdText = entry.model.getValue()), 150)
+      timer = setTimeout(() => (mdText = entry.model.getValue()), Math.max(150, untrack(() => policy.debounceMs)))
     })
     return () => {
       clearTimeout(timer)
@@ -208,24 +219,24 @@
 <div class="pane">
   <div class="tabs" role="tablist">
     {#each editor.tabs as t (t.id)}
-      <div class="tab" class:on={t.path === editor.active} role="tab" aria-selected={t.path === editor.active} tabindex="0"
+      <div class="tab" class:on={t.path === editor.active} role="tab" use:tooltip={t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.path === editor.active} tabindex="0"
         onclick={() => (editor.active = t.path)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.path)}>
         {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
-        {#if editor.isDirty(t)}<span class="dot" title="Modifiche non salvate"></span>{/if}
-        <button class="x" aria-label="Chiudi {t.name}" onclick={(e) => { e.stopPropagation(); editor.close(t.path) }}>×</button>
+        {#if editor.isDirty(t)}<span class="dot" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
+        <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.close(t.path) }}>×</button>
       </div>
     {/each}
     <span class="grow"></span>
     {#if editor.tabs.length > 0}
-      <button class="tool" class:on={editor.split} onclick={() => (editor.split = !editor.split)} title="Vista divisa">Dividi</button>
+      <button class="tool" class:on={editor.split} use:tooltip={editor.split ? 'Chiudi la vista divisa' : 'Dividi l\'editor'} onclick={() => (editor.split = !editor.split)}>Dividi</button>
     {/if}
   </div>
 
   {#if mdActive}
     <div class="modebar" role="radiogroup" aria-label="Modo di visualizzazione">
-      {#each MODES as [m, label] (m)}
-        <button class="seg" class:on={mdMode === m} role="radio" aria-checked={mdMode === m} onclick={() => editor.setMode(mdActive.path, m)}>{label}</button>
+      {#each MODES as [m, label, tip] (m)}
+        <button class="seg" class:on={mdMode === m} use:tooltip={tip} role="radio" aria-checked={mdMode === m} onclick={() => editor.setMode(mdActive.path, m)}>{label}</button>
       {/each}
     </div>
   {/if}
@@ -233,8 +244,8 @@
   {#if active?.prompt}
     <div class="bar" role="alert">
       <span>Cambiato su disco</span>
-      <button onclick={() => void editor.reload(active.path)}>Ricarica</button>
-      <button onclick={() => void editor.keepMine(active.path)}>Tieni il mio</button>
+      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path)}>Ricarica</button>
+      <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path)}>Tieni il mio</button>
     </div>
   {/if}
 
@@ -256,9 +267,25 @@
     </div>
     {#if showPreview && mdActive}
       <div class="side" class:full={mdMode === 'preview'}>
-        {#await import('./MarkdownPreview.svelte') then m}
-          <m.default text={mdText} path={mdActive.path} />
-        {/await}
+        {#if !policy.large}
+          {#await import('./MarkdownPreview.svelte') then m}
+            <m.default text={mdText} path={mdActive.path} />
+          {/await}
+        {:else}
+          <div class="bigdoc">
+            {#if manual && manual.id === mdActive.id}
+              <div class="bigbar"><span>Documento grande: l'anteprima non si aggiorna da sola</span><button use:tooltip={'Rigenera l\'anteprima con il testo attuale'} onclick={renderNow}>Aggiorna anteprima</button></div>
+              <div class="bigview">
+                {#await import('./MarkdownPreview.svelte') then m}
+                  <m.default text={manual.text} path={mdActive.path} />
+                {/await}
+              </div>
+            {:else}
+              <p>Documento grande: anteprima su richiesta</p>
+              <button use:tooltip={'Genera l\'anteprima di questo documento grande (può richiedere tempo)'} onclick={renderNow}>Mostra anteprima</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
     {#if showViewer && active}
@@ -308,6 +335,11 @@
   .editors { display: flex; height: 100%; flex: 1; min-width: 0; }
   .side { flex: 1; min-width: 0; height: 100%; border-left: 1px solid var(--edge-soft); }
   .side.full { border-left: 0; }
+  .bigdoc { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--dim); font-size: 13px; }
+  .bigdoc p { margin: 0; }
+  .bigdoc button, .bigbar button { background: var(--glass2); border: 1px solid var(--edge-soft); color: var(--txt); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: default; }
+  .bigbar { display: flex; align-items: center; gap: 10px; align-self: stretch; padding: 6px 12px; font-size: 11px; border-bottom: 1px solid var(--edge-soft); }
+  .bigview { flex: 1; min-height: 0; align-self: stretch; }
   .ticon { display: inline-flex; }
   .modebar { display: inline-flex; align-self: flex-start; margin: 6px 10px; padding: 2px; gap: 2px; background: var(--glass); border: 1px solid var(--edge-soft); border-radius: 8px; flex: none; }
   .seg { background: none; border: 0; color: var(--dim); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: default; }

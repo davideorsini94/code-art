@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event'
 import { asFsError, fsRead, fsWrite } from '../ipc'
 import { projectStore } from './project.svelte'
 import type { FileContent, FsChanged } from '../types'
+import { previewPolicy } from '../md-policy'
 import { isBinaryViewer, viewerFor, type MarkdownMode, type Viewer } from '../viewers'
 
 export type DiskAction = 'reload' | 'prompt' | 'none'
@@ -109,6 +110,8 @@ class EditorStore {
       const c = await fsRead(path)
       tab.baseText = c.text
       tab.mtimeMs = c.mtimeMs
+      // documento markdown grande: si apre in "Modifica" (l'anteprima si chiede a mano)
+      if (tab.viewer === 'markdown' && !(path in this.modes) && previewPolicy(c.text.length).large) this.modes[path] = 'edit'
     } catch (e) {
       const err = asFsError(e)
       tab.error = err.code === 'too_large' || err.code === 'not_text' || err.code === 'forbidden' ? err.code : 'io'

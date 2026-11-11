@@ -1,13 +1,15 @@
 <script lang="ts">
   import { loadBlobUrl, formatSize } from '../lib/blob'
   import { asFsError } from '../lib/ipc'
+  import { tooltip } from '../lib/tooltip'
 
   let { path, name, rev, onAsText }: { path: string; name: string; rev: number; onAsText?: () => void } = $props()
 
   let url = $state<string | null>(null)
   let size = $state(0)
   let failed = $state<string | null>(null)
-  let nat = $state<{ w: number; h: number } | null>(null)
+  let nat = $state<{ w: number; h: number; synthetic?: boolean } | null>(null)
+  let imgEl = $state<HTMLImageElement>()
   let zoom = $state<'fit' | number>('fit')
   let root = $state<HTMLDivElement>()
   const isSvg = $derived(name.toLowerCase().endsWith('.svg'))
@@ -37,7 +39,12 @@
   })
 
   const STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 8]
-  const cur = () => (zoom === 'fit' ? 1 : zoom)
+  // da "Adatta" si parte dalla scala davvero mostrata, non da 1
+  const cur = () => {
+    if (zoom !== 'fit') return zoom
+    const w = imgEl?.getBoundingClientRect().width
+    return nat && w ? w / nat.w : 1
+  }
   function step(dir: 1 | -1) {
     const c = cur()
     const next = dir > 0 ? STEPS.find((s) => s > c + 1e-6) : [...STEPS].reverse().find((s) => s < c - 1e-6)
@@ -64,24 +71,29 @@
         src={url}
         alt={name}
         draggable="false"
-        style:width={zoom !== 'fit' && nat ? `${nat.w * zoom}px` : undefined}
-        onload={(e) => { const i = e.currentTarget as HTMLImageElement; nat = { w: i.naturalWidth, h: i.naturalHeight } }}
+        bind:this={imgEl}
+        style:width={nat?.synthetic ? `${nat.w * (zoom === 'fit' ? 1 : zoom)}px` : zoom !== 'fit' && nat ? `${nat.w * zoom}px` : undefined}
+        onload={(e) => {
+          const i = e.currentTarget as HTMLImageElement
+          // senza dimensioni proprie (es. SVG senza viewBox) si usa un riquadro predefinito di 512 px
+          nat = i.naturalWidth > 0 && i.naturalHeight > 0 ? { w: i.naturalWidth, h: i.naturalHeight } : { w: 512, h: 512, synthetic: true }
+        }}
       />
     {:else}
       <p class="msg">Caricamento…</p>
     {/if}
   </div>
   <div class="foot">
-    <span>{nat ? `${nat.w} × ${nat.h} px` : '—'}</span>
+    <span>{nat && !nat.synthetic ? `${nat.w} × ${nat.h} px` : '—'}</span>
     <span class="sep">·</span>
     <span>{formatSize(size)}</span>
     <span class="grow"></span>
-    {#if isSvg && onAsText}<button onclick={onAsText}>Apri come testo</button>{/if}
-    <button onclick={() => step(-1)} aria-label="Riduci">−</button>
+    {#if isSvg && onAsText}<button use:tooltip={'Apri il file SVG come testo nell\'editor'} onclick={onAsText}>Apri come testo</button>{/if}
+    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => step(-1)} aria-label="Riduci">−</button>
     <span class="z">{zoom === 'fit' ? 'Adatta' : `${Math.round(zoom * 100)}%`}</span>
-    <button onclick={() => step(1)} aria-label="Ingrandisci">+</button>
-    <button class:on={zoom === 'fit'} onclick={() => (zoom = 'fit')}>Adatta</button>
-    <button class:on={zoom === 1} onclick={() => (zoom = 1)}>100%</button>
+    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => step(1)} aria-label="Ingrandisci">+</button>
+    <button class:on={zoom === 'fit'} use:tooltip={{ text: 'Adatta alla finestra', shortcut: '⌘0' }} onclick={() => (zoom = 'fit')}>Adatta</button>
+    <button class:on={zoom === 1} use:tooltip={'Dimensione reale (100%)'} onclick={() => (zoom = 1)}>100%</button>
   </div>
 </div>
 

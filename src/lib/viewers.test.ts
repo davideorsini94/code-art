@@ -50,5 +50,7 @@ describe('resolveMarkdownImage', () => {
     expect(resolveMarkdownImage('../../app2/a.png', md, roots)).toBeNull()
     expect(resolveMarkdownImage('a.txt', md, roots)).toBeNull()
     expect(resolveMarkdownImage('%2e%2e/%2e%2e/x.png', md, roots)).toBeNull()
+    for (const h of ['a%00.png', '%2f%2fhost/a.png', '%2fetc/a.png', '%5cx%5ca.png', 'a%5cb.png', 'http%3a//x/a.png', 'javascript%3aalert(1).png'])
+      expect(resolveMarkdownImage(h, md, roots), h).toBeNull()
   })
 })

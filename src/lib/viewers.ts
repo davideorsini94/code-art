@@ -56,15 +56,16 @@ const SCHEME = /^[a-z][a-z0-9+.-]*:/i
  * `..` che esce dal progetto e tipi che non sono immagini. Il confinamento definitivo lo applica comunque il core.
  */
 export function resolveMarkdownImage(href: string, mdPath: string, roots: string[]): string | null {
+  const bad = (x: string) => !x || SCHEME.test(x) || x.startsWith('/') || x.startsWith('\\') || x.includes('\\') || x.includes('\0')
   let h = href.trim()
-  if (!h || SCHEME.test(h) || h.startsWith('/') || h.startsWith('\\') || h.includes('\0')) return null
+  if (bad(h)) return null
   h = h.split('#')[0].split('?')[0]
   try {
     h = decodeURIComponent(h)
   } catch {
     return null
   }
-  if (!h || h.startsWith('/') || h.includes('\\')) return null
+  if (bad(h)) return null // di nuovo dopo la decodifica: %00, %2f%2fhost, %5c, %3a
   const dir = mdPath.split('/').slice(0, -1)
   const out: string[] = []
   for (const seg of [...dir, ...h.split('/')]) {

@@ -1,20 +1,18 @@
 <script lang="ts">
-  import { fsReadBytes } from '../lib/ipc'
+  import { fsStat } from '../lib/ipc'
   import { formatSize } from '../lib/blob'
 
   let { path, name }: { path: string; name: string } = $props()
   let size = $state<number | null>(null)
-  let big = $state(false)
 
-  // la dimensione si ricava leggendo i byte (tetto 50 MB del core); oltre il tetto lo diciamo e basta
+  // la dimensione viene dai metadati (fs_stat): il file non si legge
   $effect(() => {
     const p = path
     let dead = false
     size = null
-    big = false
-    fsReadBytes(p)
-      .then((b) => !dead && (size = b.byteLength))
-      .catch((e) => !dead && (big = !!e && typeof e === 'object' && 'code' in e && e.code === 'too_large'))
+    fsStat(p)
+      .then((st) => !dead && (size = st.size))
+      .catch(() => {})
     return () => (dead = true)
   })
 </script>
@@ -22,7 +20,7 @@
 <div class="panel">
   <p class="title">Anteprima non disponibile per questo tipo di file</p>
   <p class="meta">{name}</p>
-  <p class="meta">{big ? 'oltre 50 MB' : size === null ? '' : formatSize(size)}</p>
+  <p class="meta">{size === null ? '' : formatSize(size)}</p>
 </div>
 
 <style>

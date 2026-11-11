@@ -5,47 +5,73 @@
   import { renderMarkdown } from '../lib/safe-markdown'
   import { links } from '../lib/conv/links'
   import { fsReadBytes } from '../lib/ipc'
+  import { ImageLoader } from '../lib/image-budget'
   import { projectStore } from '../lib/stores/project.svelte'
   import { mimeFor, resolveMarkdownImage } from '../lib/viewers'
 
   let { text, path }: { text: string; path: string } = $props()
 
-  const PENDING = 'blob:codeart-pending/' // segnaposto: la pagina lo sostituisce subito, non viene mai richiesto
-  const cache = new Map<string, string>() // percorso assoluto -> URL blob
-  const inflight = new Map<string, Promise<string | null>>()
+  const PENDING = 'blob:codeart-pending/' // segnaposto: la pagina lo sostituisce, non viene mai richiesto
+  const ready = new Map<string, string>() // percorso assoluto -> URL blob già caricato
+  let alive = true
   let host = $state<HTMLElement>()
+
+  // al massimo 4 caricamenti alla volta, 100 immagini, 10 MB l'una e 60 MB per documento (vedi image-budget.ts)
+  const loader = new ImageLoader(
+    async (abs, maxBytes) => {
+      const bytes = await fsReadBytes(abs, maxBytes)
+      if (!alive) throw new Error('smontato')
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeFor(abs) ?? 'application/octet-stream' }))
+      return { url, size: bytes.byteLength }
+    },
+    (url) => URL.revokeObjectURL(url),
+  )
 
   const opts = $derived({
     resolveImage: (href: string) => {
       const abs = resolveMarkdownImage(href, path, projectStore.project?.folders ?? [])
-      return abs ? (cache.get(abs) ?? PENDING + encodeURIComponent(abs)) : null
+      return abs ? (ready.get(abs) ?? PENDING + encodeURIComponent(abs)) : null
     },
   })
 
-  function blobFor(abs: string): Promise<string | null> {
-    const hit = cache.get(abs)
-    if (hit) return Promise.resolve(hit)
-    let p = inflight.get(abs)
-    if (!p) {
-      p = fsReadBytes(abs)
-        .then((bytes) => {
-          const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeFor(abs) ?? 'application/octet-stream' }))
-          cache.set(abs, url)
-          return url
-        })
-        .catch(() => null)
-        .finally(() => inflight.delete(abs))
-      inflight.set(abs, p)
-    }
-    return p
+  function missing(img: HTMLImageElement) {
+    const span = document.createElement('span')
+    span.className = 'imgmiss'
+    span.textContent = `immagine non caricata${img.alt ? `: ${img.alt}` : ''}`
+    img.replaceWith(span)
   }
 
-  // dopo ogni render: sostituisce i segnaposto con gli URL blob
+  function fill(img: HTMLImageElement, abs: string) {
+    void loader.request(abs).then((url) => {
+      if (!alive || !img.isConnected) return
+      if (url) {
+        ready.set(abs, url)
+        img.setAttribute('src', url)
+      } else missing(img)
+    })
+  }
+
+  // dopo ogni render: i segnaposto entrano in coda solo quando si avvicinano alla vista
   $effect(() => {
     void text
     void path
     const el = host
     if (!el) return
+    const io =
+      typeof IntersectionObserver === 'undefined'
+        ? null
+        : new IntersectionObserver(
+            (entries) => {
+              for (const e of entries) {
+                if (!e.isIntersecting) continue
+                io?.unobserve(e.target)
+                const img = e.target as HTMLImageElement
+                const abs = (img as HTMLImageElement & { _abs?: string })._abs
+                if (abs) fill(img, abs)
+              }
+            },
+            { root: el.parentElement, rootMargin: '600px 0px' },
+          )
     for (const img of el.querySelectorAll('img')) {
       const src = img.getAttribute('src') ?? ''
       if (!src.startsWith(PENDING)) continue
@@ -55,16 +81,18 @@
       } catch {
         continue
       }
-      void blobFor(abs).then((url) => {
-        if (url && img.isConnected) img.setAttribute('src', url)
-        else if (img.isConnected) img.replaceWith(document.createTextNode(img.getAttribute('alt') ?? ''))
-      })
+      if (io) {
+        ;(img as HTMLImageElement & { _abs?: string })._abs = abs
+        io.observe(img)
+      } else fill(img, abs)
     }
+    return () => io?.disconnect()
   })
 
   onDestroy(() => {
-    for (const url of cache.values()) URL.revokeObjectURL(url)
-    cache.clear()
+    alive = false
+    loader.dispose()
+    ready.clear()
   })
 </script>
 
@@ -95,5 +123,6 @@
   .md :global(th) { background: var(--glass2); text-align: left; }
   .md :global(tr:nth-child(even) td) { background: var(--glass); }
   .md :global(hr) { border: 0; border-top: 1px solid var(--edge); margin: 1.6em 0; }
+  .md :global(.imgmiss) { color: var(--faint); font-size: 12px; font-style: italic; }
   .md :global(img) { max-width: 100%; height: auto; border-radius: 6px; }
 </style>

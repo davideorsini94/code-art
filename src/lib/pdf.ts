@@ -11,16 +11,16 @@ export function openPdf(data: Uint8Array) {
     worker = new PdfWorker()
     pdfjs.GlobalWorkerOptions.workerPort = worker
   }
-  const params = {
+  // Niente scripting, XFA né annotation layer; nessun URL esterno (CMap, font, wasm): la CSP (senza unsafe-eval,
+  // con connect-src solo IPC) è la garanzia che niente venga valutato o scaricato.
+  return pdfjs.getDocument({
     data,
-    isEvalSupported: false,
     disableAutoFetch: true,
     disableStream: true,
     enableXfa: false,
     useSystemFonts: false,
     verbosity: 0,
-  }
-  return pdfjs.getDocument(params as Parameters<typeof pdfjs.getDocument>[0])
+  })
 }
 
 export type { PDFDocumentProxy } from 'pdfjs-dist'

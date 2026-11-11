@@ -22,7 +22,8 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   testo reso come testo) sono quelle che reggono il peso: in una finestra fidata una pagina compromessa può
   eseguire qualunque cosa come l'utente (vedi "Rischi residui").
 - **Markdown sanificato**: `renderMarkdown` (`src/lib/safe-markdown.ts`, marked + DOMPurify con whitelist)
-  è l'unica sorgente di `{@html}`; l'HTML grezzo è scartato, le immagini non si caricano, sopravvivono solo
+  è l'unica sorgente di `{@html}`; l'HTML grezzo è scartato, nella conversazione le immagini non si caricano mai (nell'anteprima di un file solo
+  quelle locali del progetto, come `blob:`, vedi sotto), sopravvivono solo
   link `http(s)` con `rel="noopener noreferrer"`, intercettati (`src/lib/conv/links.ts`) e aperti nel browser
   di sistema. `src/lib/html-sites.test.ts` fallisce se compare un `{@html}` non sanificato o un
   `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`.
@@ -30,12 +31,18 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   da `fs_read_bytes` (confinato, ≤ 50 MB) e diventa un URL `blob:` con tipo MIME da tabella fissa per
   estensione (mai sniffing, mai il nome del file in HTML). Le immagini (anche SVG) sono mostrate con `<img>`:
   gli script in un SVG non vengono eseguiti. Il PDF è reso da `pdfjs-dist` (caricato al primo uso, worker
-  locale) su `<canvas>`, con `isEvalSupported: false`, senza scripting, senza annotazioni/link e senza
-  richieste di rete (`disableAutoFetch`, `disableStream`, niente `cMapUrl`/font esterni). Il markdown passa
+  locale) su `<canvas>`, senza scripting, XFA né livello delle annotazioni (quindi nessun link nel PDF) e senza richieste di
+  rete (`disableAutoFetch`, `disableStream`, niente `cMapUrl`/font/wasm esterni). Che nulla venga valutato
+  come codice lo garantisce la CSP (nessun `unsafe-eval`; il bundle di pdf.js non usa `eval`/`new Function`). Il markdown passa
   solo da `renderMarkdown`; con un risolutore di immagini opzionale (solo percorsi relativi al file, niente
   schema, `//`, percorso assoluto o `..` che esce dal progetto) le immagini locali diventano `<img src="blob:…">`
   (DOMPurify ammette `<img>` con solo `src` `blob:`, `alt`, `title`, `width`, `height`); le immagini remote o
-  `data:` restano scartate. La conversazione chiama `renderMarkdown` senza risolutore: immagini sempre scartate.
+  `data:` restano scartate. Limiti per documento (`src/lib/image-budget.ts`): al massimo 4 caricamenti alla
+  volta, 100 immagini distinte, 10 MB l'una (`maxBytes` di `fs_read_bytes`, deciso dai metadati) e 60 MB in
+  totale; solo estensioni immagine della tabella MIME; le immagini si caricano quando si avvicinano alla vista;
+  le altre mostrano "immagine non caricata". Documenti markdown oltre 400 KB: si aprono in "Modifica" e
+  l'anteprima (render sincrono) si fa solo su richiesta; tra 100 e 400 KB l'aggiornamento dal vivo rallenta a
+  600 ms. La conversazione chiama `renderMarkdown` senza risolutore: immagini sempre scartate.
 - **Confinamento dei file**: i comandi `fs_*` e `pty_spawn` accettano solo percorsi assoluti dentro le
   cartelle del progetto della finestra chiamante (`fs_tree::ensure_inside`: canonicalizzazione, `..`,
   link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`
@@ -114,7 +121,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente | finestra | F |
 | `fs_trash` | `path` | `ensure_inside`; progetto fidato; Cestino, non cancellazione | finestra | F |
 | `fs_read` | `path` | `ensure_inside`; ≤ 5 MB, solo UTF-8 | finestra | F |
-| `fs_read_bytes` | `path` | `ensure_inside` (stesso confinamento di `fs_read`, link simbolici compresi); solo file regolari; ≤ 50 MB (`too_large`); lettura, quindi ammessa anche in progetti non fidati; risposta binaria dell'IPC | finestra | F (lettura) |
+| `fs_read_bytes` | `path`, `maxBytes?` | `ensure_inside` (stesso confinamento di `fs_read`, link simbolici compresi); solo file regolari; ≤ 50 MB e ≤ `maxBytes` se dato (`too_large`, deciso dai metadati prima di leggere); lettura, quindi ammessa anche in progetti non fidati; risposta binaria dell'IPC | finestra | F (lettura) |
+| `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
@@ -156,7 +164,7 @@ Rilassamenti e perché:
 - `style-src 'unsafe-inline'`: Monaco e xterm creano stili in linea ed elementi `<style>`; anche le
   transizioni di Svelte. Gli script restano solo `'self'` (Tauri aggiunge da sé gli hash dei propri script).
 - `img-src data: blob:`: le icone di Monaco sono `data:` nel suo CSS; le anteprime delle immagini incollate
-  nel compositore sono URL `blob:`. Nessuna origine remota: il markdown non carica immagini.
+  nel compositore sono URL `blob:`. Nessuna origine remota: la conversazione non carica immagini, l'anteprima di un file solo quelle locali del progetto.
 - `media-src 'self' blob:`: l'anteprima di audio e video usa `<audio>`/`<video>` con un URL `blob:` creato dai
   byte letti con `fs_read_bytes` (confinati nel progetto, tipo MIME da una tabella fissa per estensione).
   Nessuna origine remota: `blob:` può contenere solo ciò che la pagina stessa ha costruito.

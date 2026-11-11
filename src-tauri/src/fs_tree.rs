@@ -138,27 +138,42 @@ pub fn read(path: &Path) -> Result<FileContent, FsError> {
     Ok(FileContent { text, mtime_ms: mtime_ms(&meta) })
 }
 
-/// Legge i byte di un file regolare, al massimo `MAX_BYTES_READ` (anche se il file cresce durante la lettura).
-pub fn read_bytes(path: &Path) -> Result<Vec<u8>, FsError> {
+/// Legge i byte di un file regolare, al massimo `max` (clamp a `MAX_BYTES_READ`; anche se il file cresce durante la lettura).
+/// Il tetto si decide dai metadati prima di leggere.
+pub fn read_bytes(path: &Path, max: Option<u64>) -> Result<Vec<u8>, FsError> {
     use std::io::Read;
+    let cap = max.unwrap_or(MAX_BYTES_READ).min(MAX_BYTES_READ);
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
         return Err(FsError::new("io", "non è un file"));
     }
-    if meta.len() > MAX_BYTES_READ {
-        return Err(FsError::new("too_large", "file oltre 50 MB"));
+    if meta.len() > cap {
+        return Err(FsError::new("too_large", "file oltre il limite"));
     }
     let mut buf = Vec::with_capacity(meta.len() as usize);
-    std::fs::File::open(path)?.take(MAX_BYTES_READ + 1).read_to_end(&mut buf)?;
-    if buf.len() as u64 > MAX_BYTES_READ {
-        return Err(FsError::new("too_large", "file oltre 50 MB"));
+    std::fs::File::open(path)?.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(FsError::new("too_large", "file oltre il limite"));
     }
     Ok(buf)
 }
 
 /// Come `read_bytes`, ma solo dentro le radici date (stesso confinamento di `fs_read`).
-pub fn read_bytes_confined(roots: &[PathBuf], path: &Path) -> Result<Vec<u8>, FsError> {
-    read_bytes(&ensure_inside(roots, path)?)
+pub fn read_bytes_confined(roots: &[PathBuf], path: &Path, max: Option<u64>) -> Result<Vec<u8>, FsError> {
+    read_bytes(&ensure_inside(roots, path)?, max)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub size: u64,
+    pub is_file: bool,
+}
+
+/// Dimensione e tipo (senza leggere il contenuto), solo dentro le radici date.
+pub fn stat_confined(roots: &[PathBuf], path: &Path) -> Result<FileStat, FsError> {
+    let meta = std::fs::metadata(ensure_inside(roots, path)?)?;
+    Ok(FileStat { size: meta.len(), is_file: meta.is_file() })
 }
 
 /// Scrive solo se il file non è cambiato su disco rispetto a `expected` (se dato).
@@ -405,10 +420,23 @@ pub async fn fs_read(window: WebviewWindow, store: State<'_, Store>, path: Strin
 /// Byte grezzi di un file del progetto (anteprime). Lettura: ammessa anche nei progetti non fidati.
 /// Risposta binaria dell'IPC, non un array JSON; lettura fuori dal thread principale.
 #[tauri::command]
-pub async fn fs_read_bytes(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<tauri::ipc::Response, FsError> {
+pub async fn fs_read_bytes(
+    window: WebviewWindow,
+    store: State<'_, Store>,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<tauri::ipc::Response, FsError> {
     let path = checked(&window, &store, &path)?;
-    let bytes = tauri::async_runtime::spawn_blocking(move || read_bytes(&path)).await.map_err(|e| FsError::new("io", e.to_string()))??;
+    let bytes = tauri::async_runtime::spawn_blocking(move || read_bytes(&path, max_bytes)).await.map_err(|e| FsError::new("io", e.to_string()))??;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Dimensione di un file del progetto, senza leggerlo (lettura: ammessa anche nei progetti non fidati).
+#[tauri::command]
+pub async fn fs_stat(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<FileStat, FsError> {
+    let roots = roots_of(&window, &store)?;
+    let path = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || stat_confined(&roots, &path)).await.map_err(|e| FsError::new("io", e.to_string()))?
 }
 
 #[tauri::command]
@@ -595,15 +623,34 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let r = roots(d.path());
         std::fs::write(r[0].join("a.bin"), [0xff, 0x00, 0x80]).unwrap();
-        assert_eq!(read_bytes_confined(&r, &r[0].join("a.bin")).unwrap(), vec![0xff, 0x00, 0x80]);
+        assert_eq!(read_bytes_confined(&r, &r[0].join("a.bin"), None).unwrap(), vec![0xff, 0x00, 0x80]);
         std::fs::write(d.path().join("out.bin"), [1]).unwrap();
-        assert_eq!(read_bytes_confined(&r, &d.path().join("out.bin")).unwrap_err().code, "forbidden");
+        assert_eq!(read_bytes_confined(&r, &d.path().join("out.bin"), None).unwrap_err().code, "forbidden");
         std::os::unix::fs::symlink(d.path().join("out.bin"), r[0].join("link.bin")).unwrap();
-        assert_eq!(read_bytes_confined(&r, &r[0].join("link.bin")).unwrap_err().code, "forbidden");
+        assert_eq!(read_bytes_confined(&r, &r[0].join("link.bin"), None).unwrap_err().code, "forbidden");
         let big = std::fs::File::create(r[0].join("big.bin")).unwrap();
         big.set_len(MAX_BYTES_READ + 1).unwrap();
-        assert_eq!(read_bytes_confined(&r, &r[0].join("big.bin")).unwrap_err().code, "too_large");
-        assert_eq!(read_bytes_confined(&r, &r[0]).unwrap_err().code, "io");
+        assert_eq!(read_bytes_confined(&r, &r[0].join("big.bin"), None).unwrap_err().code, "too_large");
+        assert_eq!(read_bytes_confined(&r, &r[0], None).unwrap_err().code, "io");
+        // tetto per chiamata deciso dai metadati; mai oltre il tetto assoluto
+        std::fs::write(r[0].join("m.bin"), vec![0u8; 100]).unwrap();
+        assert_eq!(read_bytes_confined(&r, &r[0].join("m.bin"), Some(100)).unwrap().len(), 100);
+        assert_eq!(read_bytes_confined(&r, &r[0].join("m.bin"), Some(99)).unwrap_err().code, "too_large");
+        assert_eq!(read_bytes_confined(&r, &r[0].join("big.bin"), Some(u64::MAX)).unwrap_err().code, "too_large");
+    }
+
+    #[test]
+    fn stat_is_confined_and_reports_size() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        std::fs::write(r[0].join("a.bin"), [1, 2, 3, 4]).unwrap();
+        assert_eq!(stat_confined(&r, &r[0].join("a.bin")).unwrap(), FileStat { size: 4, is_file: true });
+        assert!(!stat_confined(&r, &r[0]).unwrap().is_file);
+        std::fs::write(d.path().join("out.bin"), [1]).unwrap();
+        assert_eq!(stat_confined(&r, &d.path().join("out.bin")).unwrap_err().code, "forbidden");
+        std::os::unix::fs::symlink(d.path().join("out.bin"), r[0].join("link.bin")).unwrap();
+        assert_eq!(stat_confined(&r, &r[0].join("link.bin")).unwrap_err().code, "forbidden");
+        assert_eq!(stat_confined(&r, &r[0].join("assente")).unwrap_err().code, "io");
     }
 
     #[test]
