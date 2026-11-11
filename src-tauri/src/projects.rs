@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Manager, State, TitleBarStyle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 pub const PROJECT_PREFIX: &str = "proj-";
 const WELCOME_LABEL: &str = "welcome";
@@ -102,18 +101,15 @@ pub fn window_label(project_id: &str) -> String {
 /// Il titolo nativo resta impostato (Mission Control, menu Finestra, Dock) ma non va disegnato
 /// nella barra: lo disegna già `Titlebar.svelte`.
 fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<WebviewWindow> {
-    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
         .inner_size(1400.0, 860.0)
         .min_inner_size(900.0, 560.0)
-        .transparent(true)
+        .transparent(false) // finestra opaca (scelta dell'utente): il vetro è solo dentro la pagina
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(true)
         .disable_drag_drop_handler() // serve per il drag & drop HTML5 dell'albero file
-        .build()?;
-    apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None)
-        .map_err(|e| tauri::Error::Anyhow(e.into()))?;
-    Ok(window)
+        .build()
 }
 
 /// Apre (o porta in primo piano) la finestra del progetto e ne ricorda lo stato "aperto".
@@ -395,6 +391,14 @@ mod tests {
         let start = src.find("fn build_window(").unwrap();
         let end = start + src[start..].find("\n}\n").unwrap();
         &src[start..end]
+    }
+
+    #[test]
+    fn window_is_opaque_without_vibrancy() {
+        let body = build_window_source();
+        assert!(body.contains(".transparent(false)"), "{body}");
+        assert!(!body.contains("vibrancy"), "{body}");
+        assert!(!include_str!("../Cargo.toml").contains("window-vibrancy"));
     }
 
     #[test]

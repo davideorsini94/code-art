@@ -532,7 +532,6 @@ dependencies = [
  "trash",
  "unicode-normalization",
  "uuid",
- "window-vibrancy",
 ]
 
 [[package]]

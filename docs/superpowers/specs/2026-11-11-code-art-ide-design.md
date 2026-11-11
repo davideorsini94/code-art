@@ -123,11 +123,13 @@ cartella di origine.
 
 ### Stile visivo
 
-- Finestra traslucida con sfocatura vera di macOS (vibrancy) sotto
-  l'interfaccia; pannelli come lastre di vetro: bordo luminoso sottile in
-  alto, ombra interna in basso, sfocatura e saturazione dello sfondo.
-- Sfondo "aurora" scuro (viola, petrolio, magenta spento, blu) molto
-  attenuato, che dà al vetro qualcosa da rifrangere anche a finestra piena.
+- Finestra completamente opaca (scelta dell'utente dopo averla provata: la
+  versione traslucida con vibrancy lasciava vedere il desktop e rendeva
+  tutto poco leggibile). L'effetto vetro resta dentro la finestra: pannelli
+  come lastre di vetro con bordo luminoso sottile in alto, ombra interna in
+  basso, sfocatura e saturazione dello sfondo.
+- Sfondo "aurora" scuro (viola, petrolio, magenta spento, blu) a piena
+  opacità su base `#0a0b12`, che dà ai pannelli qualcosa da rifrangere.
 - **L'area del codice e del terminale resta quasi opaca** per la leggibilità:
   il vetro è nella cornice, non sotto il testo.
 - Colori di stato: ambra = aspetta te, verde acqua pulsante = al lavoro,

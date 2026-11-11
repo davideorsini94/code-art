@@ -8,13 +8,13 @@ body {
   font: 13px/1.45 -apple-system, 'SF Pro Text', system-ui, sans-serif;
   color: var(--txt);
   overflow: hidden;
-  /* la vibrancy nativa traspare; l'aurora è un velo attenuato sopra di essa */
+  /* finestra opaca: base scura piena + aurora piena; il vetro dei pannelli sfoca questo sfondo interno */
   background:
-    radial-gradient(60% 70% at 12% 8%, rgba(59, 42, 140, 0.55) 0%, transparent 60%),
-    radial-gradient(50% 60% at 88% 18%, rgba(15, 107, 107, 0.5) 0%, transparent 62%),
-    radial-gradient(55% 60% at 70% 100%, rgba(122, 45, 92, 0.5) 0%, transparent 60%),
-    radial-gradient(40% 50% at 25% 95%, rgba(27, 63, 143, 0.5) 0%, transparent 60%),
-    rgba(10, 11, 18, 0.55);
+    radial-gradient(60% 70% at 12% 8%, #3b2a8c 0%, transparent 60%),
+    radial-gradient(50% 60% at 88% 18%, #0f6b6b 0%, transparent 62%),
+    radial-gradient(55% 60% at 70% 100%, #7a2d5c 0%, transparent 60%),
+    radial-gradient(40% 50% at 25% 95%, #1b3f8f 0%, transparent 60%),
+    #0a0b12;
 }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }

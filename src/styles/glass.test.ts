@@ -28,4 +28,13 @@ describe('glass.css', () => {
     expect(block![1]).toMatch(/animation[^;]*:\s*none/)
     expect(block![1]).toMatch(/transition[^;]*:\s*none/)
   })
+
+  it('lo sfondo della pagina è opaco (nessuna trasparenza della finestra)', () => {
+    const app = readFileSync(new URL('../app.css', import.meta.url), 'utf8')
+    const body = app.match(/\nbody\s*\{([^}]*)\}/)
+    expect(body).not.toBeNull()
+    const bg = body![1].match(/background:([^;]*);/)![1].trim()
+    expect(bg).toMatch(/,\s*#0a0b12\s*$/i)
+    expect(bg).not.toMatch(/rgba\(/)
+  })
 })
