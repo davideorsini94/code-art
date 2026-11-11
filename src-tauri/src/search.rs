@@ -863,6 +863,20 @@ mod tests {
     }
 
     #[test]
+    fn replace_reports_read_only_file_as_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "ro.txt", "needle\n");
+        w(d.path(), "ok.txt", "needle\n");
+        let ro = d.path().join("ro.txt");
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let out = replace_in_files(&[ro.clone(), d.path().join("ok.txt")], &rq("needle", false), "x", &yes).unwrap();
+        assert_eq!((out.files, out.replacements), (1, 1));
+        assert_eq!(out.skipped, vec![nfc(&ro)]);
+        assert_eq!(std::fs::read_to_string(ro).unwrap(), "needle\n");
+    }
+
+    #[test]
     fn replace_refused_when_untrusted_or_outside_project() {
         use crate::projects::PROJECT_PREFIX;
         let tmp = tempfile::tempdir().unwrap();

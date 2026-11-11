@@ -107,6 +107,8 @@ export class SearchStore {
     if (old !== null) void searchCancel(old).catch(() => {})
     this.reset()
     if (!this.text) {
+      this.starting = false
+      this.buffered = []
       this.status = 'idle'
       return
     }

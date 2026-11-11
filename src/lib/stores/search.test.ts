@@ -166,3 +166,21 @@ describe('search store robustness', () => {
     expect(s.collapsed).toMatchObject({ '/p/a': true, '/p/b': true, '/p/c': true })
   })
 })
+
+describe('empty text', () => {
+  it('does not leave the store waiting for a superseded search_start', async () => {
+    const s = await bound()
+    let release!: (id: number) => void
+    searchStart.mockImplementationOnce(() => new Promise<number>((r) => (release = r)))
+    s.setText('a', true)
+    s.setText('', true)
+    await vi.advanceTimersByTimeAsync(0)
+    release(5)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(searchCancel).toHaveBeenCalledWith(5)
+    s.setText('b', true)
+    await vi.advanceTimersByTimeAsync(0)
+    handlers['search:hits']({ payload: { id: 1, hits: [hit('/p/x')] } })
+    expect(s.groups).toHaveLength(1)
+  })
+})

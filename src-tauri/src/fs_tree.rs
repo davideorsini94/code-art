@@ -181,6 +181,16 @@ pub fn stat_confined(roots: &[PathBuf], path: &Path) -> Result<FileStat, FsError
     Ok(FileStat { size: meta.len(), is_file: meta.is_file() })
 }
 
+fn check_mtime(path: &Path, expected: Option<i64>) -> Result<(), FsError> {
+    let Some(exp) = expected else { return Ok(()) };
+    match std::fs::metadata(path) {
+        Ok(meta) if mtime_ms(&meta) == exp => Ok(()),
+        Ok(_) => Err(FsError::new("conflict", "il file è cambiato su disco")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)")),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Scrive in modo atomico: testo in un file temporaneo nella stessa cartella (permessi del file originale, fsync),
 /// poi `rename` sopra il destinazione; un'interruzione non lascia mai un file troncato. Se `expected` è dato, il
 /// controllo dell'mtime avviene subito prima del `rename` (il tratto scoperto è quello tra controllo e rename).
@@ -190,25 +200,34 @@ pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsEr
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().ok_or_else(|| FsError::new("io", "percorso senza cartella"))?;
     let name = path.file_name().ok_or_else(|| FsError::new("io", "percorso senza nome"))?;
+    // un link simbolico non si segue né si sostituisce; un file di sola lettura resta tale (come con la scrittura in place)
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(FsError::new("forbidden", "il percorso è un link simbolico"));
+        }
+        if meta.permissions().readonly() {
+            return Err(FsError::new("io", "il file è di sola lettura"));
+        }
+    }
     let tmp = dir.join(format!(".{}.codeart-{}-{}.tmp", name.to_string_lossy(), std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     let result = (|| -> Result<(), FsError> {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            // cartella non scrivibile ma file sì: scrittura in place, sempre con il controllo dell'mtime
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.is_file() => {
+                check_mtime(path, expected)?;
+                std::fs::write(path, text)?;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         if let Ok(meta) = std::fs::metadata(path) {
             f.set_permissions(meta.permissions())?;
         }
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         drop(f);
-        if let Some(exp) = expected {
-            match std::fs::metadata(path) {
-                Ok(meta) if mtime_ms(&meta) == exp => {}
-                Ok(_) => return Err(FsError::new("conflict", "il file è cambiato su disco")),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)"));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        check_mtime(path, expected)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     })();
@@ -276,6 +295,10 @@ pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
     };
     let comps: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
     if comps.iter().any(|c| c == "node_modules" || c == "target") {
+        return true;
+    }
+    // temporaneo della scrittura atomica (`.<nome>.codeart-<pid>-<n>.tmp`)
+    if comps.last().is_some_and(|c| c.starts_with('.') && c.contains(".codeart-") && c.ends_with(".tmp")) {
         return true;
     }
     match comps.iter().position(|c| c == ".git") {
@@ -644,6 +667,51 @@ mod tests {
         assert!(write(&d.path().join("no/b.txt"), "x", None).is_err());
         let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names, vec![std::ffi::OsString::from("a.txt")]);
+    }
+
+    #[test]
+    fn write_refuses_read_only_and_symlinked_targets() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("ro.txt");
+        std::fs::write(&f, "uno").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(write(&f, "due", None).unwrap_err().code, "io");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "uno");
+        let link = d.path().join("link.txt");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        assert_eq!(write(&link, "x", None).unwrap_err().code, "forbidden");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn write_falls_back_in_place_when_dir_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let sub = d.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let f = sub.join("a.txt");
+        std::fs::write(&f, "uno").unwrap();
+        let m = mtime_ms(&std::fs::metadata(&f).unwrap());
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let denied = std::fs::File::create(sub.join("probe")).is_err(); // root ignora i permessi
+        if denied {
+            assert_eq!(write(&f, "due", Some(m - 5000)).unwrap_err().code, "conflict");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "uno");
+            write(&f, "due", Some(m)).unwrap();
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+        }
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_temp_files_are_noise() {
+        let roots = vec![PathBuf::from("/Users/dev/app")];
+        assert!(is_noise(&roots, Path::new("/Users/dev/app/src/.a.ts.codeart-123-4.tmp")));
+        assert!(!is_noise(&roots, Path::new("/Users/dev/app/src/a.ts")));
+        assert!(!is_noise(&roots, Path::new("/Users/dev/app/src/notes.tmp")));
     }
 
     #[test]
