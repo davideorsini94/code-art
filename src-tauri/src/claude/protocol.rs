@@ -1,6 +1,5 @@
 //! Parser delle righe stdout di `claude` (stream-json) in eventi tipizzati. Nessun I/O.
 //! Formato di riferimento: docs/claude-protocol.md.
-#![allow(dead_code)] // consumato dal motore (task successivi)
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,13 +10,6 @@ pub enum AskType {
     Permission,
     Question,
     Plan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Todo {
-    pub text: String,
-    /// 'pending' | 'in_progress' | 'completed'
-    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -48,10 +40,8 @@ pub enum ClaudeEvent {
     },
     /// La CLI ha annullato una richiesta pendente.
     AskCancelled { request_id: String },
-    /// Lista completa dei todo. Il parser attuale non la emette mai: nessuna riga la contiene intera
-    /// (vedi `TodoDelta`). (Struct variant e non tupla: un tag interno non regge una sequenza.)
-    Todos { todos: Vec<Todo> },
-    /// Variazione di un todo ricavata dal risultato di `TaskCreate` / `TaskUpdate`.
+    /// Variazione di un todo ricavata dal risultato di `TaskCreate` / `TaskUpdate` (nessuna riga della CLI
+    /// contiene la lista intera: chi consuma la ricostruisce dai delta).
     /// Create: `text` e `status:"pending"`. Update: `status` da `statusChange.to`, `text` assente.
     TodoDelta { id: String, text: Option<String>, status: Option<String> },
     /// `context_used_pct` (0–100) calcolato dall'ultima iterazione API, `None` se la riga non basta.
@@ -312,7 +302,6 @@ mod tests {
             ClaudeEvent::ToolEnd { .. } => "toolEnd",
             ClaudeEvent::Ask { .. } => "ask",
             ClaudeEvent::AskCancelled { .. } => "askCancelled",
-            ClaudeEvent::Todos { .. } => "todos",
             ClaudeEvent::TodoDelta { .. } => "todoDelta",
             ClaudeEvent::TurnEnd { .. } => "turnEnd",
             ClaudeEvent::ControlResponse { .. } => "controlResponse",
@@ -432,7 +421,6 @@ mod tests {
                 ("1", None, Some("completed")),
             ]
         );
-        assert!(!evs.iter().any(|e| matches!(e, ClaudeEvent::Todos { .. })));
     }
 
     #[test]
@@ -568,7 +556,6 @@ mod tests {
             ClaudeEvent::ToolEnd { id: "i".into(), ok: true, result: "r".into() },
             ClaudeEvent::Ask { request_id: "r".into(), ask_type: AskType::Plan, prompt: "p".into(), options: vec![], tool_name: "t".into(), input: json!({}) },
             ClaudeEvent::AskCancelled { request_id: "r".into() },
-            ClaudeEvent::Todos { todos: vec![Todo { text: "x".into(), status: "pending".into() }] },
             ClaudeEvent::TodoDelta { id: "1".into(), text: None, status: Some("pending".into()) },
             ClaudeEvent::TurnEnd { context_used_pct: Some(1.0), is_error: false },
             ClaudeEvent::ControlResponse { request_id: "r".into(), ok: true, payload: json!(null) },
@@ -577,7 +564,7 @@ mod tests {
         let got: Vec<String> = all.iter().map(|e| serde_json::to_value(e).unwrap()["kind"].as_str().unwrap().to_string()).collect();
         assert_eq!(
             got,
-            ["init", "textDelta", "thinking", "toolStart", "toolEnd", "ask", "askCancelled", "todos", "todoDelta", "turnEnd", "controlResponse", "unknown"]
+            ["init", "textDelta", "thinking", "toolStart", "toolEnd", "ask", "askCancelled", "todoDelta", "turnEnd", "controlResponse", "unknown"]
         );
         // campi in camelCase
         let v = serde_json::to_value(&all[0]).unwrap();
@@ -586,6 +573,6 @@ mod tests {
         assert_eq!(v["askType"], "plan");
         assert!(v.get("requestId").is_some() && v.get("toolName").is_some());
         assert!(serde_json::to_value(&all[3]).unwrap().get("parentId").is_some());
-        assert!(serde_json::to_value(&all[9]).unwrap().get("contextUsedPct").is_some());
+        assert!(serde_json::to_value(&all[8]).unwrap().get("contextUsedPct").is_some());
     }
 }

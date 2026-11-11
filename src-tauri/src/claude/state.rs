@@ -1,5 +1,4 @@
 //! Macchina degli stati di una conversazione: funzione pura, nessun I/O.
-#![allow(dead_code)] // consumata dal motore (task successivi)
 
 use super::ConvStatus;
 use super::protocol::ClaudeEvent;

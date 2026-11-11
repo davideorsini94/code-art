@@ -18,7 +18,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
-            app.manage(store::Store::open(&dir.join("codeart.db"))?);
+            let store = store::Store::open(&dir.join("codeart.db"))?;
+            app.manage(claude::engine::Engine::new(
+                claude::engine::app_launch(),
+                store.clone(),
+                std::sync::Arc::new(claude::engine::TauriSink(app.handle().clone())),
+                claude::sessions::default_root(),
+                claude::engine::image_dir(),
+            ));
+            app.manage(store);
             projects::rebuild_menu(app.handle())?;
             projects::restore_windows(app.handle())?;
             Ok(())
@@ -52,6 +60,17 @@ pub fn run() {
             pty::pty_kill,
             claude::sessions::conv_list,
             claude::sessions::conv_history,
+            claude::engine::claude_check,
+            claude::engine::conv_start,
+            claude::engine::conv_resume,
+            claude::engine::conv_send,
+            claude::engine::conv_answer,
+            claude::engine::conv_interrupt,
+            claude::engine::conv_set_model,
+            claude::engine::conv_set_permission_mode,
+            claude::engine::conv_mark_viewed,
+            claude::engine::conv_archive,
+            claude::engine::conv_running,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

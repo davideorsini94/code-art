@@ -5,6 +5,7 @@
   import FileTree from './components/FileTree.svelte'
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
+  import ClaudeMissing from './components/ClaudeMissing.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
@@ -101,6 +102,7 @@
       {#if !collapsed.has(col)}
         <section class="glass col" data-slot={col} aria-label={label}>
           {#if col === 'sidebar'}<FileTree />{/if}
+          {#if col === 'convlist'}<ClaudeMissing />{/if}
         </section>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="handle" onpointerdown={(e) => startResize(e, col)}></div>

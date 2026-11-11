@@ -39,3 +39,21 @@ export const ptyKill = (id: number) => invoke<void>('pty_kill', { id })
 import type { ChatItem, Conversation } from './types'
 export const convList = (projectId: string) => invoke<Conversation[]>('conv_list', { projectId })
 export const convHistory = (sessionId: string) => invoke<ChatItem[]>('conv_history', { sessionId })
+
+// ---- motore conversazioni ----
+import type { ClaudeCheck, ConvStartOpts } from './types'
+export const claudeCheck = () => invoke<ClaudeCheck>('claude_check')
+export const convStart = (projectId: string, opts: ConvStartOpts = {}) => invoke<string>('conv_start', { projectId, opts })
+export const convResume = (sessionId: string) => invoke<void>('conv_resume', { sessionId })
+export const convSend = (sessionId: string, text: string, imagePaths: string[] = []) =>
+  invoke<void>('conv_send', { sessionId, text, imagePaths })
+/** `choice`: permesso `allow`/`deny`; piano `approve`/`reject`; domanda = etichetta scelta o testo libero. */
+export const convAnswer = (sessionId: string, requestId: string, choice: string) =>
+  invoke<void>('conv_answer', { sessionId, requestId, choice })
+export const convInterrupt = (sessionId: string) => invoke<void>('conv_interrupt', { sessionId })
+export const convSetModel = (sessionId: string, model: string) => invoke<void>('conv_set_model', { sessionId, model })
+export const convSetPermissionMode = (sessionId: string, mode: string) =>
+  invoke<void>('conv_set_permission_mode', { sessionId, mode })
+export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_viewed', { sessionId })
+export const convArchive = (sessionId: string, archived: boolean) => invoke<void>('conv_archive', { sessionId, archived })
+export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })

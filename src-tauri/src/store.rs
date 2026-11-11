@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::claude::Conversation;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -19,8 +19,10 @@ pub struct Project {
     pub folders: Vec<String>,
 }
 
+/// Clonabile: le copie condividono la stessa connessione (il motore la usa dai suoi thread).
+#[derive(Clone)]
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 const SCHEMA: &str = "
@@ -111,7 +113,7 @@ impl Store {
             [],
         )
         .map_err(err)?;
-        Ok(Store { conn: Mutex::new(conn) })
+        Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -217,6 +219,98 @@ impl Store {
             .map_err(err)?;
         let rows = stmt.query_map([project_id], row_to_conversation).map_err(err)?;
         rows.map(|r| r.map_err(err)).collect()
+    }
+
+    /// Nuova conversazione avviata da Code Art (owned, idle).
+    pub fn insert_owned_conversation(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        cwd: &str,
+        model: Option<&str>,
+        permission_mode: &str,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO conversations(session_id, project_id, cwd, owned, last_activity, model, permission_mode, seen_turn)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, 0)",
+                params![session_id, project_id, cwd, now_ms(), model, permission_mode],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Stato della macchina degli stati salvato: (status, turn_count, seen_turn).
+    pub fn conversation_state(&self, session_id: &str) -> Result<Option<(String, i64, Option<i64>)>> {
+        self.conn()
+            .query_row(
+                "SELECT status, turn_count, seen_turn FROM conversations WHERE session_id = ?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(err)
+    }
+
+    /// Salva lo stato della macchina degli stati; `touch` aggiorna anche `last_activity`.
+    pub fn save_conversation_state(&self, session_id: &str, status: &str, turn_count: i64, seen_turn: i64, touch: bool) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE conversations SET status = ?2, turn_count = ?3, seen_turn = ?4,
+                   last_activity = CASE WHEN ?5 THEN ?6 ELSE last_activity END
+                 WHERE session_id = ?1",
+                params![session_id, status, turn_count, seen_turn, touch, now_ms()],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Imposta `owned = 1` e riporta a `waiting` uno stato `working` rimasto da un processo che non c'è più.
+    pub fn mark_conversation_owned(&self, session_id: &str) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE conversations SET owned = 1, status = CASE status WHEN 'working' THEN 'waiting' ELSE status END
+                 WHERE session_id = ?1",
+                [session_id],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// All'avvio dell'app nessun processo è vivo: gli stati `working` salvati diventano `waiting`.
+    pub fn reset_working_conversations(&self) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET status = 'waiting' WHERE status = 'working'", [])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn set_conversation_model(&self, session_id: &str, model: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET model = ?2 WHERE session_id = ?1", params![session_id, model])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn set_conversation_permission_mode(&self, session_id: &str, mode: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET permission_mode = ?2 WHERE session_id = ?1", params![session_id, mode])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn set_conversation_context(&self, session_id: &str, pct: f64) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET context_used_pct = ?2 WHERE session_id = ?1", params![session_id, pct])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn set_conversation_archived(&self, session_id: &str, archived: bool) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET archived = ?2 WHERE session_id = ?1", params![session_id, archived])
+            .map_err(err)?;
+        Ok(())
     }
 
     #[cfg(test)]

@@ -1,6 +1,8 @@
 //! Integrazione con Claude Code: tipi condivisi con l'interfaccia e lettura delle sessioni su disco.
 use serde::{Deserialize, Serialize};
 
+pub mod engine;
+pub mod locate;
 pub mod protocol;
 pub mod sessions;
 pub mod state;
@@ -16,7 +18,6 @@ pub enum ConvStatus {
 }
 
 impl ConvStatus {
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             ConvStatus::Working => "working",

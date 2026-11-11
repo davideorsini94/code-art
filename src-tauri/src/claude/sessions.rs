@@ -578,7 +578,17 @@ pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub fn sync_project_sessions(root: &Path, store: &Store, cache: &MetaCache, project: &Project, now: i64) -> Result<Vec<Conversation>> {
+/// `is_running(session_id)`: la conversazione è pilotata adesso da un processo del motore.
+pub type IsRunning<'a> = &'a dyn Fn(&str) -> bool;
+
+pub fn sync_project_sessions(
+    root: &Path,
+    store: &Store,
+    cache: &MetaCache,
+    project: &Project,
+    now: i64,
+    is_running: IsRunning,
+) -> Result<Vec<Conversation>> {
     for dir in session_dirs_for(root, &project.folders) {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
@@ -588,21 +598,24 @@ pub fn sync_project_sessions(root: &Path, store: &Store, cache: &MetaCache, proj
             }
         }
     }
-    conversations_for(root, store, project, now)
+    conversations_for(root, store, project, now, is_running)
 }
 
 /// Conversazioni salvate del progetto con `maybe_open_elsewhere` calcolato dall'mtime del file.
-pub fn conversations_for(root: &Path, store: &Store, project: &Project, now: i64) -> Result<Vec<Conversation>> {
+pub fn conversations_for(root: &Path, store: &Store, project: &Project, now: i64, is_running: IsRunning) -> Result<Vec<Conversation>> {
     let dirs = session_dirs_for(root, &project.folders);
     let mut list = store.list_conversations(&project.id)?;
     for c in &mut list {
-        fill_elsewhere(c, &dirs, now);
+        fill_elsewhere(c, &dirs, now, is_running(&c.session_id));
     }
     Ok(list)
 }
 
-pub fn fill_elsewhere(c: &mut Conversation, dirs: &[PathBuf], now: i64) {
-    c.maybe_open_elsewhere = !c.owned
+/// Avviso "forse aperta altrove": file scritto negli ultimi 60 s e conversazione non pilotata adesso dal
+/// motore. Una conversazione `owned` ma senza processo (dopo un riavvio dell'app) può essere proseguita
+/// altrove, quindi conta il processo vivo e non solo `owned`.
+pub fn fill_elsewhere(c: &mut Conversation, dirs: &[PathBuf], now: i64, running: bool) {
+    c.maybe_open_elsewhere = !running
         && dirs
             .iter()
             .filter_map(|d| std::fs::metadata(d.join(format!("{}.jsonl", c.session_id))).ok())
@@ -632,6 +645,7 @@ pub fn history_in(root: &Path, store: &Store, project: &Project, session_id: &st
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::sync::mpsc::{channel, RecvTimeoutError};
+use super::engine::Engine;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -690,7 +704,8 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                 }
                 if let Ok(Some(meta)) = sync_session_file(&store, &handle.state::<MetaCache>(), &project, &p) {
                     if let Ok(Some(mut conv)) = store.get_conversation(&meta.session_id) {
-                        fill_elsewhere(&mut conv, &dirs, now_ms());
+                        let running = handle.try_state::<Engine>().is_some_and(|e| e.is_running(&conv.session_id));
+                        fill_elsewhere(&mut conv, &dirs, now_ms(), running);
                         let _ = handle.emit_to(label.as_str(), "conv:upsert", conv);
                     }
                 }
@@ -726,7 +741,9 @@ pub async fn conv_list(app: AppHandle, window: WebviewWindow, project_id: String
         return Err("progetto non della finestra chiamante".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        sync_project_sessions(&default_root(), &app.state::<Store>(), &app.state::<MetaCache>(), &project, now_ms())
+        let engine = app.state::<Engine>();
+        let running = |id: &str| engine.is_running(id);
+        sync_project_sessions(&default_root(), &app.state::<Store>(), &app.state::<MetaCache>(), &project, now_ms(), &running)
     })
     .await
     .map_err(err)?
@@ -931,7 +948,7 @@ mod tests {
     fn session_with_foreign_cwd_is_excluded() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
+        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         let ids: Vec<&str> = list.iter().map(|c| c.session_id.as_str()).collect();
         assert!(ids.contains(&U1) && ids.contains(&U2));
         assert!(!ids.contains(&U3));
@@ -944,19 +961,19 @@ mod tests {
         // l'altro progetto vede la sua sessione, non le nostre
         let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/other".into()] };
         // la cartella codificata di "other" non esiste: nessuna sessione trovata
-        assert!(sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &other, now_ms()).unwrap().is_empty());
+        assert!(sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &other, now_ms(), &|_| false).unwrap().is_empty());
     }
 
     #[test]
     fn resync_keeps_user_fields_and_updates_counts() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         {
             let conn_title = "UPDATE conversations SET title = 'Mio', archived = 1, owned = 1, seen_turn = 5, turn_count = 99 WHERE session_id = ?1";
             s.exec_for_test(conn_title, U1);
         }
-        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
+        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         let c = list.iter().find(|c| c.session_id == U1).unwrap();
         assert_eq!((c.title.as_str(), c.archived, c.owned, c.turn_count), ("Mio", true, true, 2));
     }
@@ -974,20 +991,24 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(3600);
         File::options().write(true).open(dir.join(format!("{U2}.jsonl"))).unwrap().set_modified(old).unwrap();
         let p = project("/Users/dev/proj");
-        let list = sync_project_sessions(root.path(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
+        let list = sync_project_sessions(root.path(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         let by = |id: &str| list.iter().find(|c| c.session_id == id).unwrap();
         assert!(by(U1).maybe_open_elsewhere); // appena copiato: mtime = adesso
         assert!(!by(U2).maybe_open_elsewhere);
+        // pilotata adesso da un processo del motore: nessun avviso
         s.exec_for_test("UPDATE conversations SET owned = 1 WHERE session_id = ?1", U1);
-        let list = conversations_for(root.path(), &s, &p, now_ms()).unwrap();
+        let list = conversations_for(root.path(), &s, &p, now_ms(), &|id| id == U1).unwrap();
         assert!(!list.iter().find(|c| c.session_id == U1).unwrap().maybe_open_elsewhere);
+        // owned ma senza processo (es. dopo un riavvio dell'app): la scrittura recente può venire da altrove
+        let list = conversations_for(root.path(), &s, &p, now_ms(), &|_| false).unwrap();
+        assert!(list.iter().find(|c| c.session_id == U1).unwrap().maybe_open_elsewhere);
     }
 
     #[test]
     fn history_refuses_other_projects_and_bad_ids() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         assert!(history_in(&fixtures_root(), &s, &p, U1).is_ok());
         let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/proj".into()] };
         assert!(history_in(&fixtures_root(), &s, &other, U1).is_err());
