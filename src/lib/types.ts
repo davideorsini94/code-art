@@ -37,6 +37,8 @@ export type AskType = 'permission' | 'question' | 'plan'
 export type AskQuestion = { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }
 /** Etichetta degli eventi `unknown` che riportano un errore della CLI o dell'API (`ERROR_LABEL` in protocol.rs). */
 export const ERROR_LABEL = 'Errore di Claude'
+/** Etichetta del marcatore di turno rimasto a metà al riavvio (`INTERRUPTED_LABEL` in engine.rs). */
+export const INTERRUPTED_LABEL = 'Turno interrotto — Riprendi'
 /** Evento del protocollo Claude (`conv:event`); specchio di `ClaudeEvent` in src-tauri/src/claude/protocol.rs. */
 export type ClaudeEvent =
   | { kind: 'init'; sessionId: string; model: string; slashCommands: string[]; tools: string[]; permissionMode: string }

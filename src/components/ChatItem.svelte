@@ -8,7 +8,11 @@
   import { editor } from '../lib/stores/editor.svelte'
   import { tooltip } from '../lib/tooltip'
   import type { Row } from '../lib/conv/reduce'
-  import { ERROR_LABEL } from '../lib/types'
+  import { ERROR_LABEL, INTERRUPTED_LABEL } from '../lib/types'
+  import { chat } from '../lib/stores/chat.svelte'
+  import { projectStore } from '../lib/stores/project.svelte'
+  import { convSend } from '../lib/ipc'
+  import { errorText } from '../lib/errors'
 
   let { row, sessionId }: { row: Row; sessionId: string } = $props()
   const item = $derived(row.item)
@@ -22,6 +26,25 @@
     if (!action) return
     if (action.type === 'diff') editor.openDiff(action.path, action.before, action.after)
     else void editor.open(action.path)
+  }
+
+  // "Turno interrotto": riprende inviando "Continua" come farebbe il compositore
+  const RESUME_TEXT = 'Continua'
+  let resuming = $state(false)
+  let resumeError = $state<string | null>(null)
+  const untrusted = $derived(projectStore.untrusted.length > 0)
+  async function resume() {
+    if (resuming || untrusted) return
+    resuming = true
+    resumeError = null
+    try {
+      await convSend(sessionId, RESUME_TEXT, [])
+      chat.addUser(sessionId, RESUME_TEXT)
+    } catch (e) {
+      resumeError = errorText(e)
+    } finally {
+      resuming = false
+    }
   }
 
   const mark = (ok: boolean | null) => (ok === null ? '…' : ok ? '✓' : '✗')
@@ -73,6 +96,12 @@
   </div>
 {:else if item.kind === 'ask'}
   <AskBox {item} {sessionId} />
+{:else if item.kind === 'raw' && item.label === INTERRUPTED_LABEL}
+  <div class="interrupted" role="status">
+    <span>Il turno è stato interrotto.</span>
+    <button class="diff" use:tooltip={untrusted ? 'Cartella non fidata — sola lettura' : resuming ? 'Invio in corso…' : 'Chiedi a Claude di continuare il turno'} aria-disabled={untrusted || resuming} onclick={resume}>Riprendi</button>
+    {#if resumeError}<span class="errtxt" role="alert">{resumeError}</span>{/if}
+  </div>
 {:else if item.kind === 'raw' && item.label === ERROR_LABEL}
   <div class="errnote" role="alert"><b>{ERROR_LABEL}</b><span class="txt">{item.json}</span></div>
 {:else if item.kind === 'raw'}
@@ -99,6 +128,9 @@
   .diff { flex: none; background: var(--glass2); border: 1px solid var(--edge); color: var(--txt); border-radius: 999px; font-size: 10.5px; padding: 1px 9px; cursor: pointer; }
   .body { padding: 0 0 8px 18px; }
   .faint { color: var(--faint); }
+  .interrupted { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 11px; border: 1px solid var(--wait); color: var(--wait); font-size: 12px; }
+  .interrupted .diff[aria-disabled='true'] { opacity: 0.5; cursor: default; }
+  .errtxt { color: var(--err); }
   .errnote { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; border-radius: 11px; border: 1px solid var(--err); background: rgba(255, 143, 143, 0.08); color: var(--err); overflow-wrap: anywhere; }
   .errnote .txt { color: var(--txt); }
 </style>

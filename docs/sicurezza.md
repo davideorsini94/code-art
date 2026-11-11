@@ -125,8 +125,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`) | globale | — |
 | `fs_list` | `path` | `ensure_inside` | finestra | F |
 | `fs_create` | `path`, `isDir` | `ensure_inside`; progetto fidato; non sovrascrive | finestra | F |
-| `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente | finestra | F |
-| `fs_trash` | `path` | `ensure_inside`; progetto fidato; Cestino, non cancellazione | finestra | F |
+| `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente; `from` mai una cartella del progetto (`movable_path`) | finestra | F |
+| `fs_trash` | `path` | `ensure_inside`; progetto fidato; mai una cartella del progetto (`movable_path`); Cestino, non cancellazione | finestra | F |
 | `fs_read` | `path` | `ensure_inside`; ≤ 5 MB, solo UTF-8 | finestra | F |
 | `fs_read_bytes` | `path`, `maxBytes?` | `ensure_inside` (stesso confinamento di `fs_read`, link simbolici compresi); solo file regolari; ≤ 50 MB e ≤ `maxBytes` se dato (`too_large`, deciso dai metadati prima di leggere); lettura, quindi ammessa anche in progetti non fidati; risposta binaria dell'IPC | finestra | F (lettura) |
 | `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |

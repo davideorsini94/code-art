@@ -380,6 +380,22 @@ pub fn mutable_path(store: &Store, label: &str, path: &str) -> Result<PathBuf, F
     ensure_inside(&writable_roots_for_label(store, label)?, Path::new(path))
 }
 
+/// Le cartelle del progetto non si rinominano né si spostano nel Cestino dall'albero (`forbidden`).
+pub fn refuse_root(roots: &[PathBuf], resolved: &Path) -> Result<(), FsError> {
+    if roots.iter().filter_map(|r| r.canonicalize().ok()).any(|r| r == resolved) {
+        return Err(FsError::new("forbidden", "Cartella del progetto: non si può rinominare né spostare nel Cestino"));
+    }
+    Ok(())
+}
+
+/// Percorso da rinominare/spostare o mettere nel Cestino: come `mutable_path`, ma mai una cartella del progetto.
+pub fn movable_path(store: &Store, label: &str, path: &str) -> Result<PathBuf, FsError> {
+    let roots = writable_roots_for_label(store, label)?;
+    let resolved = ensure_inside(&roots, Path::new(path))?;
+    refuse_root(&roots, &resolved)?;
+    Ok(resolved)
+}
+
 fn checked(window: &WebviewWindow, store: &Store, path: &str) -> Result<PathBuf, FsError> {
     readable_path(store, window.label(), path)
 }
@@ -402,13 +418,13 @@ pub async fn fs_create(window: WebviewWindow, store: State<'_, Store>, path: Str
 
 #[tauri::command]
 pub async fn fs_rename(window: WebviewWindow, store: State<'_, Store>, from: String, to: String) -> Result<(), FsError> {
-    let (from, to) = (checked_mut(&window, &store, &from)?, checked_mut(&window, &store, &to)?);
+    let (from, to) = (movable_path(&store, window.label(), &from)?, checked_mut(&window, &store, &to)?);
     rename(&from, &to)
 }
 
 #[tauri::command]
 pub async fn fs_trash(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<(), FsError> {
-    trash_path(&checked_mut(&window, &store, &path)?)
+    trash_path(&movable_path(&store, window.label(), &path)?)
 }
 
 #[tauri::command]
@@ -571,6 +587,19 @@ mod tests {
         std::fs::create_dir(&sib).unwrap();
         assert_eq!(ensure_inside(&r, &sib).unwrap_err().code, "forbidden");
         assert_eq!(ensure_inside(&r, &sib.join("x.txt")).unwrap_err().code, "forbidden");
+    }
+
+    #[test]
+    fn project_roots_cannot_be_moved_or_trashed() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        std::fs::create_dir(r[0].join("sub")).unwrap();
+        let canon = r[0].canonicalize().unwrap();
+        assert_eq!(refuse_root(&r, &canon).unwrap_err().code, "forbidden");
+        assert!(refuse_root(&r, &canon.join("sub")).is_ok());
+        // con `/` finale o `.` il percorso risolto è sempre la radice
+        let resolved = ensure_inside(&r, &r[0].join("sub/..")).unwrap_or(canon.clone());
+        assert_eq!(refuse_root(&r, &resolved).unwrap_err().code, "forbidden");
     }
 
     #[test]

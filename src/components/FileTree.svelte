@@ -63,9 +63,25 @@
 
   onMount(() => {
     const close = () => (menu = null)
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && (menu = null)
     window.addEventListener('click', close)
-    return () => window.removeEventListener('click', close)
+    window.addEventListener('keydown', esc)
+    window.addEventListener('blur', close)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', esc)
+      window.removeEventListener('blur', close)
+    }
   })
+
+  // il menu resta dentro la finestra (come quello delle conversazioni)
+  const MENU_W = 180
+  const MENU_H = 150
+  const menuAt = (x: number, y: number) => ({
+    x: Math.max(4, Math.min(x, window.innerWidth - MENU_W - 4)),
+    y: Math.max(4, Math.min(y, window.innerHeight - MENU_H - 4)),
+  })
+  const isRootPath = (p: string) => folders.includes(p)
 
   async function run(op: () => Promise<unknown>): Promise<boolean> {
     error = null
@@ -126,7 +142,7 @@
     dropTarget = null
     if (readOnly) return
     const from = ev.dataTransfer?.getData('text/plain')
-    if (!from || !target.isDir || from === target.path || target.path.startsWith(from + '/')) return
+    if (!from || isRootPath(from) || !target.isDir || from === target.path || target.path.startsWith(from + '/')) return
     const to = `${target.path}/${nameOf(from)}`
     void run(async () => {
       await fsRename(from, to)
@@ -165,12 +181,13 @@
       class:drop={dropTarget === e.path}
       style:padding-left="{8 + depth * 14}px"
       role="treeitem"
-      use:tooltip={isRoot ? e.path : relativeToFolders(e.path, folders)}
+      use:tooltip={isRoot ? `Cartella del progetto: ${e.path}` : relativeToFolders(e.path, folders)}
       aria-selected={editor.active === e.path}
       aria-expanded={e.isDir ? !!expanded[e.path] : undefined}
       tabindex="0"
-      draggable="true"
+      draggable={isRoot ? 'false' : 'true'}
       ondragstart={(ev) => {
+        if (isRoot) return ev.preventDefault()
         ev.dataTransfer?.setData('text/plain', e.path)
         ev.dataTransfer?.setData(PATH_DRAG_TYPE, e.path)
       }}
@@ -187,7 +204,7 @@
       oncontextmenu={(ev) => {
         ev.preventDefault()
         ev.stopPropagation()
-        menu = { x: ev.clientX, y: ev.clientY, entry: e }
+        menu = { ...menuAt(ev.clientX, ev.clientY), entry: e }
       }}
     >
       <span class="chev" class:open={e.isDir && expanded[e.path]} aria-hidden="true">
@@ -225,8 +242,10 @@
       <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Crea un nuovo file in questa cartella'} onclick={() => !readOnly && startNew('file', menu!.entry.path)}>Nuovo file</button>
       <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Crea una nuova cartella qui dentro'} onclick={() => !readOnly && startNew('dir', menu!.entry.path)}>Nuova cartella</button>
     {/if}
-    <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Cambia il nome'} onclick={() => !readOnly && startRename(menu!.entry)}>Rinomina</button>
-    <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Sposta nel Cestino (si può recuperare)'} onclick={() => !readOnly && void trash(menu!.entry)}>Sposta nel Cestino</button>
+    {#if !isRootPath(menu.entry.path)}
+      <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Cambia il nome'} onclick={() => !readOnly && startRename(menu!.entry)}>Rinomina</button>
+      <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Sposta nel Cestino (si può recuperare)'} onclick={() => !readOnly && void trash(menu!.entry)}>Sposta nel Cestino</button>
+    {/if}
   </div>
 {/if}
 

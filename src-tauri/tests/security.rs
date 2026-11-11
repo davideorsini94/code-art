@@ -1,6 +1,6 @@
 //! Verifiche di sicurezza a livello di integrazione: confinamento dei percorsi, permessi Tauri, CSP e
 //! inventario dei comandi (ogni `#[tauri::command]` è registrato e documentato in `docs/sicurezza.md`).
-use code_art_lib::fs_tree::{self, create, list, mutable_path, read as fs_read, readable_path, rename, write, FsError};
+use code_art_lib::fs_tree::{self, create, list, movable_path, mutable_path, read as fs_read, readable_path, rename, write, FsError};
 use code_art_lib::store::{Project, Store};
 use code_art_lib::trust;
 use serde_json::Value;
@@ -74,6 +74,20 @@ fn fs_write_outside_project_is_rejected() {
     // dentro il progetto si scrive
     fs_write(&store, LABEL, &proj.join("src/main.rs"), "fn main() {}").unwrap();
     assert_eq!(read(&proj.join("src/main.rs")), "fn main() {}");
+}
+
+#[test]
+fn project_root_cannot_be_renamed_or_trashed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let proj = base.join("progetto");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    let store = store_with(&base, &[&proj], true);
+    for p in [proj.clone(), proj.join("src/.."), PathBuf::from(format!("{}/", proj.display()))] {
+        let err = movable_path(&store, LABEL, &p.to_string_lossy()).expect_err(&p.display().to_string());
+        assert_eq!(err.code, "forbidden", "{}", p.display());
+    }
+    assert!(movable_path(&store, LABEL, &proj.join("src").to_string_lossy()).is_ok());
 }
 
 #[test]

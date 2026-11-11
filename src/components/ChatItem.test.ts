@@ -6,6 +6,12 @@ const openUrl = vi.fn()
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: (u: string) => openUrl(u) }))
 const openDiff = vi.fn()
 const openFile = vi.fn()
+const convSend = vi.fn(async (..._a: unknown[]) => {})
+vi.mock('../lib/ipc', () => ({ convSend: (...a: unknown[]) => convSend(...a) }))
+const addUser = vi.fn()
+vi.mock('../lib/stores/chat.svelte', () => ({ chat: { addUser: (...a: unknown[]) => addUser(...a) } }))
+const project = vi.hoisted(() => ({ untrusted: [] as string[] }))
+vi.mock('../lib/stores/project.svelte', () => ({ projectStore: project }))
 vi.mock('../lib/stores/editor.svelte', () => ({ editor: { openDiff: (...a: unknown[]) => openDiff(...a), open: (...a: unknown[]) => openFile(...a) } }))
 
 import ChatItem from './ChatItem.svelte'
@@ -82,5 +88,23 @@ describe('ChatItem', () => {
     expect(note.className).toContain('errnote')
     expect(note.textContent).toContain(evil)
     expect(container.querySelector('img')).toBeNull()
+  })
+
+  it('"Turno interrotto": Riprendi sends "Continua" like the composer; disabled in untrusted projects', async () => {
+    const item: Item = { kind: 'raw', id: 'i', label: 'Turno interrotto — Riprendi', json: '' }
+    render(ChatItem, { row: row(item), sessionId: 's' })
+    expect(screen.getByText('Il turno è stato interrotto.')).toBeTruthy()
+    await fireEvent.click(screen.getByText('Riprendi'))
+    expect(convSend).toHaveBeenCalledWith('s', 'Continua', [])
+    await new Promise((r) => setTimeout(r, 0))
+    expect(addUser).toHaveBeenCalledWith('s', 'Continua')
+    cleanup()
+    convSend.mockClear()
+    project.untrusted = ['/Users/dev/x']
+    render(ChatItem, { row: row(item), sessionId: 's' })
+    expect(screen.getByText('Riprendi').getAttribute('aria-disabled')).toBe('true')
+    await fireEvent.click(screen.getByText('Riprendi'))
+    expect(convSend).not.toHaveBeenCalled()
+    project.untrusted = []
   })
 })
