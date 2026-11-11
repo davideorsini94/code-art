@@ -2059,10 +2059,14 @@ mod tests {
     #[test]
     fn apply_on_a_finished_process_uses_the_store() {
         let env = setup(&[("FAKE_CLAUDE_EXIT_AT_START", "1")]);
-        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
-        let conv = env.engine.live(&sid);
+        // il processo esce subito: si ritenta finché `live` lo prende prima della fine (mai un test vacuo)
+        let (sid, conv) = (0..50)
+            .find_map(|_| {
+                let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+                env.engine.live(&sid).map(|c| (sid, c))
+            })
+            .expect("nessun avvio ha lasciato un processo osservabile");
         wait_until("uscita gestita", || !env.engine.is_running(&sid));
-        let Some(conv) = conv else { return }; // già uscito prima di `live`: niente da verificare
         assert!(lock(&conv.rt).finished);
         // lo store è andato avanti (un altro processo, una vista): il vecchio stato in memoria non lo sovrascrive
         env.store.save_conversation_state(&sid, "waiting", 5, 4, false).unwrap();

@@ -170,6 +170,8 @@ pub fn start_watchers(app: &AppHandle, project: &Project) {
     let (app, project) = (app.clone(), project.clone());
     std::thread::spawn(move || {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // il mutex non è FIFO: l'istantanea presa all'avvio del thread può essere vecchia, vince l'elenco attuale
+        let project = app.state::<Store>().get_project(&project.id).ok().flatten().unwrap_or(project);
         crate::fs_tree::watch_project(&app, &project);
         crate::claude::sessions::watch_project(&app, &project);
         if app.get_webview_window(&window_label(&project.id)).is_none() {
@@ -529,6 +531,8 @@ mod tests {
         // i watcher (canonicalize, FSEvents) partono da un thread a parte
         assert!(!body("pub fn show_project_window(").contains("watch_project"));
         assert!(body("pub fn start_watchers(").contains("std::thread::spawn"));
+        // sotto il lock l'elenco di cartelle si rilegge dallo store: l'ultimo vince
+        assert!(body("pub fn start_watchers(").contains("get_project(&project.id)"));
         assert!(!src.contains(concat!("::watch_project(", "&app, &p)")));
     }
 
