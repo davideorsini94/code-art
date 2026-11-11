@@ -21,8 +21,8 @@
     border-radius: 8px;
     font-size: 12px;
     color: var(--wait);
-    background: rgba(255, 180, 84, 0.1);
-    border: 1px solid rgba(255, 180, 84, 0.3);
+    background: var(--wait-soft);
+    border: 1px solid var(--wait-line);
   }
   button {
     padding: 0;

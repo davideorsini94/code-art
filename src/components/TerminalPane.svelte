@@ -5,6 +5,7 @@
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
   import { PtyInbox } from '../lib/pty-inbox'
+  import { xtermTheme } from '../lib/theme'
   import { projectStore } from '../lib/stores/project.svelte'
   import { tooltip } from '../lib/tooltip'
 
@@ -85,18 +86,6 @@
     l?.term.write('\r\n\x1b[2m[processo terminato]\x1b[0m\r\n')
   }
 
-  const theme = {
-    background: 'rgba(0,0,0,0)',
-    foreground: '#e9ecf5',
-    cursor: '#8fa8ff',
-    cursorAccent: '#0a0c14',
-    selectionBackground: 'rgba(143,168,255,0.3)',
-    green: '#5ee0c1',
-    yellow: '#ffb454',
-    blue: '#8fa8ff',
-    brightBlack: '#667089',
-  }
-
   async function newTab() {
     const cwd = projectStore.project?.folders[0]
     if (!cwd || !host) return
@@ -107,7 +96,7 @@
     el.className = 'term'
     host.appendChild(el)
     const term = new m.Terminal({
-      theme,
+      theme: xtermTheme,
       allowTransparency: true,
       fontFamily: 'ui-monospace, Menlo, monospace',
       fontSize: 12,

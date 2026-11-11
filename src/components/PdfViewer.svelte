@@ -219,8 +219,8 @@
 
 <style>
   .viewer { display: flex; flex-direction: column; height: 100%; outline: none; }
-  .pages { flex: 1; min-height: 0; overflow: auto; padding: 16px 24px 4px; background: rgba(0, 0, 0, 0.28); }
-  .page { background: #fff; margin-left: auto; margin-right: auto; box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45); flex: none; }
+  .pages { flex: 1; min-height: 0; overflow: auto; padding: 16px 24px 4px; background: var(--well); }
+  .page { background: var(--paper); margin-left: auto; margin-right: auto; box-shadow: 0 2px 14px var(--shade); flex: none; }
   .msg { color: var(--faint); font-size: 13px; text-align: center; margin: 40px 0; }
   .foot { display: flex; align-items: center; gap: 8px; padding: 5px 12px; font-size: 11px; color: var(--dim); border-top: 1px solid var(--edge-soft); flex: none; }
   .grow { flex: 1; }

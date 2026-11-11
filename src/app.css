@@ -8,13 +8,8 @@ body {
   font: 13px/1.45 -apple-system, 'SF Pro Text', system-ui, sans-serif;
   color: var(--txt);
   overflow: hidden;
-  /* finestra opaca: base scura piena + aurora piena; il vetro dei pannelli sfoca questo sfondo interno */
-  background:
-    radial-gradient(60% 70% at 12% 8%, #3b2a8c 0%, transparent 60%),
-    radial-gradient(50% 60% at 88% 18%, #0f6b6b 0%, transparent 62%),
-    radial-gradient(55% 60% at 70% 100%, #7a2d5c 0%, transparent 60%),
-    radial-gradient(40% 50% at 25% 95%, #1b3f8f 0%, transparent 60%),
-    #0a0b12;
+  /* finestra opaca: fondo blu-grigio pieno con un solo gradiente lievissimo, uguale dietro ogni pannello */
+  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 55%), var(--bg);
 }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
@@ -29,8 +24,8 @@ body {
 .md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 0 0 8px; }
 .md ul, .md ol { padding-left: 20px; }
 .md h1, .md h2, .md h3, .md h4 { font-size: 13px; font-weight: 650; margin: 10px 0 4px; }
-.md code { font: 11.5px ui-monospace, 'SF Mono', monospace; background: rgba(0, 0, 0, 0.3); padding: 1px 5px; border-radius: 5px; }
-.md pre { background: rgba(0, 0, 0, 0.34); padding: 8px 10px; border-radius: 9px; overflow: auto; }
+.md code { font: 11.5px ui-monospace, 'SF Mono', monospace; background: var(--well); padding: 1px 5px; border-radius: 5px; }
+.md pre { background: var(--well); padding: 8px 10px; border-radius: 9px; overflow: auto; }
 .md pre code { background: none; padding: 0; }
 .md a { color: var(--accent); }
 .md blockquote { border-left: 2px solid var(--edge); padding-left: 10px; color: var(--dim); }
@@ -47,9 +42,9 @@ body {
   color: var(--txt);
   background: var(--surface-pop);
   border: 1px solid var(--edge);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: 0 6px 18px var(--shade);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
   overflow-wrap: anywhere;
   white-space: normal;
 }

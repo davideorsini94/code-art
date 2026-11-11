@@ -1,50 +1,74 @@
+/*
+ * Tema unico di Code Art: una sola famiglia di superfici blu-grigio, calma e uniforme.
+ * Tutti i colori dell'interfaccia vivono qui. I componenti usano solo questi token
+ * (verificato da glass.test.ts). Monaco e xterm vogliono valori concreti: li prendono da
+ * src/lib/theme.ts, che replica gli stessi esadecimali (anche questo verificato dai test).
+ */
 :root {
+  /* sfondo della finestra (opaco) e superfici */
+  --bg: #0e1016;
+  --bg-top: #12151d; /* unico gradiente, appena percettibile, dall'alto */
+  --surface-1: #151821; /* pannelli: colonne, rail, editor, terminale */
+  --surface-2: #1c202b; /* superfici in rilievo: menu, palette, scheda attiva */
+  --surface-pop: rgba(28, 32, 43, 0.97); /* menu a comparsa, tooltip, popup (= --surface-2 quasi pieno) */
+
+  /* testo (AA su tutte le superfici: vedi glass.test.ts) */
   --txt: #e9ecf5;
   --dim: #9aa3b8;
   --faint: #667089;
-  --glass: rgba(255, 255, 255, 0.055);
-  --glass2: rgba(255, 255, 255, 0.09);
-  --edge: rgba(255, 255, 255, 0.14);
+  --ink: #111318; /* testo su fondo chiaro (option native, bottone accento) */
+  --paper: #ffffff; /* pagina PDF */
+
+  /* velature sopra una superficie */
+  --glass: rgba(255, 255, 255, 0.05); /* hover, campi, chip */
+  --glass2: rgba(255, 255, 255, 0.09); /* selezione, voce attiva */
+  --well: rgba(0, 0, 0, 0.25); /* incavi: input, blocchi di codice, palco dei media */
+  --scrim: rgba(14, 16, 22, 0.7); /* copertura che blocca */
+  --scrim-soft: rgba(14, 16, 22, 0.4); /* copertura leggera (palette) */
+
+  /* bordi, luci e ombre: identici per ogni tipo di pannello */
+  --edge: rgba(255, 255, 255, 0.12);
   --edge-soft: rgba(255, 255, 255, 0.07);
+  --hi: rgba(255, 255, 255, 0.08); /* luce interna in alto */
+  --lo: rgba(0, 0, 0, 0.25); /* ombra interna in basso */
+  --shade: rgba(0, 0, 0, 0.3); /* ombra portata */
+  --panel-shadow: inset 0 1px 0 var(--hi), inset 0 -1px 0 var(--lo), 0 8px 24px var(--shade);
+
+  /* colori con significato e le loro tinte (stesse opacità per ogni colore) */
+  --accent: #8fa8ff;
+  --accent-soft: rgba(143, 168, 255, 0.16);
+  --accent-line: rgba(143, 168, 255, 0.3);
   --work: #5ee0c1;
   --wait: #ffb454;
+  --wait-soft: rgba(255, 180, 84, 0.1);
+  --wait-mid: rgba(255, 180, 84, 0.18);
+  --wait-strong: rgba(255, 180, 84, 0.28);
+  --wait-line: rgba(255, 180, 84, 0.4);
   --done: #7d8aa6;
-  --accent: #8fa8ff;
   --err: #ff8f8f;
-  --surface-pop: rgba(24, 27, 38, 0.96); /* menu, tooltip */
+  --err-soft: rgba(255, 143, 143, 0.1);
+
   --radius: 14px;
   --dur: 200ms;
 }
 
-.glass {
-  background: var(--glass);
+/* pannelli: stessa superficie, stesso bordo, stessa luce, ovunque stiano */
+.glass,
+.surface-opaque {
+  background: var(--surface-1);
   border: 1px solid var(--edge-soft);
   border-radius: var(--radius);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
-    0 8px 24px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(22px) saturate(160%);
-  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  box-shadow: var(--panel-shadow);
 }
 
+/* in rilievo (menu, palette): appena più chiaro e quasi pieno, vetro sfocato su ciò che copre */
 .glass-strong {
-  background: var(--glass2);
+  background: var(--surface-pop);
   border: 1px solid var(--edge);
   border-radius: var(--radius);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
-    0 8px 24px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(40px) saturate(170%);
-  -webkit-backdrop-filter: blur(40px) saturate(170%);
-}
-
-/* area codice e terminale: quasi opache per la leggibilità */
-.surface-opaque {
-  background: rgba(10, 12, 20, 0.88);
-  border: 1px solid var(--edge-soft);
-  border-radius: var(--radius);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -115,7 +115,7 @@
   .conv:focus-visible { border-color: var(--accent); }
   .conv.on {
     background: var(--glass2); border-color: var(--edge);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 6px 18px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--panel-shadow);
   }
   .t { display: flex; gap: 8px; align-items: center; font-weight: 600; font-size: 13px; min-width: 0; }
   .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

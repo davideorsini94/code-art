@@ -322,7 +322,7 @@
 {/if}
 
 <style>
-  .cover { position: fixed; inset: 0; z-index: 200; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: rgba(10, 12, 18, 0.35); }
+  .cover { position: fixed; inset: 0; z-index: 200; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: var(--scrim-soft); }
   .panel { width: min(640px, 92vw); max-height: 60vh; display: flex; flex-direction: column; overflow: hidden; animation: pop var(--dur) ease; }
   @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(0.985); } to { opacity: 1; transform: none; } }
   .q { font: inherit; font-size: 15px; color: var(--txt); background: transparent; border: 0; border-bottom: 1px solid var(--edge-soft); padding: 14px 16px; outline: none; }

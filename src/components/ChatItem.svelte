@@ -138,11 +138,11 @@
 
 <style>
   .msg { padding: 9px 12px; border-radius: 13px; max-width: 92%; overflow-wrap: anywhere; }
-  .me { background: rgba(143, 168, 255, 0.16); border: 1px solid rgba(143, 168, 255, 0.28); margin-left: auto; }
+  .me { background: var(--accent-soft); border: 1px solid var(--accent-line); margin-left: auto; }
   .txt { white-space: pre-wrap; }
   .imgs { display: block; margin-top: 4px; color: var(--faint); font-size: 11px; }
   .ai { background: var(--glass); border: 1px solid var(--edge-soft); }
-  .tool, .sub, .think { font: 11.5px ui-monospace, 'SF Mono', monospace; color: var(--dim); border-radius: 9px; background: rgba(0, 0, 0, 0.25); padding: 2px 10px; }
+  .tool, .sub, .think { font: 11.5px ui-monospace, 'SF Mono', monospace; color: var(--dim); border-radius: 9px; background: var(--well); padding: 2px 10px; }
   .sub { border: 1px solid var(--edge-soft); }
   .err .meta { color: var(--err); }
   .line { display: flex; align-items: center; gap: 8px; }
@@ -157,6 +157,6 @@
   .interrupted { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 11px; border: 1px solid var(--wait); color: var(--wait); font-size: 12px; }
   .interrupted .diff[aria-disabled='true'] { opacity: 0.5; cursor: default; }
   .errtxt { color: var(--err); }
-  .errnote { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; border-radius: 11px; border: 1px solid var(--err); background: rgba(255, 143, 143, 0.08); color: var(--err); overflow-wrap: anywhere; }
+  .errnote { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; border-radius: 11px; border: 1px solid var(--err); background: var(--err-soft); color: var(--err); overflow-wrap: anywhere; }
   .errnote .txt { color: var(--txt); }
 </style>

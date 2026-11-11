@@ -99,7 +99,7 @@
 
 <style>
   .viewer { display: flex; flex-direction: column; height: 100%; outline: none; }
-  .stage { flex: 1; min-height: 0; overflow: auto; display: grid; place-items: center; padding: 16px; background: rgba(0, 0, 0, 0.28); }
+  .stage { flex: 1; min-height: 0; overflow: auto; display: grid; place-items: center; padding: 16px; background: var(--well); }
   .stage.fit { overflow: hidden; }
   .stage.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
   .stage:not(.fit) { place-items: safe center; }

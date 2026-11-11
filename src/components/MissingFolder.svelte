@@ -25,7 +25,7 @@
     z-index: 100;
     display: grid;
     place-items: center;
-    background: rgba(10, 12, 18, 0.7);
+    background: var(--scrim);
   }
   .box { padding: 24px 28px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
   h2 { margin: 0; font-size: 16px; }

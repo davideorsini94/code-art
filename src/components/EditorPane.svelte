@@ -344,7 +344,7 @@
   .tool.on { color: var(--accent); border-color: var(--accent); }
   .bar {
     display: flex; align-items: center; gap: 10px; padding: 7px 12px; font-size: 12px; flex: none;
-    background: rgba(255, 180, 84, 0.14); color: var(--wait);
+    background: var(--wait-mid); color: var(--wait);
   }
   .bar button { background: var(--glass2); border: 1px solid var(--edge-soft); color: var(--txt); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: default; }
   .body { position: relative; flex: 1; min-height: 0; display: flex; }

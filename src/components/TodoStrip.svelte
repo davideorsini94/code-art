@@ -29,7 +29,7 @@
 {/if}
 
 <style>
-  .strip { border: 1px solid var(--edge-soft); background: rgba(0, 0, 0, 0.22); border-radius: 11px; padding: 4px 10px; }
+  .strip { border: 1px solid var(--edge-soft); background: var(--well); border-radius: 11px; padding: 4px 10px; }
   .head { display: flex; width: 100%; gap: 8px; align-items: center; background: none; border: 0; color: var(--dim); font: inherit; font-size: 11.5px; cursor: pointer; padding: 3px 0; text-align: left; }
   .count { color: var(--work); font-variant-numeric: tabular-nums; }
   .cur { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

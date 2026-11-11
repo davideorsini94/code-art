@@ -27,7 +27,7 @@
     display: grid; place-items: center; font-size: 15px; color: var(--dim); cursor: pointer;
     transition: background var(--dur) ease, color var(--dur) ease;
   }
-  button.on { background: var(--glass2); color: var(--txt); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2); }
+  button.on { background: var(--glass2); color: var(--txt); box-shadow: inset 0 1px 0 var(--hi); }
   .bottom { margin-top: auto; }
   .bottom[aria-disabled='true'] { opacity: 0.4; cursor: default; }
 </style>

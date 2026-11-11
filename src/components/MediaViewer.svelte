@@ -54,7 +54,7 @@
 
 <style>
   .viewer { display: flex; flex-direction: column; height: 100%; }
-  .stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 16px; background: rgba(0, 0, 0, 0.28); }
+  .stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 16px; background: var(--well); }
   video { max-width: 100%; max-height: 100%; border-radius: 8px; }
   .audio { display: flex; flex-direction: column; align-items: center; gap: 14px; }
   .aname { margin: 0; color: var(--dim); font-size: 13px; }

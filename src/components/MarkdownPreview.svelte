@@ -116,7 +116,7 @@
   .md :global(blockquote) { padding: 0.2em 1em; color: var(--dim); border-left: 3px solid var(--edge); background: var(--glass); border-radius: 0 6px 6px 0; }
   .md :global(blockquote > :last-child) { margin-bottom: 0; }
   .md :global(code) { font-family: ui-monospace, Menlo, monospace; font-size: 0.88em; background: var(--glass2); padding: 0.15em 0.4em; border-radius: 5px; }
-  .md :global(pre) { background: rgba(0, 0, 0, 0.32); border: 1px solid var(--edge-soft); border-radius: 10px; padding: 12px 14px; overflow: auto; line-height: 1.5; }
+  .md :global(pre) { background: var(--well); border: 1px solid var(--edge-soft); border-radius: 10px; padding: 12px 14px; overflow: auto; line-height: 1.5; }
   .md :global(pre code) { background: none; padding: 0; font-size: 12.5px; }
   .md :global(table) { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
   .md :global(th), .md :global(td) { border: 1px solid var(--edge-soft); padding: 6px 12px; }

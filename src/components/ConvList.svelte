@@ -131,7 +131,6 @@
   .err { color: var(--wait); }
   .menu {
     position: fixed; z-index: 90; min-width: 160px; padding: 4px; display: flex; flex-direction: column;
-    background: rgba(24, 27, 38, 0.96);
   }
   .menu button {
     text-align: left; background: none; border: 0; color: var(--txt); padding: 6px 10px;

@@ -309,23 +309,23 @@
 
 <style>
   .composer { display: flex; flex-direction: column; gap: 6px; }
-  .box { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 9px 12px; border-radius: 14px; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--edge-soft); }
+  .box { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 9px 12px; border-radius: 14px; background: var(--well); border: 1px solid var(--edge-soft); }
   .box:focus-within { border-color: var(--accent); }
   textarea { flex: 1; min-width: 0; resize: none; background: none; border: 0; outline: 0; color: var(--txt); font: inherit; line-height: 1.4; max-height: 160px; }
   textarea::placeholder { color: var(--faint); }
   .hint { color: var(--faint); font-size: 11px; padding-bottom: 2px; }
-  .pop { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); list-style: none; margin: 0; padding: 4px; border-radius: 12px; background: rgba(20, 22, 30, 0.97); border: 1px solid var(--edge-soft); z-index: 5; }
+  .pop { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); list-style: none; margin: 0; padding: 4px; border-radius: 12px; background: var(--surface-pop); border: 1px solid var(--edge-soft); z-index: 5; }
   .pop button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--txt); font: inherit; padding: 5px 9px; border-radius: 8px; cursor: pointer; }
   .pop li.on button { background: var(--glass2); }
   .thumbs { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
   .thumbs li { position: relative; }
   .thumbs img { display: block; height: 52px; max-width: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--edge-soft); }
-  .x { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; line-height: 14px; padding: 0; border-radius: 50%; border: 1px solid var(--edge-soft); background: rgba(20, 22, 30, 0.95); color: var(--txt); cursor: pointer; }
+  .x { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; line-height: 14px; padding: 0; border-radius: 50%; border: 1px solid var(--edge-soft); background: var(--surface-2); color: var(--txt); cursor: pointer; }
   .bar { display: flex; align-items: center; gap: 6px; }
   .grow { flex: 1; }
-  .chip { display: inline-flex; border: 1px solid var(--edge-soft); border-radius: 999px; background: rgba(0, 0, 0, 0.22); color: var(--dim); font-size: 11.5px; }
+  .chip { display: inline-flex; border: 1px solid var(--edge-soft); border-radius: 999px; background: var(--well); color: var(--dim); font-size: 11.5px; }
   .chip select { appearance: none; background: none; border: 0; outline: 0; color: inherit; font: inherit; padding: 3px 10px; cursor: pointer; max-width: 180px; }
-  .chip select option { color: #111; }
+  .chip select option { color: var(--ink); }
   .chip:focus-within { border-color: var(--accent); }
   .chip.bypass { color: var(--wait); border-color: var(--wait); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -338,7 +338,7 @@
   /* un pulsante disabilitato non riceve eventi del puntatore: il suggerimento sta sul contenitore */
   .tipw { display: inline-flex; }
   .tipw button:disabled { pointer-events: none; }
-  .btn.go { background: var(--accent); color: #10131c; border-color: transparent; font-weight: 600; }
+  .btn.go { background: var(--accent); color: var(--ink); border-color: transparent; font-weight: 600; }
   .btn.stop { border-color: var(--wait); color: var(--wait); }
   .err { color: var(--err); font-size: 11.5px; margin: 0; }
   .ro { color: var(--faint); font-size: 11.5px; margin: 0; }

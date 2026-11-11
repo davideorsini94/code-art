@@ -70,7 +70,7 @@
     min-width: 0;
     padding: 6px 8px;
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--well);
     font-family: ui-monospace, Menlo, monospace;
     font-size: 11px;
     word-break: break-all;

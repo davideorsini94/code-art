@@ -106,7 +106,7 @@
 </div>
 
 <style>
-  .ask { border: 1px solid rgba(255, 180, 84, 0.4); background: rgba(255, 180, 84, 0.09); border-radius: 13px; padding: 10px 12px; }
+  .ask { border: 1px solid var(--wait-line); background: var(--wait-soft); border-radius: 13px; padding: 10px 12px; }
   .ask.done { opacity: 0.6; border-color: var(--edge-soft); background: var(--glass); }
   .sub { color: var(--dim); }
   .tag { color: var(--faint); font-size: 11px; margin-left: 8px; }
@@ -114,18 +114,18 @@
   .plan { margin-top: 6px; max-height: 320px; overflow: auto; }
   .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .btn { padding: 4px 12px; border-radius: 999px; background: var(--glass2); border: 1px solid var(--edge); color: inherit; font-size: 11.5px; cursor: pointer; }
-  .btn.p { background: rgba(255, 180, 84, 0.25); border-color: rgba(255, 180, 84, 0.5); }
+  .btn.p { background: var(--wait-strong); border-color: var(--wait-line); }
   .btn[aria-disabled='true'] { opacity: 0.5; cursor: default; }
   .multi { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
   .q { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .q legend { padding: 0; color: var(--txt); }
   .hdr { color: var(--faint); font-size: 11px; margin-right: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
   .q .btns { margin-top: 0; }
-  .btn.on { border-color: var(--wait); background: rgba(255, 180, 84, 0.18); }
-  .q input { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: rgba(0, 0, 0, 0.28); color: inherit; font: inherit; font-size: 12px; }
+  .btn.on { border-color: var(--wait); background: var(--wait-mid); }
+  .q input { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: var(--well); color: inherit; font: inherit; font-size: 12px; }
   .multi > .btn { align-self: flex-start; }
   .free { display: flex; gap: 6px; margin-top: 8px; }
-  .free input { flex: 1; min-width: 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: rgba(0, 0, 0, 0.28); color: inherit; font: inherit; font-size: 12px; }
+  .free input { flex: 1; min-width: 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: var(--well); color: inherit; font: inherit; font-size: 12px; }
   .err { color: var(--err); font-size: 11.5px; margin: 6px 0 0; }
   @media (prefers-reduced-motion: no-preference) { .ask { transition: opacity var(--dur); } }
 </style>
