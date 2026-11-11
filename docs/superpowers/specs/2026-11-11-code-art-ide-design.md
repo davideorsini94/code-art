@@ -126,12 +126,15 @@ cartella di origine.
 - Finestra completamente opaca (scelta dell'utente dopo averla provata: la
   versione traslucida con vibrancy lasciava vedere il desktop e rendeva
   tutto poco leggibile). L'effetto vetro resta dentro la finestra: pannelli
-  come lastre di vetro con bordo luminoso sottile in alto, ombra interna in
-  basso, sfocatura e saturazione dello sfondo.
-- Sfondo "aurora" scuro (viola, petrolio, magenta spento, blu) a piena
-  opacità su base `#0a0b12`, che dà ai pannelli qualcosa da rifrangere.
-- **L'area del codice e del terminale resta quasi opaca** per la leggibilità:
-  il vetro è nella cornice, non sotto il testo.
+  come lastre con bordo luminoso sottile in alto e ombra interna in basso,
+  identici per ogni tipo di pannello; menu e palette sono vetro sfocato
+  appena più chiaro.
+- Tema uniforme (scelta dell'utente dopo aver visto la prima versione
+  multicolore): sfondo blu-grigio pieno `#0e1016` con un solo gradiente
+  lievissimo dall'alto e una sola famiglia di superfici (`--surface-1` per
+  tutti i pannelli, editor e terminale compresi; `--surface-2` per ciò che sta
+  in rilievo). Ogni colore è un token di `src/styles/glass.css`; Monaco e
+  xterm leggono gli stessi valori da `src/lib/theme.ts`.
 - Colori di stato: ambra = aspetta te, verde acqua pulsante = al lavoro,
   grigio = inattiva. Accento blu-lavanda.
 - Animazioni brevi (150–250 ms), rispettando "Riduci movimento" di macOS.
