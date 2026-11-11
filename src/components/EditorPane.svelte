@@ -14,8 +14,10 @@
   let main: ICode | undefined
   let second: ICode | undefined
   let diffEd: IDiff | undefined
-  const models = new Map<string, IModel>()
-  const diffModels = new Map<string, [IModel, IModel]>()
+  // modelli per id di tab (stabile dopo rinomina); il testo non viene mai copiato nello store a ogni tasto
+  type Entry = { model: IModel; path: string; rev: number; savedVersion: number }
+  const models = new Map<number, Entry>()
+  const diffModels = new Map<number, [IModel, IModel]>()
 
   const active = $derived(editor.activeTab)
   const showCode = $derived(!!active && !active.diff && !active.error)
@@ -36,7 +38,7 @@
     fontSize: 13,
     fontFamily: 'ui-monospace, Menlo, monospace',
     scrollBeyondLastLine: false,
-    smoothScrolling: true,
+    smoothScrolling: !matchMedia('(prefers-reduced-motion: reduce)').matches,
   } as const
 
   function addSave(ed: ICode, m: Monaco) {
@@ -65,13 +67,38 @@
   })
 
   function ensureModel(m: Monaco, t: Tab) {
-    let model = models.get(t.path)
-    if (!model) {
-      model = m.editor.createModel(t.text, undefined, m.Uri.file(t.path))
-      const path = t.path
-      model.onDidChangeContent(() => editor.edit(path, model!.getValue()))
-      models.set(t.path, model)
+    let entry = models.get(t.id)
+    if (entry && entry.path !== t.path) {
+      // file rinominato/spostato: nuovo modello (lingua dal nuovo nome) con il testo corrente, modifiche comprese
+      const text = entry.model.getValue()
+      entry.model.dispose()
+      models.delete(t.id)
+      entry = undefined
+      return create(m, t, text, t.dirty)
     }
+    if (!entry) return create(m, t, t.baseText, false)
+    if (entry.rev !== t.rev) {
+      // ricarica da disco: unico caso in cui si spinge testo nel modello
+      entry.model.setValue(t.baseText)
+      entry.rev = t.rev
+      entry.savedVersion = entry.model.getAlternativeVersionId()
+      editor.setDirty(t.id, false)
+    }
+    return entry.model
+  }
+
+  function create(m: Monaco, t: Tab, text: string, dirty: boolean) {
+    const model = m.editor.createModel(text, undefined, m.Uri.file(t.path))
+    const entry: Entry = { model, path: t.path, rev: t.rev, savedVersion: dirty ? -1 : model.getAlternativeVersionId() }
+    models.set(t.id, entry)
+    const id = t.id
+    model.onDidChangeContent(() => editor.setDirty(id, model.getAlternativeVersionId() !== entry.savedVersion))
+    editor.bind(id, {
+      snapshot: () => {
+        const v = model.getAlternativeVersionId()
+        return { text: model.getValue(), commit: () => { entry.savedVersion = v; editor.setDirty(id, model.getAlternativeVersionId() !== v) } }
+      },
+    })
     return model
   }
 
@@ -79,43 +106,43 @@
   $effect(() => {
     const m = monaco
     if (!m || !main) return
-    const live = new Set(editor.tabs.filter((t) => !t.diff && !t.error).map((t) => t.path))
-    for (const [p, model] of models) {
-      if (!live.has(p)) {
-        model.dispose()
-        models.delete(p)
+    const live = new Set(editor.tabs.filter((t) => !t.diff && !t.error).map((t) => t.id))
+    for (const [id, e] of models) {
+      if (!live.has(id)) {
+        e.model.dispose()
+        models.delete(id)
+        editor.bind(id, null)
       }
     }
-    const liveDiff = new Set(editor.tabs.filter((t) => t.diff).map((t) => t.path))
-    for (const [p, pair] of diffModels) {
-      if (!liveDiff.has(p)) {
+    const liveDiff = new Set(editor.tabs.filter((t) => t.diff).map((t) => t.id))
+    for (const [id, pair] of diffModels) {
+      if (!liveDiff.has(id)) {
         pair.forEach((x) => x.dispose())
-        diffModels.delete(p)
+        diffModels.delete(id)
       }
     }
     for (const t of editor.tabs) {
       if (t.error) continue
       if (t.diff) {
-        if (!diffModels.has(t.path)) {
-          diffModels.set(t.path, [
+        if (!diffModels.has(t.id)) {
+          diffModels.set(t.id, [
             m.editor.createModel(t.diff.before, undefined, m.Uri.parse(`codeart-diff:before${t.path}`)),
             m.editor.createModel(t.diff.after, undefined, m.Uri.parse(`codeart-diff:after${t.path}`)),
           ])
         }
         continue
       }
-      const model = ensureModel(m, t)
-      if (model.getValue() !== t.text) model.setValue(t.text) // ricarica da disco
+      ensureModel(m, t)
     }
     const a = editor.activeTab
     if (a && !a.diff && !a.error) {
-      const model = models.get(a.path)
+      const model = models.get(a.id)?.model
       if (model) {
         if (main.getModel() !== model) main.setModel(model)
         if (second && second.getModel() !== model) second.setModel(model)
       }
     } else if (a?.diff) {
-      const pair = diffModels.get(a.path)
+      const pair = diffModels.get(a.id)
       if (pair) diffEd?.setModel({ original: pair[0], modified: pair[1] })
     }
   })
@@ -123,7 +150,7 @@
 
 <div class="pane">
   <div class="tabs" role="tablist">
-    {#each editor.tabs as t (t.path)}
+    {#each editor.tabs as t (t.id)}
       <div class="tab" class:on={t.path === editor.active} role="tab" aria-selected={t.path === editor.active} tabindex="0"
         onclick={() => (editor.active = t.path)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.path)}>
         <span class="tname">{t.name}</span>

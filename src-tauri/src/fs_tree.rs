@@ -138,9 +138,14 @@ pub fn read(path: &Path) -> Result<FileContent, FsError> {
 
 /// Scrive solo se il file non è cambiato su disco rispetto a `expected` (se dato).
 pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsError> {
-    if let (Some(exp), Ok(meta)) = (expected, std::fs::metadata(path)) {
-        if mtime_ms(&meta) != exp {
-            return Err(FsError::new("conflict", "il file è cambiato su disco"));
+    if let Some(exp) = expected {
+        match std::fs::metadata(path) {
+            Ok(meta) if mtime_ms(&meta) == exp => {}
+            Ok(_) => return Err(FsError::new("conflict", "il file è cambiato su disco")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)"));
+            }
+            Err(e) => return Err(e.into()),
         }
     }
     std::fs::write(path, text)?;
@@ -148,6 +153,18 @@ pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsEr
 }
 
 // ---------- watcher ----------
+
+/// Percorsi che non vanno notificati: dentro `.git` (tranne `.git/HEAD`, serve al branch), `node_modules`, `target`.
+pub fn is_noise(path: &Path) -> bool {
+    let comps: Vec<_> = path.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    if comps.iter().any(|c| c == "node_modules" || c == "target") {
+        return true;
+    }
+    match comps.iter().position(|c| c == ".git") {
+        Some(i) => !(comps.len() == i + 2 && comps[i + 1] == "HEAD"),
+        None => false,
+    }
+}
 
 /// Un watcher per ogni progetto aperto (chiave: id progetto).
 #[derive(Default)]
@@ -158,7 +175,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     let (tx, rx) = channel::<PathBuf>();
     let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            for p in ev.paths {
+            for p in ev.paths.into_iter().filter(|p| !is_noise(p)) {
                 let _ = tx.send(p);
             }
         }
@@ -290,6 +307,28 @@ mod tests {
         let new = write(&f, "due", Some(m)).unwrap();
         assert_eq!(read(&f).unwrap().mtime_ms, new);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+    }
+
+    #[test]
+    fn write_with_expected_mtime_on_missing_file_is_conflict() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("gone.txt");
+        assert_eq!(write(&f, "x", Some(1)).unwrap_err().code, "conflict");
+        assert!(!f.exists());
+        write(&f, "x", None).unwrap(); // nuovo file senza mtime atteso: ok
+        assert!(f.exists());
+    }
+
+    #[test]
+    fn noise_filter() {
+        let n = |p: &str| is_noise(Path::new(p));
+        assert!(n("/p/.git/index.lock"));
+        assert!(n("/p/.git/refs/heads/x"));
+        assert!(!n("/p/.git/HEAD"));
+        assert!(n("/p/node_modules/a/b.js"));
+        assert!(n("/p/target/debug/x"));
+        assert!(!n("/p/src/main.rs"));
+        assert!(!n("/p/.gitignore"));
     }
 
     #[test]

@@ -81,7 +81,12 @@
     if (!ed || !value || value.includes('/')) return
     if (ed.kind === 'rename' && ed.path) {
       const to = `${parentOf(ed.path)}/${value}`
-      if (to !== ed.path) await run(() => fsRename(ed.path!, to))
+      if (to !== ed.path) {
+        await run(async () => {
+          await fsRename(ed.path!, to)
+          editor.repath(ed.path!, to)
+        })
+      }
     } else if (ed.parent) {
       const path = `${ed.parent}/${value}`
       await run(async () => {
@@ -96,7 +101,7 @@
   async function trash(e: DirEntry) {
     menu = null
     await run(() => fsTrash(e.path))
-    editor.close(e.path)
+    editor.closeUnder(e.path)
     void load(parentOf(e.path))
   }
 
@@ -108,6 +113,7 @@
     const to = `${target.path}/${nameOf(from)}`
     void run(async () => {
       await fsRename(from, to)
+      editor.repath(from, to)
       await Promise.all([load(parentOf(from)), load(target.path)])
       expanded[target.path] = true
     })
