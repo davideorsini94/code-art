@@ -47,7 +47,7 @@ describe('reduce', () => {
   })
 
   it('ask_then_answer_marks_answered', () => {
-    const s = run([{ kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'Bash: ls', options: [], toolName: 'Bash', input: {} }])
+    const s = run([{ kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'Bash: ls', options: [], questions: [], toolName: 'Bash', input: {} }])
     expect(s.items[0]).toMatchObject({ kind: 'ask', requestId: 'r1', answered: false })
     const s2 = answerAsk(s, 'r1')
     expect(s2.items[0]).toMatchObject({ answered: true })
@@ -55,7 +55,7 @@ describe('reduce', () => {
   })
 
   it('ask_cancelled_marks_answered_and_unknown_request_is_ignored', () => {
-    let s = run([{ kind: 'ask', requestId: 'r1', askType: 'plan', prompt: '# Piano', options: [], toolName: 'ExitPlanMode', input: {} }])
+    let s = run([{ kind: 'ask', requestId: 'r1', askType: 'plan', prompt: '# Piano', options: [], questions: [], toolName: 'ExitPlanMode', input: {} }])
     s = reduce(s, { kind: 'askCancelled', requestId: 'nope' })
     expect(s.items[0]).toMatchObject({ answered: false })
     s = reduce(s, { kind: 'askCancelled', requestId: 'r1' })
@@ -143,7 +143,7 @@ describe('reconcile', () => {
     reduceAll(initialState([]), [
       { kind: 'textDelta', id: 'msg:0', text: 'ciao a' }, // taglio: la storia ha il testo completo
       { kind: 'todoDelta', id: '1', text: 'Fai', status: 'pending' },
-      { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], toolName: 'Bash', input: {} },
+      { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], questions: [], toolName: 'Bash', input: {} },
       { kind: 'turnEnd', contextUsedPct: 12, isError: false },
     ])
 
@@ -160,12 +160,30 @@ describe('reconcile', () => {
   it('drops answered asks and does not duplicate asks already in history', () => {
     const answered = answerAsk(live(), 'r1')
     expect(reconcile(answered, hist).items.some((i) => i.kind === 'ask')).toBe(false)
-    const withAsk: ChatItem[] = [...hist, { kind: 'ask', id: 'h', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], answered: false }]
+    const withAsk: ChatItem[] = [...hist, { kind: 'ask', id: 'h', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], questions: [], answered: false }]
     expect(reconcile(live(), withAsk).items.filter((i) => i.kind === 'ask')).toHaveLength(1)
   })
   it('pending asks applied afterwards are deduplicated by requestId', () => {
-    const ask: ClaudeEvent = { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], toolName: 'Bash', input: {} }
+    const ask: ClaudeEvent = { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], questions: [], toolName: 'Bash', input: {} }
     const r = reduceAll(reconcile(live(), hist), [ask])
     expect(r.items.filter((i) => i.kind === 'ask')).toHaveLength(1)
+  })
+})
+
+describe('error notices', () => {
+  const err = (json: string): ClaudeEvent => ({ kind: 'unknown', label: 'Errore di Claude', json })
+  it('shown once even if the CLI already printed the same text as a synthetic message', () => {
+    const s = run([{ kind: 'textDelta', id: 'synthetic:m', text: 'API Error: 529' }, err('API Error: 529'), err('Altro errore'), err('Altro errore')])
+    expect(s.items.map((i) => i.kind)).toEqual(['assistant', 'raw'])
+  })
+  it('survive the end-of-turn reconcile (they are not in the session file)', () => {
+    const s = run([err('Not logged in')])
+    expect(reconcile(s, [{ kind: 'user', id: 'u', text: 'ciao', images: [] }]).items.map((i) => i.kind)).toEqual(['user', 'raw'])
+    expect(reconcile(s, [{ kind: 'assistant', id: 'a', text: 'Not logged in' }]).items.map((i) => i.kind)).toEqual(['assistant'])
+  })
+  it('asks keep every question', () => {
+    const q = [{ question: 'A?', header: 'A', options: [], multiSelect: false }, { question: 'B?', header: 'B', options: [], multiSelect: true }]
+    const s = run([{ kind: 'ask', requestId: 'r', askType: 'question', prompt: 'A?', options: [], questions: q, toolName: 'AskUserQuestion', input: {} }])
+    expect((s.items[0] as Extract<ChatItem, { kind: 'ask' }>).questions).toEqual(q)
   })
 })

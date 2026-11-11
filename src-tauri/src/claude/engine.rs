@@ -1001,15 +1001,52 @@ fn answer_payload(ask: &ClaudeEvent, choice: &str) -> Result<Value> {
         (AskType::Permission, "deny") => Ok(deny(DENY_MESSAGE)),
         (AskType::Plan, "reject") => Ok(deny(PLAN_REJECT_MESSAGE)),
         (AskType::Question, c) if !c.trim().is_empty() => {
-            // la risposta vale per la domanda mostrata (la prima); testo libero accettato com'è
-            let question = input.pointer("/questions/0/question").and_then(Value::as_str).ok_or("domanda senza testo")?;
             let mut updated = input.clone();
-            let obj = updated.as_object_mut().ok_or("input della domanda non valido")?;
-            obj.insert("answers".into(), json!({ question: c }));
+            let answers = question_answers(input, c)?;
+            updated.as_object_mut().ok_or("input della domanda non valido")?.insert("answers".into(), answers);
             Ok(allow(updated))
         }
         _ => Err(format!("risposta non valida: {choice}")),
     }
+}
+
+/// `answers` di `AskUserQuestion` (§5.3: testo della domanda → risposta). `choice` è il testo della risposta
+/// (una sola domanda) oppure un oggetto JSON `{ "<domanda>": "<risposta>" | ["a", "b"] }` con una risposta per
+/// ogni domanda; le scelte multiple si uniscono con ", " (forma della documentazione dell'SDK). Testo libero
+/// ("Altro") accettato com'è.
+fn question_answers(input: &Value, choice: &str) -> Result<Value> {
+    let questions: Vec<&str> = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|q| q.get("question").and_then(Value::as_str)).collect())
+        .unwrap_or_default();
+    if questions.is_empty() {
+        return Err("domanda senza testo".into());
+    }
+    let map = match serde_json::from_str::<Value>(choice) {
+        Ok(Value::Object(m)) => m,
+        _ if questions.len() == 1 => return Ok(json!({ questions[0]: choice })),
+        _ => return Err("servono le risposte a tutte le domande".into()),
+    };
+    if map.keys().any(|k| !questions.contains(&k.as_str())) {
+        return Err("risposta a una domanda sconosciuta".into());
+    }
+    let mut out = serde_json::Map::new();
+    for q in questions {
+        let text = match map.get(q) {
+            Some(Value::String(t)) => t.trim().to_string(),
+            Some(Value::Array(a)) => {
+                let parts: Option<Vec<&str>> = a.iter().map(Value::as_str).collect();
+                parts.ok_or("risposta non valida")?.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(", ")
+            }
+            _ => String::new(),
+        };
+        if text.is_empty() {
+            return Err(format!("manca la risposta a: {q}"));
+        }
+        out.insert(q.to_string(), Value::String(text));
+    }
+    Ok(Value::Object(out))
 }
 
 /// Risposta a una `control_request` della CLI che l'host non sa gestire.
@@ -1392,6 +1429,44 @@ mod tests {
                     && l["response"]["response"] == json!({"behavior": "allow", "updatedInput": ask["input"]})
             })
         });
+    }
+
+    #[test]
+    fn multi_question_answers_cover_every_question() {
+        let input = json!({"questions": [
+            {"question": "Quale database?", "header": "DB", "options": [{"label": "Postgres"}], "multiSelect": false},
+            {"question": "Quali test?", "header": "Test", "options": [{"label": "Unità"}, {"label": "Integrazione"}], "multiSelect": true}
+        ]});
+        let ask = ClaudeEvent::Ask {
+            request_id: "q".into(), ask_type: AskType::Question, prompt: "Quale database?".into(), options: vec![],
+            questions: vec![], tool_name: "AskUserQuestion".into(), input: input.clone(),
+        };
+        let choice = json!({"Quale database?": "Postgres", "Quali test?": ["Unità", "Integrazione"]}).to_string();
+        let r = answer_payload(&ask, &choice).unwrap();
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["questions"], input["questions"]);
+        assert_eq!(r["updatedInput"]["answers"], json!({"Quale database?": "Postgres", "Quali test?": "Unità, Integrazione"}));
+        // testo libero dentro l'oggetto
+        let free = json!({"Quale database?": "DuckDB", "Quali test?": ["Fumo"]}).to_string();
+        assert_eq!(answer_payload(&ask, &free).unwrap()["updatedInput"]["answers"]["Quale database?"], "DuckDB");
+        // incomplete, sconosciute o testo semplice con più domande: rifiutate
+        for bad in [
+            json!({"Quale database?": "Postgres"}).to_string(),
+            json!({"Quale database?": "Postgres", "Quali test?": []}).to_string(),
+            json!({"Quale database?": "Postgres", "Quali test?": ["x"], "Altro?": "y"}).to_string(),
+            json!({"Quale database?": 3, "Quali test?": ["x"]}).to_string(),
+            "Postgres".to_string(),
+        ] {
+            assert!(answer_payload(&ask, &bad).is_err(), "{bad}");
+        }
+        // una sola domanda: testo semplice (anche se somiglia a JSON) o oggetto
+        let one = ClaudeEvent::Ask {
+            request_id: "q".into(), ask_type: AskType::Question, prompt: "Colore?".into(), options: vec![], questions: vec![],
+            tool_name: "AskUserQuestion".into(), input: json!({"questions": [{"question": "Colore?", "options": []}]}),
+        };
+        assert_eq!(answer_payload(&one, "Blu").unwrap()["updatedInput"]["answers"], json!({"Colore?": "Blu"}));
+        assert_eq!(answer_payload(&one, "{blu}").unwrap()["updatedInput"]["answers"], json!({"Colore?": "{blu}"}));
+        assert_eq!(answer_payload(&one, &json!({"Colore?": "Rosso"}).to_string()).unwrap()["updatedInput"]["answers"], json!({"Colore?": "Rosso"}));
     }
 
     #[test]

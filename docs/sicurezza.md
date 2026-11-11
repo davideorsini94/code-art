@@ -143,7 +143,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_start` | `projectId`, `opts` | coincide con la finestra; `model` (`valid_model`: niente spazi né `-` iniziale), `permissionMode` in whitelist; progetto fidato | finestra | P (`claude`), R |
 | `conv_resume` | `sessionId` | UUID; del progetto; progetto fidato | finestra | P, R |
 | `conv_send` | `sessionId`, `text`, `imagePaths` | UUID; del progetto; fidato; ≤ 10 immagini, ≤ 20 MB l'una e 30 MB in tutto, solo png/jpg/gif/webp canonicalizzate dentro la cartella immagini dell'app o del progetto | finestra | P, F (lettura immagini) |
-| `conv_answer` | `sessionId`, `requestId`, `choice` | del progetto; richiesta ancora aperta; scelta ammessa per il tipo | finestra | P (stdin di `claude`) |
+| `conv_answer` | `sessionId`, `requestId`, `choice` | del progetto; richiesta ancora aperta; scelta ammessa per il tipo (domande: testo per una domanda, oppure oggetto JSON con una risposta per ogni domanda e nessuna domanda sconosciuta) | finestra | P (stdin di `claude`) |
 | `conv_interrupt` | `sessionId` | del progetto | finestra | P |
 | `conv_set_model` | `sessionId`, `model` | del progetto; `valid_model` | finestra | P |
 | `conv_set_permission_mode` | `sessionId`, `mode` | del progetto; whitelist | finestra | P |

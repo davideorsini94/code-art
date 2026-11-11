@@ -82,6 +82,7 @@ mod tests {
             ask_type: AskType::Permission,
             prompt: "p".into(),
             options: vec![],
+            questions: vec![],
             tool_name: "Bash".into(),
             input: serde_json::json!({}),
         }

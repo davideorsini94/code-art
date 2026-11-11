@@ -87,7 +87,7 @@
     font-size: 11px;
     cursor: pointer;
   }
-  button:hover:not(:disabled) { border-color: #8fa8ff; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: 0.6; cursor: default; }
   .retry { align-self: flex-start; }
 </style>

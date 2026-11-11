@@ -8,6 +8,7 @@
   import { editor } from '../lib/stores/editor.svelte'
   import { tooltip } from '../lib/tooltip'
   import type { Row } from '../lib/conv/reduce'
+  import { ERROR_LABEL } from '../lib/types'
 
   let { row, sessionId }: { row: Row; sessionId: string } = $props()
   const item = $derived(row.item)
@@ -72,6 +73,8 @@
   </div>
 {:else if item.kind === 'ask'}
   <AskBox {item} {sessionId} />
+{:else if item.kind === 'raw' && item.label === ERROR_LABEL}
+  <div class="errnote" role="alert"><b>{ERROR_LABEL}</b><span class="txt">{item.json}</span></div>
 {:else if item.kind === 'raw'}
   <div class="tool raw">
     <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} ${item.label}`} aria-expanded={open} onclick={() => (open = !open)}><span class="caret">{open ? '▾' : '▸'}</span><span class="name">{item.label}</span></button>
@@ -86,7 +89,7 @@
   .ai { background: var(--glass); border: 1px solid var(--edge-soft); }
   .tool, .sub, .think { font: 11.5px ui-monospace, 'SF Mono', monospace; color: var(--dim); border-radius: 9px; background: rgba(0, 0, 0, 0.25); padding: 2px 10px; }
   .sub { border: 1px solid var(--edge-soft); }
-  .err .meta { color: #ff8f8f; }
+  .err .meta { color: var(--err); }
   .line { display: flex; align-items: center; gap: 8px; }
   .head { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: 8px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 5px 0; text-align: left; }
   .caret { flex: none; width: 10px; color: var(--faint); }
@@ -96,4 +99,6 @@
   .diff { flex: none; background: var(--glass2); border: 1px solid var(--edge); color: var(--txt); border-radius: 999px; font-size: 10.5px; padding: 1px 9px; cursor: pointer; }
   .body { padding: 0 0 8px 18px; }
   .faint { color: var(--faint); }
+  .errnote { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; border-radius: 11px; border: 1px solid var(--err); background: rgba(255, 143, 143, 0.08); color: var(--err); overflow-wrap: anywhere; }
+  .errnote .txt { color: var(--txt); }
 </style>

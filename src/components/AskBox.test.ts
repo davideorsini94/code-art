@@ -10,7 +10,7 @@ import AskBox from './AskBox.svelte'
 import type { ChatItem } from '../lib/types'
 
 type Ask = Extract<ChatItem, { kind: 'ask' }>
-const ask = (over: Partial<Ask>): Ask => ({ kind: 'ask', id: 'ask:r', requestId: 'r', askType: 'permission', prompt: 'Bash: ls', options: [], answered: false, ...over })
+const ask = (over: Partial<Ask>): Ask => ({ kind: 'ask', id: 'ask:r', requestId: 'r', askType: 'permission', prompt: 'Bash: ls', options: [], questions: [], answered: false, ...over })
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
@@ -40,6 +40,31 @@ describe('AskBox', () => {
     await fireEvent.input(screen.getByLabelText('Risposta libera'), { target: { value: 'Altro' } })
     await fireEvent.click(screen.getByText('Invia'))
     expect(answer).toHaveBeenLastCalledWith('s', 'r', 'Altro')
+  })
+  it('several questions: one answer each, then a single "Invia risposte" with the JSON object', async () => {
+    const questions = [
+      { question: 'Quale database?', header: 'DB', options: [{ label: 'Postgres', description: '' }, { label: 'SQLite', description: '' }], multiSelect: false },
+      { question: 'Quali test?', header: 'Test', options: [{ label: 'Unità', description: '' }, { label: 'Integrazione', description: '' }], multiSelect: true },
+    ]
+    render(AskBox, { item: ask({ askType: 'question', prompt: 'Quale database?', options: ['Postgres', 'SQLite'], questions }), sessionId: 's' })
+    const send = screen.getByText('Invia risposte')
+    expect(send.getAttribute('aria-disabled')).toBe('true')
+    await fireEvent.click(screen.getByText('Postgres'))
+    expect(answer).not.toHaveBeenCalled() // niente invio a un clic
+    await fireEvent.click(send)
+    expect(answer).not.toHaveBeenCalled() // manca la seconda risposta
+    await fireEvent.click(screen.getByText(/Unità/))
+    await fireEvent.input(screen.getByLabelText('Altra risposta: Quali test?'), { target: { value: 'Fumo' } })
+    expect(send.getAttribute('aria-disabled')).toBe('false')
+    await fireEvent.click(send)
+    expect(answer).toHaveBeenCalledWith('s', 'r', JSON.stringify({ 'Quale database?': 'Postgres', 'Quali test?': ['Unità', 'Fumo'] }))
+  })
+  it('a single question keeps the one-click answer', async () => {
+    const questions = [{ question: 'Colore?', header: '', options: [{ label: 'Blu', description: '' }], multiSelect: false }]
+    render(AskBox, { item: ask({ askType: 'question', prompt: 'Colore?', options: ['Blu'], questions }), sessionId: 's' })
+    expect(screen.queryByText('Invia risposte')).toBeNull()
+    await fireEvent.click(screen.getByText('Blu'))
+    expect(answer).toHaveBeenCalledWith('s', 'r', 'Blu')
   })
   it('answered: no buttons', () => {
     render(AskBox, { item: ask({ answered: true }), sessionId: 's' })

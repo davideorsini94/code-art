@@ -32,7 +32,7 @@ const conv = (over: Partial<Conversation> = {}): Conversation => ({
   contextUsedPct: null, maybeOpenElsewhere: false, ...over,
 })
 const emit = (sessionId: string, event: ClaudeEvent) => handlers.get('conv:event:p1')!({ payload: { sessionId, event } })
-const ask = (requestId: string): ClaudeEvent => ({ kind: 'ask', requestId, askType: 'permission', prompt: 'Bash: ls', options: [], toolName: 'Bash', input: {} })
+const ask = (requestId: string): ClaudeEvent => ({ kind: 'ask', requestId, askType: 'permission', prompt: 'Bash: ls', options: [], questions: [], toolName: 'Bash', input: {} })
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
 beforeEach(async () => {

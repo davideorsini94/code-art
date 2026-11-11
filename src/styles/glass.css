@@ -10,6 +10,7 @@
   --wait: #ffb454;
   --done: #7d8aa6;
   --accent: #8fa8ff;
+  --err: #ff8f8f;
   --surface-pop: rgba(24, 27, 38, 0.96); /* menu, tooltip */
   --radius: 14px;
   --dur: 200ms;

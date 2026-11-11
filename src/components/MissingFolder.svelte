@@ -39,5 +39,5 @@
     color: inherit;
     cursor: pointer;
   }
-  button:hover { border-color: #8fa8ff; }
+  button:hover { border-color: var(--accent); }
 </style>

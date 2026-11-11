@@ -340,6 +340,6 @@
   .tipw button:disabled { pointer-events: none; }
   .btn.go { background: var(--accent); color: #10131c; border-color: transparent; font-weight: 600; }
   .btn.stop { border-color: var(--wait); color: var(--wait); }
-  .err { color: #ff8f8f; font-size: 11.5px; margin: 0; }
+  .err { color: var(--err); font-size: 11.5px; margin: 0; }
   @media (prefers-reduced-motion: no-preference) { .chip, .box { transition: border-color var(--dur); } }
 </style>

@@ -12,6 +12,31 @@ pub enum AskType {
     Plan,
 }
 
+/// Opzione di una domanda di `AskUserQuestion`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskOption {
+    pub label: String,
+    pub description: String,
+}
+
+/// Una domanda di `AskUserQuestion` (l'input ne può contenere più d'una).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskQuestion {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<AskOption>,
+    pub multi_select: bool,
+}
+
+/// Etichetta degli eventi `Unknown` che riportano un errore della CLI o dell'API (resi come avviso d'errore).
+pub const ERROR_LABEL: &str = "Errore di Claude";
+/// Tetto del testo di un errore riportato.
+const ERROR_TEXT_CAP: usize = 4096;
+/// `message.model` dei messaggi prodotti dalla CLI stessa (non dal modello): "Not logged in", errori dell'API…
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ClaudeEvent {
@@ -30,11 +55,13 @@ pub enum ClaudeEvent {
     ToolStart { id: String, name: String, input: Value, parent_id: Option<String> },
     ToolEnd { id: String, ok: bool, result: String },
     /// Richiesta `can_use_tool`: `tool_name` e `input` servono al motore per rispondere.
+    /// Per `AskUserQuestion`: `questions` ha tutte le domande; `prompt`/`options` ripetono la prima.
     Ask {
         request_id: String,
         ask_type: AskType,
         prompt: String,
         options: Vec<String>,
+        questions: Vec<AskQuestion>,
         tool_name: String,
         input: Value,
     },
@@ -67,7 +94,7 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
         "stream_event" => parse_stream_event(&v),
         "assistant" => parse_assistant(&v),
         "user" => parse_user(&v, line),
-        "result" => vec![parse_result(&v)],
+        "result" => parse_result(&v),
         "control_request" => parse_control_request(&v, line),
         "control_cancel_request" => vec![ClaudeEvent::AskCancelled { request_id: s(&v, "request_id") }],
         "control_response" => vec![parse_control_response(&v)],
@@ -133,10 +160,13 @@ fn parse_stream_event(v: &Value) -> Vec<ClaudeEvent> {
 
 /// Una riga `assistant` porta un solo blocco. I tool_use danno `ToolStart`. Il testo dei blocchi
 /// principali è già arrivato dai delta (`--include-partial-messages`) e non si riemette; quello di un
-/// subagent no (nessun delta), quindi lo si emette qui.
+/// subagent no (nessun delta), quindi lo si emette qui. Lo stesso per i messaggi sintetici della CLI
+/// (`model: "<synthetic>"`: "Not logged in · Please run /login", errori dell'API), che non hanno mai delta:
+/// senza, durante un turno dal vivo non si vedrebbero.
 fn parse_assistant(v: &Value) -> Vec<ClaudeEvent> {
     let Some(msg) = v.get("message") else { return vec![] };
     let parent = parent_id(v);
+    let synthetic = msg.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
     let Some(blocks) = msg.get("content").and_then(Value::as_array) else { return vec![] };
     let mut out = vec![];
     for b in blocks {
@@ -149,6 +179,10 @@ fn parse_assistant(v: &Value) -> Vec<ClaudeEvent> {
             }),
             Some("text") if parent.is_some() => {
                 out.push(ClaudeEvent::TextDelta { id: s(msg, "id"), text: s(b, "text") })
+            }
+            Some("text") if synthetic => {
+                let id = [s(msg, "id"), s(v, "uuid")].into_iter().find(|x| !x.is_empty()).unwrap_or_default();
+                out.push(ClaudeEvent::TextDelta { id: format!("synthetic:{id}"), text: s(b, "text") })
             }
             _ => {}
         }
@@ -228,11 +262,41 @@ fn context_pct(v: &Value) -> Option<f32> {
     Some((used as f64 / w as f64 * 100.0) as f32)
 }
 
-fn parse_result(v: &Value) -> ClaudeEvent {
-    ClaudeEvent::TurnEnd {
-        context_used_pct: context_pct(v),
-        is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+/// Fine turno. Con `is_error` e un testo in `result` (errore dell'API, accesso scaduto…) prima un avviso
+/// `Unknown { label: ERROR_LABEL }` con quel testo (al massimo 4 KB): altrimenti l'errore non si vedrebbe.
+fn parse_result(v: &Value) -> Vec<ClaudeEvent> {
+    let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = vec![];
+    if let Some(text) = v.get("result").and_then(Value::as_str).filter(|t| is_error && !t.trim().is_empty()) {
+        let mut end = text.len().min(ERROR_TEXT_CAP);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push(unknown(ERROR_LABEL, &text[..end]));
     }
+    out.push(ClaudeEvent::TurnEnd { context_used_pct: context_pct(v), is_error });
+    out
+}
+
+fn ask_questions(input: &Value) -> Vec<AskQuestion> {
+    input
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|q| AskQuestion {
+            question: s(q, "question"),
+            header: s(q, "header"),
+            options: q
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|o| AskOption { label: s(o, "label"), description: s(o, "description") })
+                .collect(),
+            multi_select: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect()
 }
 
 fn parse_control_request(v: &Value, line: &str) -> Vec<ClaudeEvent> {
@@ -243,21 +307,18 @@ fn parse_control_request(v: &Value, line: &str) -> Vec<ClaudeEvent> {
     }
     let tool_name = s(req, "tool_name");
     let input = req.get("input").cloned().unwrap_or(Value::Null);
-    let (ask_type, prompt, options) = match tool_name.as_str() {
+    let (ask_type, prompt, options, questions) = match tool_name.as_str() {
         "AskUserQuestion" => {
-            let q = input.pointer("/questions/0");
-            let prompt = q.map(|q| s(q, "question")).unwrap_or_default();
-            let options = q
-                .and_then(|q| q.get("options"))
-                .and_then(Value::as_array)
-                .map(|a| a.iter().map(|o| s(o, "label")).collect())
-                .unwrap_or_default();
-            (AskType::Question, prompt, options)
+            let questions = ask_questions(&input);
+            let first = questions.first();
+            let prompt = first.map(|q| q.question.clone()).unwrap_or_default();
+            let options = first.map(|q| q.options.iter().map(|o| o.label.clone()).collect()).unwrap_or_default();
+            (AskType::Question, prompt, options, questions)
         }
-        "ExitPlanMode" => (AskType::Plan, s(&input, "plan"), vec![]),
-        _ => (AskType::Permission, permission_summary(&tool_name, &input, req), vec![]),
+        "ExitPlanMode" => (AskType::Plan, s(&input, "plan"), vec![], vec![]),
+        _ => (AskType::Permission, permission_summary(&tool_name, &input, req), vec![], vec![]),
     };
-    vec![ClaudeEvent::Ask { request_id: s(v, "request_id"), ask_type, prompt, options, tool_name, input }]
+    vec![ClaudeEvent::Ask { request_id: s(v, "request_id"), ask_type, prompt, options, questions, tool_name, input }]
 }
 
 fn permission_summary(tool: &str, input: &Value, req: &Value) -> String {
@@ -342,7 +403,7 @@ mod tests {
         let evs = fixture("permission-request");
         let a = asks(&evs);
         assert_eq!(a.len(), 3);
-        let ClaudeEvent::Ask { ask_type, prompt, options, tool_name, input, request_id } = a[0] else { panic!() };
+        let ClaudeEvent::Ask { ask_type, prompt, options, tool_name, input, request_id, .. } = a[0] else { panic!() };
         assert_eq!(*ask_type, AskType::Permission);
         assert_eq!(tool_name, "Write");
         assert!(prompt.starts_with("Write: ") && prompt.ends_with("note.txt"), "{prompt}");
@@ -365,6 +426,51 @@ mod tests {
         assert_eq!(tool_name, "AskUserQuestion");
         assert_eq!(prompt, "Which color do you prefer?");
         assert_eq!(options, &["Red", "Blue"]);
+    }
+
+    #[test]
+    fn question_ask_carries_every_question() {
+        // riga scritta a mano (sintetica): due domande, la seconda a scelta multipla
+        let l = r#"{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[
+            {"question":"Quale database?","header":"DB","options":[{"label":"Postgres","description":"relazionale"},{"label":"SQLite","description":"file"}],"multiSelect":false},
+            {"question":"Quali test?","header":"Test","options":[{"label":"Unità","description":""},{"label":"Integrazione","description":""}],"multiSelect":true}]}}}"#
+            .replace('\n', "");
+        let evs = parse_line(&l);
+        let ClaudeEvent::Ask { prompt, options, questions, .. } = &evs[0] else { panic!("{evs:?}") };
+        assert_eq!(prompt, "Quale database?");
+        assert_eq!(options, &["Postgres", "SQLite"]);
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[1].question, "Quali test?");
+        assert_eq!(questions[1].header, "Test");
+        assert!(questions[1].multi_select && !questions[0].multi_select);
+        assert_eq!(questions[0].options[0], AskOption { label: "Postgres".into(), description: "relazionale".into() });
+        let v = serde_json::to_value(&evs[0]).unwrap();
+        assert_eq!(v["questions"][1]["multiSelect"], true);
+    }
+
+    #[test]
+    fn api_errors_and_logged_out_state_are_visible_in_a_live_turn() {
+        // righe scritte a mano (sintetiche): messaggio della CLI senza delta, poi un result in errore
+        let l = r#"{"type":"assistant","message":{"id":"m-syn","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"parent_tool_use_id":null,"uuid":"u1"}"#;
+        assert_eq!(parse_line(l), [ClaudeEvent::TextDelta { id: "synthetic:m-syn".into(), text: "Not logged in · Please run /login".into() }]);
+        // un messaggio normale del modello resta senza riemissione (il testo arriva dai delta)
+        let normal = l.replace("<synthetic>", "claude-haiku-5-5");
+        assert!(parse_line(&normal).is_empty());
+        let r = r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded"}"#;
+        assert_eq!(
+            parse_line(r),
+            [
+                ClaudeEvent::Unknown { label: ERROR_LABEL.into(), json: "API Error: 529 overloaded".into() },
+                ClaudeEvent::TurnEnd { context_used_pct: None, is_error: true },
+            ]
+        );
+        // testo lungo: tagliato a 4 KB su un confine di carattere
+        let long = format!(r#"{{"type":"result","is_error":true,"result":"{}è{}"}}"#, "a".repeat(4095), "b".repeat(10));
+        let ClaudeEvent::Unknown { json, .. } = &parse_line(&long)[0] else { panic!() };
+        assert_eq!(json, &"a".repeat(4095));
+        // senza errore o senza testo: solo la fine del turno
+        assert_eq!(parse_line(r#"{"type":"result","is_error":false,"result":"hello"}"#).len(), 1);
+        assert_eq!(parse_line(r#"{"type":"result","is_error":true}"#).len(), 1);
     }
 
     #[test]
@@ -554,7 +660,7 @@ mod tests {
             ClaudeEvent::Thinking { id: "i".into(), text: "t".into() },
             ClaudeEvent::ToolStart { id: "i".into(), name: "n".into(), input: json!({}), parent_id: None },
             ClaudeEvent::ToolEnd { id: "i".into(), ok: true, result: "r".into() },
-            ClaudeEvent::Ask { request_id: "r".into(), ask_type: AskType::Plan, prompt: "p".into(), options: vec![], tool_name: "t".into(), input: json!({}) },
+            ClaudeEvent::Ask { request_id: "r".into(), ask_type: AskType::Plan, prompt: "p".into(), options: vec![], questions: vec![], tool_name: "t".into(), input: json!({}) },
             ClaudeEvent::AskCancelled { request_id: "r".into() },
             ClaudeEvent::TodoDelta { id: "1".into(), text: None, status: Some("pending".into()) },
             ClaudeEvent::TurnEnd { context_used_pct: Some(1.0), is_error: false },

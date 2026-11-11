@@ -1,4 +1,4 @@
-import type { ChatItem, ClaudeEvent, Todo } from '../types'
+import { ERROR_LABEL, type ChatItem, type ClaudeEvent, type Todo } from '../types'
 
 /** Un todo ricostruito dai `todoDelta`: l'id serve per fondere le variazioni. */
 export type TodoItem = Todo & { id: string }
@@ -48,7 +48,7 @@ function apply(d: ChatState, ev: ClaudeEvent): void {
     }
     case 'ask': {
       if (indexOfItem(d.items, (x) => x.kind === 'ask' && x.requestId === ev.requestId) >= 0) return
-      d.items.push({ kind: 'ask', id: `ask:${ev.requestId}`, requestId: ev.requestId, askType: ev.askType, prompt: ev.prompt, options: ev.options, answered: false })
+      d.items.push({ kind: 'ask', id: `ask:${ev.requestId}`, requestId: ev.requestId, askType: ev.askType, prompt: ev.prompt, options: ev.options, questions: ev.questions ?? [], answered: false })
       return
     }
     case 'askCancelled':
@@ -68,6 +68,8 @@ function apply(d: ChatState, ev: ClaudeEvent): void {
       d.contextUsedPct = ev.contextUsedPct
       return
     case 'unknown':
+      // lo stesso errore già mostrato come messaggio sintetico della CLI: una volta sola
+      if (ev.label === ERROR_LABEL && isShownError(d.items, ev.json)) return
       d.items.push({ kind: 'raw', id: `raw:${d.items.length}:${ev.label}`, label: ev.label, json: ev.json })
       return
     case 'init':
@@ -75,6 +77,9 @@ function apply(d: ChatState, ev: ClaudeEvent): void {
       return
   }
 }
+
+const isShownError = (items: ChatItem[], text: string) =>
+  items.some((i) => (i.kind === 'assistant' && i.text.trim() === text.trim()) || (i.kind === 'raw' && i.label === ERROR_LABEL && i.json === text))
 
 function markAnswered(d: ChatState, requestId: string) {
   const i = indexOfItem(d.items, (x) => x.kind === 'ask' && x.requestId === requestId)
@@ -138,5 +143,7 @@ export function buildRows(items: ChatItem[]): Row[] {
 export function reconcile(live: ChatState, history: ChatItem[]): ChatState {
   const known = new Set(history.filter((i) => i.kind === 'ask').map((i) => (i as Extract<ChatItem, { kind: 'ask' }>).requestId))
   const asks = live.items.filter((i) => i.kind === 'ask' && !i.answered && !known.has(i.requestId))
-  return { items: [...history, ...asks], todos: live.todos, contextUsedPct: live.contextUsedPct }
+  // gli avvisi d'errore non sono nel file: restano, a meno che il file non ne porti già il testo
+  const errors = live.items.filter((i) => i.kind === 'raw' && i.label === ERROR_LABEL && !isShownError(history, i.json))
+  return { items: [...history, ...errors, ...asks], todos: live.todos, contextUsedPct: live.contextUsedPct }
 }

@@ -177,6 +177,6 @@
   .bottom { flex: none; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
   .composer-slot:empty { display: none; }
   .empty { color: var(--faint); text-align: center; margin-top: 24px; }
-  .err { color: #ff8f8f; }
+  .err { color: var(--err); }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 </style>

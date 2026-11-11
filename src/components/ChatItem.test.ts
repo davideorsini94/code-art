@@ -74,4 +74,13 @@ describe('ChatItem', () => {
     expect(screen.getByText('color = blue')).toBeTruthy()
     expect(screen.getByRole('button', { name: /Read/ })).toBeTruthy()
   })
+
+  it('"Errore di Claude" is an error notice with plain text', () => {
+    const evil = '<img src=x onerror=alert(1)>API Error: 529'
+    const { container } = render(ChatItem, { row: row({ kind: 'raw', id: 'e', label: 'Errore di Claude', json: evil }), sessionId: 's' })
+    const note = screen.getByRole('alert')
+    expect(note.className).toContain('errnote')
+    expect(note.textContent).toContain(evil)
+    expect(container.querySelector('img')).toBeNull()
+  })
 })
