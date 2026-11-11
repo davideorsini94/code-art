@@ -186,7 +186,7 @@
         {/if}
       </span>
       <span class="ic" class:loading={e.isDir && expanded[e.path] && !children[e.path]}>
-        <FileIcon id={spec.id} color={spec.color} size={isRoot ? 17 : 16} root={isRoot} />
+        <FileIcon id={spec.id} size={isRoot ? 17 : 16} root={isRoot} />
       </span>
       <span class="name">{e.name}</span>
     </div>
