@@ -21,13 +21,24 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "public.app-category.developer-tools",
+    "copyright": "Copyright © 2026 Code Art",
+    "shortDescription": "IDE per Mac costruito attorno alle conversazioni con Claude Code",
+    "longDescription": "Code Art è un IDE personale per Mac: conversazioni con Claude Code, editor, terminale e diff in finestre per progetto.",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
   }
 }

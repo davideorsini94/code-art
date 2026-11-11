@@ -12,7 +12,15 @@ use tauri::{Manager, RunEvent, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // misura di avvio, attiva solo con CODEART_TIMING=1: ms dall'inizio di `run`
+    let timing = std::env::var_os("CODEART_TIMING").is_some_and(|v| v == "1");
+    let t0 = std::time::Instant::now();
     let app = tauri::Builder::default()
+        .on_page_load(move |window, payload| {
+            if timing && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                eprintln!("[timing] pagina caricata in {} ms ({})", t0.elapsed().as_millis(), window.label());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(projects::Quitting::default())
@@ -22,7 +30,7 @@ pub fn run() {
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
             let store = store::Store::open(&dir.join("codeart.db"))?;
             let launch = claude::engine::app_launch();
@@ -56,6 +64,9 @@ pub fn run() {
             lifecycle::update_badge(app.handle(), &life, &store);
             projects::rebuild_menu(app.handle())?;
             projects::restore_windows(app.handle())?;
+            if timing {
+                eprintln!("[timing] finestra creata in {} ms", t0.elapsed().as_millis());
+            }
             Ok(())
         })
         .on_menu_event(|app, event| projects::on_menu_event(app, event.id().as_ref()))
