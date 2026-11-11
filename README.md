@@ -2,7 +2,7 @@
 
 A lightweight, fast personal IDE for Mac, built around your conversations with [Claude Code](https://claude.com/claude-code).
 
-> **Status: under construction.** Stage 1 is in progress on the [`tappa-1`](../../tree/tappa-1) branch. There is no installable build yet.
+> **Status: stage 1 of 4 complete.** The core works: project windows, file tree, editor, previews, terminal and Claude conversations. Git, SSH and databases come in the next stages.
 
 ## Why
 
@@ -14,13 +14,13 @@ If you develop with Claude Code every day inside a traditional editor, your conv
 - **Status at a glance**: *working*, *waiting for you*, *idle*, with a notification and a Dock badge when Claude needs an answer.
 - **Your existing Claude Code sessions** show up right away: the engine is the `claude` CLI you already have installed, with its plugins, skills, agents and MCP servers.
 
-All of it in a dark "liquid glass" theme, with editor, terminal, file tree and search in the same window.
+All of it in a dark "liquid glass" theme, with editor, file previews, terminal, file tree and command palette in the same window.
 
 ## Roadmap
 
 | Stage | Scope | Status |
 |---|---|---|
-| 1. The core | Per-project windows, file tree, editor, terminal, Claude conversations with living titles and statuses, liquid glass theme | in progress |
+| 1. The core | Per-project windows, file tree, editor, terminal, Claude conversations with living titles and statuses, file previews, liquid glass theme | done |
 | 2. Developer tools | Git and GitHub (commit, branch, merge, pull requests, repo creation), project-wide search, code completion | planned |
 | 3. SSH | Saved servers, remote folders in the tree, drag and drop between Mac and server, remote terminal | planned |
 | 4. Databases | PostgreSQL, MongoDB, Oracle: queries, editable result grid | planned |
@@ -32,20 +32,25 @@ The full design is in [`docs/superpowers/specs`](docs/superpowers/specs/2026-11-
 - [Tauri 2](https://tauri.app): a native Rust shell using the system WebView, with no bundled Chromium
 - [Svelte 5](https://svelte.dev) + TypeScript + Vite for the interface
 - [Monaco](https://microsoft.github.io/monaco-editor/) for the editor, [xterm.js](https://xtermjs.org) for the terminal
-- SQLite for app data; Claude Code's files in `~/.claude` are only ever read, never modified
+- SQLite for app data; Claude Code's files in `~/.claude` are only read, except when you delete a conversation, which moves its session file to the macOS Trash
+
+Security is a design goal: the interface is treated as untrusted, every command is scoped to its project window and folder, and Claude and the terminal only run in folders you have marked as trusted. Details in [`docs/sicurezza.md`](docs/sicurezza.md) (in Italian).
 
 ## Development
 
 Requirements: macOS, [Rust](https://rustup.rs), Node 22+, [pnpm](https://pnpm.io), and the `claude` CLI installed and signed in.
 
-The code lives on the `tappa-1` branch:
-
 ```bash
 git clone https://github.com/davideorsini94/code-art.git
 cd code-art
-git checkout tappa-1
 pnpm install
 pnpm tauri dev
+```
+
+To build the installable app and `.dmg` (unsigned, Apple Silicon):
+
+```bash
+pnpm tauri build
 ```
 
 Tests and checks:
