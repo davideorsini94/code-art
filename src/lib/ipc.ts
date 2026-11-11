@@ -66,3 +66,10 @@ export const convUnlockTitle = (sessionId: string) => invoke<void>('conv_unlock_
 /** Salva un'immagine incollata/trascinata nella cartella temporanea dell'app (validata dal motore); ritorna il percorso per `convSend`.
  *  I byte viaggiano come corpo binario, l'estensione nell'header `ext`. */
 export const convSaveImage = (bytes: Uint8Array, ext: string) => invoke<string>('conv_save_image', bytes, { headers: { ext } })
+
+// ---- ricerca unica ----
+/** Tutti i file del progetto della finestra (percorsi relativi; con il nome della cartella davanti se le cartelle sono più d'una). */
+export const fsAllFiles = () => invoke<string[]>('fs_all_files')
+export type ConvSearchHit = { sessionId: string; snippet: string }
+/** Cerca nel testo dei messaggi delle conversazioni del progetto (anche archiviate); al massimo 30, una per sessione. */
+export const convSearch = (query: string) => invoke<ConvSearchHit[]>('conv_search', { query })

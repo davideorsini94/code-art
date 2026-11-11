@@ -8,6 +8,9 @@
   import ClaudeMissing from './components/ClaudeMissing.svelte'
   import ConvList from './components/ConvList.svelte'
   import ConvPane from './components/ConvPane.svelte'
+  import Palette from './components/Palette.svelte'
+  import { palette } from './lib/palette/state.svelte'
+  import { hooks } from './lib/palette/search'
   import { conversations } from './lib/stores/conversations.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
@@ -61,6 +64,22 @@
         e.stopPropagation()
         termVisible = !termVisible
       }
+    }
+    window.addEventListener('keydown', onKey, true)
+    hooks.toggleTerminal = () => (termVisible = !termVisible)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
+
+  // ⌘P file, ⌘⇧P comandi, ⌘K tutto (in fase di cattura: vale anche con il focus in Monaco o xterm)
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.ctrlKey || e.altKey || !projectStore.project) return
+      const k = e.key.toLowerCase()
+      const mode = k === 'k' && !e.shiftKey ? 'all' : k === 'p' ? (e.shiftKey ? 'commands' : 'files') : null
+      if (!mode) return
+      e.preventDefault()
+      e.stopPropagation()
+      palette.show(mode)
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -133,6 +152,7 @@
   </main>
   {/if}
   <MissingFolder />
+  <Palette />
 </div>
 
 <style>

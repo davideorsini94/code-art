@@ -2,6 +2,9 @@
   import { projectStore } from '../lib/stores/project.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { activeLabel, waitingLabel } from '../lib/conv/order'
+  import { palette } from '../lib/palette/state.svelte'
+  import { hooks } from '../lib/palette/search'
+  import { onMount } from 'svelte'
 
   let editing = $state(false)
   let draft = $state('')
@@ -18,6 +21,10 @@
     const name = draft.trim()
     if (name && name !== projectStore.project?.name) await projectStore.rename(name)
   }
+
+  onMount(() => {
+    hooks.renameProject = startEdit
+  })
 
   function focusSelect(node: HTMLInputElement) {
     node.focus()
@@ -50,7 +57,7 @@
   {#if conversations.active > 0}
     <div class="active" data-tauri-drag-region>{activeLabel(conversations.active)}</div>
   {/if}
-  <div class="pal" data-tauri-drag-region>⌘K &nbsp; Cerca file, conversazioni, comandi…</div>
+  <button class="pal" onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
   {#if conversations.waiting > 0}
     <span class="chip"><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
   {/if}
@@ -96,5 +103,8 @@
     border: 1px solid var(--edge-soft);
     text-align: center;
     font-size: 12px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
   }
 </style>

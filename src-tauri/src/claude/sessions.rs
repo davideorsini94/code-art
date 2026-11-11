@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -641,6 +641,102 @@ pub fn history_in(root: &Path, store: &Store, project: &Project, session_id: &st
     Err("file della sessione non trovato".into())
 }
 
+// ---------- ricerca nel testo delle conversazioni ----------
+
+pub const SEARCH_MAX_RESULTS: usize = 30;
+const SEARCH_MIN_CHARS: usize = 2;
+const SEARCH_MAX_CHARS: usize = 200;
+const SEARCH_FILE_BYTES: u64 = 20 * 1024 * 1024;
+const SEARCH_BUDGET: Duration = Duration::from_secs(3);
+const SNIPPET_CHARS: usize = 80;
+const SNIPPET_BEFORE: usize = 25;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub session_id: String,
+    pub snippet: String,
+}
+
+/// Minuscola carattere per carattere (1:1, così gli indici restano allineati al testo originale).
+fn fold(s: &str) -> Vec<char> {
+    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+}
+
+/// Primo `needle` (già in `fold`) dentro `text`; ritorna lo snippet attorno alla corrispondenza.
+fn snippet_of(text: &str, needle: &[char]) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let hay = fold(text);
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    let at = (0..=hay.len() - needle.len()).find(|&i| hay[i] == needle[0] && hay[i..i + needle.len()] == *needle)?;
+    let start = at.saturating_sub(SNIPPET_BEFORE);
+    let end = chars.len().min((start + SNIPPET_CHARS).max(at + needle.len()));
+    let body: String = chars[start..end].iter().map(|&c| if c.is_control() { ' ' } else { c }).collect();
+    Some(format!("{}{}{}", if start > 0 { "…" } else { "" }, body.trim(), if end < chars.len() { "…" } else { "" }))
+}
+
+/// Testi scritti da persona e assistente in una riga del file di sessione (sidechain escluse).
+fn message_texts(v: &Value) -> Vec<String> {
+    if v["isSidechain"] == true {
+        return vec![];
+    }
+    match v["type"].as_str() {
+        Some("user") => human_prompt(v).map(|(t, _)| t).into_iter().collect(),
+        Some("assistant") => v["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str().map(String::from))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Prima corrispondenza nel file, letto a righe; si ferma dopo 20 MB o alla scadenza.
+fn search_file(file: &Path, needle: &[char], deadline: Instant) -> Option<String> {
+    use std::io::Read;
+    let reader = BufReader::with_capacity(64 * 1024, File::open(file).ok()?.take(SEARCH_FILE_BYTES));
+    let mut found: Option<String> = None;
+    let _ = for_each_line(reader, ITEMS_LINE_CAP, |line, truncated, _| {
+        if found.is_some() || truncated || Instant::now() >= deadline {
+            return;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
+        found = message_texts(&v).iter().find_map(|t| snippet_of(t, needle));
+    });
+    found
+}
+
+/// Ricerca testuale (senza regex, senza distinzione di maiuscole) nei messaggi delle sessioni del progetto,
+/// comprese le archiviate. Al massimo una corrispondenza per sessione, `SEARCH_MAX_RESULTS` in tutto.
+pub fn search_in(root: &Path, store: &Store, project: &Project, query: &str, budget: Duration) -> Result<Vec<SearchHit>> {
+    let query = query.trim();
+    let n = query.chars().count();
+    if !(SEARCH_MIN_CHARS..=SEARCH_MAX_CHARS).contains(&n) {
+        return Ok(vec![]);
+    }
+    let needle = fold(query);
+    let deadline = Instant::now() + budget;
+    let dirs = session_dirs_for(root, &project.folders);
+    let mut hits = Vec::new();
+    for c in store.list_conversations(&project.id)? {
+        if hits.len() >= SEARCH_MAX_RESULTS || Instant::now() >= deadline {
+            break;
+        }
+        if !valid_session_id(&c.session_id) {
+            continue;
+        }
+        let Some(file) = dirs.iter().map(|d| d.join(format!("{}.jsonl", c.session_id))).find(|f| f.is_file()) else { continue };
+        if let Some(snippet) = search_file(&file, &needle, deadline) {
+            hits.push(SearchHit { session_id: c.session_id, snippet });
+        }
+    }
+    Ok(hits)
+}
+
 // ---------- watcher ----------
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -776,6 +872,15 @@ pub async fn conv_history(app: AppHandle, window: WebviewWindow, session_id: Str
     })
     .await
     .map_err(err)?
+}
+
+/// Cerca `query` nel testo delle conversazioni del progetto della finestra chiamante.
+#[tauri::command]
+pub async fn conv_search(app: AppHandle, window: WebviewWindow, query: String) -> Result<Vec<SearchHit>> {
+    let project = window_project(&window, &app.state::<Store>())?;
+    tauri::async_runtime::spawn_blocking(move || search_in(&default_root(), &app.state::<Store>(), &project, &query, SEARCH_BUDGET))
+        .await
+        .map_err(err)?
 }
 
 // ---------- test ----------
@@ -1105,5 +1210,42 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(encode_project_dir(nfc_form))).unwrap();
         assert_eq!(session_dirs_for(root.path(), &[nfd.to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn conv_search_finds_text_in_archived() {
+        let (_d, s) = store();
+        let p = project("/Users/dev/proj");
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        s.exec_for_test("UPDATE conversations SET archived = 1 WHERE session_id = ?1", U1);
+        let hits = search_in(&fixtures_root(), &s, &p, "  CAMBIA red ", SEARCH_BUDGET).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, U1);
+        assert!(hits[0].snippet.contains("cambia red in blue"));
+        // solo il testo di persona/assistente: i risultati degli strumenti non contano
+        assert!(search_in(&fixtures_root(), &s, &p, "color = red", SEARCH_BUDGET).unwrap().is_empty());
+        // lunghezza fuori limiti: nessun risultato
+        assert!(search_in(&fixtures_root(), &s, &p, "c", SEARCH_BUDGET).unwrap().is_empty());
+        assert!(search_in(&fixtures_root(), &s, &p, &"a".repeat(201), SEARCH_BUDGET).unwrap().is_empty());
+        // altro progetto: niente
+        let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/other".into()] };
+        assert!(search_in(&fixtures_root(), &s, &other, "cambia", SEARCH_BUDGET).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snippet_is_short_single_line_and_case_insensitive() {
+        let long = format!("{}Ciao\nMONDO{}", "x".repeat(200), "y".repeat(200));
+        let sn = snippet_of(&long, &fold("ciao mondo")).or_else(|| snippet_of(&long, &fold("mondo"))).unwrap();
+        assert!(sn.chars().count() <= SNIPPET_CHARS + 2 && !sn.contains('\n') && sn.contains("MONDO"));
+        assert!(sn.starts_with('…') && sn.ends_with('…'));
+        assert!(snippet_of("abc", &fold("zz")).is_none());
+    }
+
+    #[test]
+    fn search_stops_at_budget_and_caps_results() {
+        let (_d, s) = store();
+        let p = project("/Users/dev/proj");
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert!(search_in(&fixtures_root(), &s, &p, "cambia", Duration::ZERO).unwrap().is_empty());
     }
 }

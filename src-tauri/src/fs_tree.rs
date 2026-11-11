@@ -152,6 +152,37 @@ pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsEr
     Ok(mtime_ms(&std::fs::metadata(path)?))
 }
 
+/// Tetto di `fs_all_files`.
+pub const ALL_FILES_MAX: usize = 50_000;
+
+/// Tutti i file sotto le cartelle del progetto, come percorsi relativi (con il nome della cartella davanti solo
+/// se le cartelle sono più d'una). Rispetta i `.gitignore`, salta `.git`, non segue i link simbolici.
+pub fn all_files(folders: &[PathBuf]) -> Vec<String> {
+    let multi = folders.len() > 1;
+    let mut out: Vec<String> = Vec::new();
+    for folder in folders {
+        let prefix = if multi { folder.file_name().map(|n| format!("{}/", n.to_string_lossy())).unwrap_or_default() } else { String::new() };
+        let walk = ignore::WalkBuilder::new(folder)
+            .hidden(false)
+            .follow_links(false)
+            .filter_entry(|e| e.file_name() != ".git")
+            .build();
+        for entry in walk.flatten() {
+            if out.len() >= ALL_FILES_MAX {
+                break;
+            }
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(folder) {
+                out.push(format!("{prefix}{}", rel.to_string_lossy()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 // ---------- watcher ----------
 
 /// Percorsi che non vanno notificati: dentro `.git` (tranne `.git/HEAD`, serve al branch), `node_modules`, `target`.
@@ -322,6 +353,13 @@ pub async fn fs_write(
     expected_mtime_ms: Option<i64>,
 ) -> Result<i64, FsError> {
     write(&checked(&window, &store, &path)?, &text, expected_mtime_ms)
+}
+
+/// Elenco piatto dei file del progetto della finestra chiamante (per l'apertura rapida).
+#[tauri::command]
+pub async fn fs_all_files(window: WebviewWindow, store: State<'_, Store>) -> Result<Vec<String>, FsError> {
+    let roots = roots_of(&window, &store)?;
+    tauri::async_runtime::spawn_blocking(move || all_files(&roots)).await.map_err(|e| FsError::new("io", e.to_string()))
 }
 
 #[cfg(test)]
@@ -518,5 +556,39 @@ mod tests {
     fn error_serializes_code_and_message() {
         let v = serde_json::to_value(FsError::new("conflict", "m")).unwrap();
         assert_eq!(v, serde_json::json!({ "code": "conflict", "message": "m" }));
+    }
+
+    #[test]
+    fn fs_all_files_skips_ignored() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::create_dir_all(r.join(".git")).unwrap();
+        std::fs::write(r.join(".git/config"), "").unwrap();
+        std::fs::write(r.join(".gitignore"), "target/\n*.log\n").unwrap();
+        std::fs::create_dir_all(r.join("target")).unwrap();
+        std::fs::write(r.join("target/out.bin"), "").unwrap();
+        std::fs::write(r.join("x.log"), "").unwrap();
+        std::fs::create_dir_all(r.join("src")).unwrap();
+        std::fs::write(r.join("src/main.rs"), "").unwrap();
+        std::fs::write(r.join(".env"), "").unwrap();
+        assert_eq!(all_files(&[r.to_path_buf()]), vec![".env", ".gitignore", "src/main.rs"]);
+    }
+
+    #[test]
+    fn fs_all_files_does_not_follow_symlinks_and_prefixes_multi_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        let a = d.path().join("a");
+        let b = d.path().join("b");
+        for p in [&outside, &a, &b] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(outside.join("secret.txt"), "").unwrap();
+        std::os::unix::fs::symlink(&outside, a.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), a.join("s.txt")).unwrap();
+        std::fs::write(a.join("one.txt"), "").unwrap();
+        std::fs::write(b.join("two.txt"), "").unwrap();
+        assert_eq!(all_files(&[a.clone()]), vec!["one.txt"]);
+        assert_eq!(all_files(&[a, b]), vec!["a/one.txt", "b/two.txt"]);
     }
 }
