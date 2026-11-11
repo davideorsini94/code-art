@@ -304,6 +304,46 @@ e usabile. Ordine proposto da Claude, visto da Davide.
 - Connessioni SSH/DB cadute: riconnessione con un click, nessuna perdita delle
   query scritte.
 
+## 11 bis. Sicurezza
+
+Requisito di Davide (aggiunto in corso d'opera): "un IDE sicuro". Le misure
+concrete sono [scelte mie]:
+
+**Principio**: l'interfaccia è una pagina web che mostra contenuti non fidati
+(output di Claude, file, risultati di query, nomi di file). Va trattata come
+potenzialmente compromessa: il core Rust non si fida di ciò che gli chiede.
+
+- **Nessun contenuto remoto nell'interfaccia.** Content-Security-Policy
+  restrittiva: script e stili solo dal pacchetto dell'app, nessun `eval`,
+  nessuna connessione di rete dalla WebView. I link si aprono nel browser di
+  sistema, mai dentro l'app.
+- **Contenuti non fidati sempre neutralizzati.** Markdown di Claude, testo dei
+  file, risultati di strumenti e query sono resi come testo o come markdown
+  sanificato: mai HTML grezzo, mai `{@html}` su dati non sanificati.
+- **Comandi del core con confini.** Ogni comando su file accetta solo percorsi
+  dentro le cartelle del progetto della finestra che lo chiama (dopo
+  risoluzione di `..` e link simbolici). I permessi Tauri sono il minimo
+  necessario, per finestra.
+- **Processi senza shell.** `claude`, `git`, `gh` e simili sono avviati con
+  lista di argomenti, mai componendo una riga di comando da testo.
+- **Segreti solo nel Portachiavi macOS.** Password SSH e DB non finiscono mai
+  in SQLite, file, log o messaggi di errore.
+- **Bypass permissions resta una scelta visibile.** È il default voluto da
+  Davide, ma la modalità attiva è sempre in vista (ambra) e alla prima
+  apertura di una cartella mai vista l'app chiede conferma che sia fidata
+  prima di avviare Claude lì dentro.
+- **SSH** (tappa 3): verifica della chiave del server contro `known_hosts`,
+  con conferma esplicita per server nuovi e blocco se la chiave cambia.
+- **Database** (tappa 4): TLS quando il server lo offre; parametri sempre
+  separati dal testo SQL nelle istruzioni generate dalla griglia; conferma
+  prima di istruzioni distruttive senza `WHERE`.
+- **Nessuna telemetria**, nessuna chiamata di rete dell'app che non sia
+  chiesta dall'utente.
+- **Dipendenze controllate**: `cargo audit` e `pnpm audit` a ogni fine tappa;
+  versioni bloccate dai lockfile.
+- **Repository pubblico**: nessun segreto, percorso personale o dato reale nel
+  codice, nei test o nelle fixture.
+
 ## 12. Verifica
 
 - Rust: test unitari per lettura delle sessioni, macchina degli stati delle
