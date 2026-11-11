@@ -1,3 +1,4 @@
+mod fs_tree;
 mod projects;
 mod store;
 
@@ -9,6 +10,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(projects::Quitting::default())
+        .manage(fs_tree::Watchers::default())
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
             app.manage(store::Store::open(&dir.join("codeart.db"))?);
@@ -33,6 +35,12 @@ pub fn run() {
             projects::project_branch,
             projects::settings_get,
             projects::settings_set,
+            fs_tree::fs_list,
+            fs_tree::fs_create,
+            fs_tree::fs_rename,
+            fs_tree::fs_trash,
+            fs_tree::fs_read,
+            fs_tree::fs_write,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

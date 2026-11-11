@@ -2,6 +2,8 @@
   import Titlebar from './components/Titlebar.svelte'
   import Rail from './components/Rail.svelte'
   import MissingFolder from './components/MissingFolder.svelte'
+  import FileTree from './components/FileTree.svelte'
+  import EditorPane from './components/EditorPane.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
@@ -64,14 +66,16 @@
     <div class="slot rail"><Rail {collapsed} ontoggle={toggle} /></div>
     {#each cols as { col, label } (col)}
       {#if !collapsed.has(col)}
-        <section class="glass col" data-slot={col} aria-label={label}></section>
+        <section class="glass col" data-slot={col} aria-label={label}>
+          {#if col === 'sidebar'}<FileTree />{/if}
+        </section>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="handle" onpointerdown={(e) => startResize(e, col)}></div>
       {:else}
         <span></span><span></span>
       {/if}
     {/each}
-    <section class="glass col" data-slot="editor" aria-label="Editor"></section>
+    <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor"><EditorPane /></section>
   </main>
   {/if}
   <MissingFolder />
@@ -81,6 +85,7 @@
   .app { display: flex; flex-direction: column; height: 100%; }
   .body { flex: 1; min-height: 0; display: grid; padding: 10px; }
   .col { min-width: 0; overflow: hidden; padding: 12px; }
+  .col.editor { padding: 0; }
   .slot.rail { display: contents; }
   .welcome { flex: 1; display: grid; place-items: center; }
   .welcome-box { padding: 32px 48px; display: flex; flex-direction: column; align-items: center; gap: 16px; }

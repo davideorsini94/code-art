@@ -107,6 +107,7 @@ fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<Webv
         .transparent(true)
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(false)
+        .disable_drag_drop_handler() // serve per il drag & drop HTML5 dell'albero file
         .build()?;
     apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None)
         .map_err(|e| tauri::Error::Anyhow(e.into()))?;
@@ -124,6 +125,7 @@ pub fn show_project_window(app: &AppHandle, project: &Project) -> Result<()> {
         build_window(app, &label, &project.name).map_err(|e| e.to_string())?;
     }
     store.set_open_flag(&project.id, true)?;
+    crate::fs_tree::watch_project(app, project);
     if let Some(w) = app.get_webview_window(WELCOME_LABEL) {
         let _ = w.close();
     }
@@ -156,6 +158,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
         return;
     }
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
+        crate::fs_tree::unwatch_project(app, id);
         let _ = app.state::<Store>().set_open_flag(id, false);
     }
 }
@@ -269,13 +272,17 @@ pub fn project_rename(app: AppHandle, store: State<Store>, id: String, name: Str
 }
 
 #[tauri::command]
-pub fn project_add_folder(store: State<Store>, id: String, path: String) -> Result<Project> {
-    add_folder(&store, &id, &path)
+pub fn project_add_folder(app: AppHandle, store: State<Store>, id: String, path: String) -> Result<Project> {
+    let p = add_folder(&store, &id, &path)?;
+    crate::fs_tree::watch_project(&app, &p);
+    Ok(p)
 }
 
 #[tauri::command]
-pub fn project_relocate(store: State<Store>, id: String, old: String, new: String) -> Result<Project> {
-    relocate(&store, &id, &old, &new)
+pub fn project_relocate(app: AppHandle, store: State<Store>, id: String, old: String, new: String) -> Result<Project> {
+    let p = relocate(&store, &id, &old, &new)?;
+    crate::fs_tree::watch_project(&app, &p);
+    Ok(p)
 }
 
 #[tauri::command]

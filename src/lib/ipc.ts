@@ -12,3 +12,19 @@ export const projectMissingFolders = (id: string) => invoke<string[]>('project_m
 export const projectBranch = (id: string) => invoke<string | null>('project_branch', { id })
 export const settingsGet = (key: string) => invoke<string | null>('settings_get', { key })
 export const settingsSet = (key: string, value: string) => invoke<void>('settings_set', { key, value })
+
+// ---- file system ----
+import type { DirEntry, FileContent, FsError } from './types'
+export const fsList = (path: string) => invoke<DirEntry[]>('fs_list', { path })
+export const fsCreate = (path: string, isDir: boolean) => invoke<void>('fs_create', { path, isDir })
+export const fsRename = (from: string, to: string) => invoke<void>('fs_rename', { from, to })
+export const fsTrash = (path: string) => invoke<void>('fs_trash', { path })
+export const fsRead = (path: string) => invoke<FileContent>('fs_read', { path })
+export const fsWrite = (path: string, text: string, expectedMtimeMs: number | null) =>
+  invoke<number>('fs_write', { path, text, expectedMtimeMs })
+
+/** Normalizza un errore di comando in `FsError`. */
+export function asFsError(e: unknown): FsError {
+  if (e && typeof e === 'object' && 'code' in e) return e as FsError
+  return { code: 'io', message: String(e) }
+}
