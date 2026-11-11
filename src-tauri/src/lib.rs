@@ -14,6 +14,7 @@ pub fn run() {
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
         .manage(claude::sessions::SessionWatchers::default())
+        .manage(claude::sessions::MetaCache::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");

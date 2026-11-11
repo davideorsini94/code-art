@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -60,13 +61,14 @@ pub fn default_root() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".claude/projects")
 }
 
-/// Cartelle di sessione esistenti per le cartelle del progetto (percorso dato e percorso reale).
-pub fn session_dirs_in(root: &Path, folders: &[String]) -> Vec<PathBuf> {
+/// Cartelle di sessione esistenti sotto `root` (default: `default_root()`) per le cartelle del progetto
+/// (percorso dato e percorso reale, in NFC come richiede §11.1).
+pub fn session_dirs_for(root: &Path, folders: &[String]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for f in folders {
-        let mut names = vec![encode_project_dir(f)];
+        let mut names = vec![encode_project_dir(&nfc(f))];
         if let Ok(real) = Path::new(f).canonicalize() {
-            names.push(encode_project_dir(&real.to_string_lossy()));
+            names.push(encode_project_dir(&nfc(&real.to_string_lossy())));
         }
         for n in names {
             let d = root.join(n);
@@ -78,37 +80,43 @@ pub fn session_dirs_in(root: &Path, folders: &[String]) -> Vec<PathBuf> {
     out
 }
 
-#[allow(dead_code)] // API dichiarata dal brief; i chiamanti usano `session_dirs_in` con la radice iniettata
-pub fn session_dirs_for(folders: &[String]) -> Vec<PathBuf> {
-    session_dirs_in(&default_root(), folders)
-}
-
 fn normalize(p: &str) -> String {
     let t = p.trim_end_matches('/');
     if t.is_empty() { "/".into() } else { t.into() }
 }
 
+fn nfc(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc().collect()
+}
+
+/// Confronto in NFC su entrambi i lati (il cwd registrato dalla CLI è NFC, la cartella scelta può essere NFD).
 fn cwd_in_project(cwd: &str, folders: &[String]) -> bool {
-    let c = normalize(cwd);
-    let real = Path::new(cwd).canonicalize().ok().map(|p| p.to_string_lossy().to_string());
+    let c = nfc(&normalize(cwd));
+    let real = Path::new(cwd).canonicalize().ok().map(|p| nfc(&p.to_string_lossy()));
     folders.iter().any(|f| {
-        let f = normalize(f);
+        let f = nfc(&normalize(f));
         f == c
             || real.as_deref().is_some_and(|r| {
-                r == f || Path::new(&f).canonicalize().is_ok_and(|rf| rf.to_string_lossy() == r)
+                r == f || Path::new(&f).canonicalize().is_ok_and(|rf| nfc(&rf.to_string_lossy()) == r)
             })
     })
 }
 
 // ---------- lettura a righe con tetto ----------
 
-/// Chiama `f(riga, troncata)` per ogni riga tenendo in memoria al massimo `cap` byte per riga.
-fn for_each_line<R: BufRead>(mut r: R, cap: usize, mut f: impl FnMut(&[u8], bool)) -> io::Result<()> {
+/// Chiama `f(riga, troncata, terminata)` per ogni riga tenendo in memoria al massimo `cap` byte per riga
+/// (`terminata` = finisce con `\n`: l'ultima riga può essere ancora in scrittura).
+/// Restituisce i byte letti fino all'ultimo `\n` incluso.
+fn for_each_line<R: BufRead>(mut r: R, cap: usize, mut f: impl FnMut(&[u8], bool, bool)) -> io::Result<u64> {
     let mut buf: Vec<u8> = Vec::new();
+    let mut consumed_terminated: u64 = 0;
     loop {
+        let mut line_bytes: u64 = 0;
         buf.clear();
         let mut truncated = false;
         let mut any = false;
+        let mut terminated = false;
         loop {
             let chunk = r.fill_buf()?;
             if chunk.is_empty() {
@@ -125,14 +133,19 @@ fn for_each_line<R: BufRead>(mut r: R, cap: usize, mut f: impl FnMut(&[u8], bool
                 truncated = true;
             }
             r.consume(take + usize::from(found));
+            line_bytes += (take + usize::from(found)) as u64;
+            terminated = found;
             if found {
                 break;
             }
         }
         if !any {
-            return Ok(());
+            return Ok(consumed_terminated);
         }
-        f(&buf, truncated);
+        if terminated {
+            consumed_terminated += line_bytes;
+        }
+        f(&buf, truncated, terminated);
     }
 }
 
@@ -176,7 +189,9 @@ fn is_synthetic_text(t: &str) -> bool {
         || t.starts_with("[Request interrupted")
 }
 
-/// Prompt scritto dalla persona (§11.3): `Some((testo, immagini))`.
+/// Prompt scritto dalla persona (§11.3). `promptSource` è una lista di esclusione (solo `system`) e non la
+/// whitelist del documento (`sdk`/assente): i prompt di sessioni interattive potrebbero avere altri valori.
+///: `Some((testo, immagini))`.
 fn human_prompt(v: &Value) -> Option<(String, usize)> {
     if v["type"] != "user"
         || v["isSidechain"] == true
@@ -257,26 +272,33 @@ pub struct SessionMeta {
     pub mtime_ms: i64,
 }
 
-/// Legge in streaming (memoria limitata dal tetto per riga). Righe malformate o di tipo ignoto: saltate.
-pub fn read_session_meta(file: &Path) -> Result<SessionMeta> {
-    let meta = std::fs::metadata(file).map_err(err)?;
-    let mtime = mtime_ms(&meta);
-    let session_id = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let mut out = SessionMeta {
-        session_id,
+fn empty_meta(file: &Path) -> SessionMeta {
+    SessionMeta {
+        session_id: file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
         cwd: String::new(),
         first_prompt: String::new(),
         last_activity_ms: 0,
         turn_count: 0,
         custom_title: None,
-        mtime_ms: mtime,
-    };
+        mtime_ms: 0,
+    }
+}
+
+/// Legge `file` da `offset`, aggiornando `out`; consuma solo righe complete (terminate da `\n`).
+/// Restituisce l'offset assoluto fino a cui ha letto. Righe malformate o di tipo ignoto: saltate.
+fn scan_meta(file: &Path, offset: u64, out: &mut SessionMeta) -> Result<u64> {
+    use std::io::Seek;
+    let mut f = File::open(file).map_err(err)?;
+    f.seek(io::SeekFrom::Start(offset)).map_err(err)?;
     let note_ts = |out: &mut SessionMeta, ts: Option<&str>| {
         if let Some(ms) = ts.and_then(parse_iso_ms) {
             out.last_activity_ms = out.last_activity_ms.max(ms);
         }
     };
-    for_each_line(open_reader(file).map_err(err)?, META_LINE_CAP, |line, truncated| {
+    let n = for_each_line(BufReader::with_capacity(64 * 1024, f), META_LINE_CAP, |line, truncated, terminated| {
+        if !terminated {
+            return; // riga ancora in scrittura: non consumata, verrà riletta
+        }
         if truncated {
             if sniff_truncated_human(line) {
                 out.turn_count += 1;
@@ -290,7 +312,7 @@ pub fn read_session_meta(file: &Path) -> Result<SessionMeta> {
             if text.contains("\"isSidechain\":true") {
                 return;
             }
-            note_ts(&mut out, extract_str(text, "\"timestamp\":\""));
+            note_ts(out, extract_str(text, "\"timestamp\":\""));
             if out.cwd.is_empty() {
                 if let Some(c) = extract_str(text, "\"cwd\":\"") {
                     if !c.contains('\\') {
@@ -315,7 +337,7 @@ pub fn read_session_meta(file: &Path) -> Result<SessionMeta> {
                 out.cwd = c.to_string();
             }
         }
-        note_ts(&mut out, v["timestamp"].as_str());
+        note_ts(out, v["timestamp"].as_str());
         if let Some((t, _)) = human_prompt(&v) {
             out.turn_count += 1;
             if out.first_prompt.is_empty() {
@@ -324,10 +346,73 @@ pub fn read_session_meta(file: &Path) -> Result<SessionMeta> {
         }
     })
     .map_err(err)?;
+    Ok(offset + n)
+}
+
+/// Lettura completa e senza cache (riferimento per i test della cache).
+#[cfg(test)]
+pub fn read_session_meta(file: &Path) -> Result<SessionMeta> {
+    let md = std::fs::metadata(file).map_err(err)?;
+    let mut out = empty_meta(file);
+    scan_meta(file, 0, &mut out)?;
+    out.mtime_ms = mtime_ms(&md);
     if out.last_activity_ms == 0 {
-        out.last_activity_ms = mtime;
+        out.last_activity_ms = out.mtime_ms;
     }
     Ok(out)
+}
+
+struct CacheEntry {
+    size: u64,
+    mtime_ms: i64,
+    /// byte già consumati (fino all'ultimo `\n`)
+    offset: u64,
+    /// metadati grezzi (last_activity senza il ripiego sull'mtime)
+    meta: SessionMeta,
+}
+
+/// Cache per file di sessione: un file invariato non viene riletto; uno cresciuto viene letto solo
+/// dai byte aggiunti; uno rimpicciolito o con mtime indietro viene riletto per intero.
+#[derive(Default)]
+pub struct MetaCache {
+    entries: Mutex<HashMap<PathBuf, CacheEntry>>,
+    pub full_reads: AtomicUsize,
+    pub incremental_reads: AtomicUsize,
+}
+
+impl MetaCache {
+    pub fn read(&self, file: &Path) -> Result<SessionMeta> {
+        let md = std::fs::metadata(file).map_err(err)?;
+        let (size, mtime) = (md.len(), mtime_ms(&md));
+        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let finish = |e: &CacheEntry| {
+            let mut m = e.meta.clone();
+            m.mtime_ms = e.mtime_ms;
+            if m.last_activity_ms == 0 {
+                m.last_activity_ms = m.mtime_ms;
+            }
+            m
+        };
+        if let Some(e) = map.get_mut(file) {
+            if e.size == size && e.mtime_ms == mtime {
+                return Ok(finish(e));
+            }
+            if size > e.size && mtime >= e.mtime_ms {
+                let mut meta = e.meta.clone();
+                let offset = scan_meta(file, e.offset, &mut meta)?;
+                self.incremental_reads.fetch_add(1, Ordering::Relaxed);
+                *e = CacheEntry { size, mtime_ms: mtime, offset, meta };
+                return Ok(finish(e));
+            }
+        }
+        let mut meta = empty_meta(file);
+        let offset = scan_meta(file, 0, &mut meta)?;
+        self.full_reads.fetch_add(1, Ordering::Relaxed);
+        let e = CacheEntry { size, mtime_ms: mtime, offset, meta };
+        let out = finish(&e);
+        map.insert(file.to_path_buf(), e);
+        Ok(out)
+    }
 }
 
 // ---------- elementi della chat ----------
@@ -358,7 +443,7 @@ fn tool_result_text(content: &Value) -> String {
 pub fn read_session_items(file: &Path) -> Result<Vec<ChatItem>> {
     let mut items: Vec<ChatItem> = Vec::new();
     let mut tool_index: HashMap<String, usize> = HashMap::new();
-    for_each_line(open_reader(file).map_err(err)?, ITEMS_LINE_CAP, |line, truncated| {
+    for_each_line(open_reader(file).map_err(err)?, ITEMS_LINE_CAP, |line, truncated, _terminated| {
         if truncated {
             return;
         }
@@ -468,8 +553,8 @@ fn provisional_title(meta: &SessionMeta) -> String {
 }
 
 /// Sincronizza un file di sessione; `None` se non appartiene al progetto (cwd estraneo) o non è leggibile.
-pub fn sync_session_file(store: &Store, project: &Project, file: &Path) -> Result<Option<SessionMeta>> {
-    let meta = read_session_meta(file)?;
+pub fn sync_session_file(store: &Store, cache: &MetaCache, project: &Project, file: &Path) -> Result<Option<SessionMeta>> {
+    let meta = cache.read(file)?;
     if meta.cwd.is_empty() || !cwd_in_project(&meta.cwd, &project.folders) {
         return Ok(None);
     }
@@ -493,26 +578,22 @@ pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub fn sync_project_sessions_in(root: &Path, store: &Store, project: &Project, now: i64) -> Result<Vec<Conversation>> {
-    for dir in session_dirs_in(root, &project.folders) {
+pub fn sync_project_sessions(root: &Path, store: &Store, cache: &MetaCache, project: &Project, now: i64) -> Result<Vec<Conversation>> {
+    for dir in session_dirs_for(root, &project.folders) {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             let p = entry.path();
             if is_session_file(&p) && p.is_file() {
-                let _ = sync_session_file(store, project, &p); // un file illeggibile non blocca gli altri
+                let _ = sync_session_file(store, cache, project, &p); // un file illeggibile non blocca gli altri
             }
         }
     }
     conversations_for(root, store, project, now)
 }
 
-pub fn sync_project_sessions(store: &Store, project: &Project) -> Result<Vec<Conversation>> {
-    sync_project_sessions_in(&default_root(), store, project, now_ms())
-}
-
 /// Conversazioni salvate del progetto con `maybe_open_elsewhere` calcolato dall'mtime del file.
 pub fn conversations_for(root: &Path, store: &Store, project: &Project, now: i64) -> Result<Vec<Conversation>> {
-    let dirs = session_dirs_in(root, &project.folders);
+    let dirs = session_dirs_for(root, &project.folders);
     let mut list = store.list_conversations(&project.id)?;
     for c in &mut list {
         fill_elsewhere(c, &dirs, now);
@@ -537,7 +618,7 @@ pub fn history_in(root: &Path, store: &Store, project: &Project, session_id: &st
         Some(c) if c.project_id == project.id => {}
         _ => return Err("sessione non appartiene a questo progetto".into()),
     }
-    for dir in session_dirs_in(root, &project.folders) {
+    for dir in session_dirs_for(root, &project.folders) {
         let f = dir.join(format!("{session_id}.jsonl"));
         if f.is_file() {
             return read_session_items(&f);
@@ -551,7 +632,7 @@ pub fn history_in(root: &Path, store: &Store, project: &Project, session_id: &st
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -595,7 +676,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
             // il progetto può essere cambiato (cartelle aggiunte): rileggerlo ogni volta
             let store = handle.state::<Store>();
             let Ok(Some(project)) = store.get_project(&project_id) else { continue };
-            let dirs: Vec<PathBuf> = session_dirs_in(&root, &project.folders)
+            let dirs: Vec<PathBuf> = session_dirs_for(&root, &project.folders)
                 .into_iter()
                 .map(|d| d.canonicalize().unwrap_or(d))
                 .collect();
@@ -607,7 +688,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                 if !p.is_file() {
                     continue;
                 }
-                if let Ok(Some(meta)) = sync_session_file(&store, &project, &p) {
+                if let Ok(Some(meta)) = sync_session_file(&store, &handle.state::<MetaCache>(), &project, &p) {
                     if let Ok(Some(mut conv)) = store.get_conversation(&meta.session_id) {
                         fill_elsewhere(&mut conv, &dirs, now_ms());
                         let _ = handle.emit_to(label.as_str(), "conv:upsert", conv);
@@ -637,19 +718,28 @@ fn window_project(window: &WebviewWindow, store: &Store) -> Result<Project> {
     store.get_project(id)?.ok_or_else(|| format!("progetto {id} inesistente"))
 }
 
+/// Lavoro su file e SQLite fuori dal thread principale (i comandi sincroni di Tauri girano lì).
 #[tauri::command]
-pub fn conv_list(window: WebviewWindow, store: State<Store>, project_id: String) -> Result<Vec<Conversation>> {
-    let project = window_project(&window, &store)?;
+pub async fn conv_list(app: AppHandle, window: WebviewWindow, project_id: String) -> Result<Vec<Conversation>> {
+    let project = window_project(&window, &app.state::<Store>())?;
     if project.id != project_id {
         return Err("progetto non della finestra chiamante".into());
     }
-    sync_project_sessions(&store, &project)
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_project_sessions(&default_root(), &app.state::<Store>(), &app.state::<MetaCache>(), &project, now_ms())
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn conv_history(window: WebviewWindow, store: State<Store>, session_id: String) -> Result<Vec<ChatItem>> {
-    let project = window_project(&window, &store)?;
-    history_in(&default_root(), &store, &project, &session_id)
+pub async fn conv_history(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<Vec<ChatItem>> {
+    let project = window_project(&window, &app.state::<Store>())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        history_in(&default_root(), &app.state::<Store>(), &project, &session_id)
+    })
+    .await
+    .map_err(err)?
 }
 
 // ---------- test ----------
@@ -802,11 +892,11 @@ mod tests {
         use std::io::Write;
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("big.jsonl");
+        let mut i = 0;
         {
             let mut w = std::io::BufWriter::new(File::create(&f).unwrap());
             let pad = "x".repeat(100_000);
             let mut written = 0usize;
-            let mut i = 0;
             while written < 120 * 1024 * 1024 {
                 let user = format!(
                     "{{\"type\":\"user\",\"isSidechain\":false,\"cwd\":\"/Users/dev/proj\",\"timestamp\":\"2026-11-11T09:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"prompt {i}\"}}}}\n"
@@ -832,7 +922,7 @@ mod tests {
         PEAK.with(|p| p.set(0));
         let m = read_session_meta(&f).unwrap();
         let peak = PEAK.with(|p| p.get());
-        assert!(m.turn_count > 100);
+        assert_eq!(m.turn_count, i + 1); // i prompt normali + la riga gigante troncata ma contata
         assert_eq!(m.cwd, "/Users/dev/proj");
         assert!(peak < 8 * 1024 * 1024, "picco {peak} byte");
     }
@@ -841,7 +931,7 @@ mod tests {
     fn session_with_foreign_cwd_is_excluded() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        let list = sync_project_sessions_in(&fixtures_root(), &s, &p, now_ms()).unwrap();
+        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
         let ids: Vec<&str> = list.iter().map(|c| c.session_id.as_str()).collect();
         assert!(ids.contains(&U1) && ids.contains(&U2));
         assert!(!ids.contains(&U3));
@@ -854,19 +944,19 @@ mod tests {
         // l'altro progetto vede la sua sessione, non le nostre
         let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/other".into()] };
         // la cartella codificata di "other" non esiste: nessuna sessione trovata
-        assert!(sync_project_sessions_in(&fixtures_root(), &s, &other, now_ms()).unwrap().is_empty());
+        assert!(sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &other, now_ms()).unwrap().is_empty());
     }
 
     #[test]
     fn resync_keeps_user_fields_and_updates_counts() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        sync_project_sessions_in(&fixtures_root(), &s, &p, now_ms()).unwrap();
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
         {
             let conn_title = "UPDATE conversations SET title = 'Mio', archived = 1, owned = 1, seen_turn = 5, turn_count = 99 WHERE session_id = ?1";
             s.exec_for_test(conn_title, U1);
         }
-        let list = sync_project_sessions_in(&fixtures_root(), &s, &p, now_ms()).unwrap();
+        let list = sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
         let c = list.iter().find(|c| c.session_id == U1).unwrap();
         assert_eq!((c.title.as_str(), c.archived, c.owned, c.turn_count), ("Mio", true, true, 2));
     }
@@ -884,7 +974,7 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(3600);
         File::options().write(true).open(dir.join(format!("{U2}.jsonl"))).unwrap().set_modified(old).unwrap();
         let p = project("/Users/dev/proj");
-        let list = sync_project_sessions_in(root.path(), &s, &p, now_ms()).unwrap();
+        let list = sync_project_sessions(root.path(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
         let by = |id: &str| list.iter().find(|c| c.session_id == id).unwrap();
         assert!(by(U1).maybe_open_elsewhere); // appena copiato: mtime = adesso
         assert!(!by(U2).maybe_open_elsewhere);
@@ -897,11 +987,83 @@ mod tests {
     fn history_refuses_other_projects_and_bad_ids() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
-        sync_project_sessions_in(&fixtures_root(), &s, &p, now_ms()).unwrap();
+        sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms()).unwrap();
         assert!(history_in(&fixtures_root(), &s, &p, U1).is_ok());
         let other = Project { id: "p2".into(), name: "o".into(), folders: vec!["/Users/dev/proj".into()] };
         assert!(history_in(&fixtures_root(), &s, &other, U1).is_err());
         assert!(history_in(&fixtures_root(), &s, &p, U3).is_err()); // non nello store
         assert!(history_in(&fixtures_root(), &s, &p, "../../etc/passwd").is_err());
+    }
+
+    fn write_lines(f: &Path, lines: &[&str]) {
+        std::fs::write(f, lines.concat()).unwrap();
+    }
+    fn append(f: &Path, text: &str) {
+        use std::io::Write;
+        File::options().append(true).open(f).unwrap().write_all(text.as_bytes()).unwrap();
+    }
+    fn user_line(n: u32, ts: &str) -> String {
+        format!("{{\"type\":\"user\",\"cwd\":\"/Users/dev/proj\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"p{n}\"}}}}\n")
+    }
+
+    #[test]
+    fn cache_skips_unchanged_and_reads_appended_bytes_only() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        write_lines(&f, &[&user_line(1, "2026-11-11T09:00:01.000Z")]);
+        let c = MetaCache::default();
+        assert_eq!(c.read(&f).unwrap().turn_count, 1);
+        assert_eq!(c.read(&f).unwrap().turn_count, 1);
+        assert_eq!((c.full_reads.load(Ordering::Relaxed), c.incremental_reads.load(Ordering::Relaxed)), (1, 0));
+
+        append(&f, &user_line(2, "2026-11-11T09:00:05.000Z"));
+        let m = c.read(&f).unwrap();
+        assert_eq!(m.turn_count, 2);
+        assert_eq!(m.first_prompt, "p1");
+        assert_eq!(m.last_activity_ms, parse_iso_ms("2026-11-11T09:00:05.000Z").unwrap());
+        assert_eq!((c.full_reads.load(Ordering::Relaxed), c.incremental_reads.load(Ordering::Relaxed)), (1, 1));
+        assert_eq!(m, read_session_meta(&f).unwrap());
+    }
+
+    #[test]
+    fn cache_does_not_consume_partial_trailing_line() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        let l2 = user_line(2, "2026-11-11T09:00:05.000Z");
+        let (head, tail) = l2.split_at(30);
+        write_lines(&f, &[&user_line(1, "2026-11-11T09:00:01.000Z"), head]);
+        let c = MetaCache::default();
+        assert_eq!(c.read(&f).unwrap().turn_count, 1);
+        append(&f, tail); // completa la riga (con il suo \n)
+        assert_eq!(c.read(&f).unwrap().turn_count, 2);
+        assert_eq!(c.incremental_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(c.full_reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cache_rereads_fully_after_truncation() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        write_lines(&f, &[&user_line(1, "2026-11-11T09:00:01.000Z"), &user_line(2, "2026-11-11T09:00:02.000Z")]);
+        let c = MetaCache::default();
+        assert_eq!(c.read(&f).unwrap().turn_count, 2);
+        write_lines(&f, &[&user_line(9, "2026-11-11T09:00:03.000Z")]);
+        let m = c.read(&f).unwrap();
+        assert_eq!((m.turn_count, m.first_prompt.as_str()), (1, "p9"));
+        assert_eq!(c.full_reads.load(Ordering::Relaxed), 2);
+        assert_eq!(c.incremental_reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cwd_comparison_is_nfc_on_both_sides() {
+        let nfd = "/Users/dev/caffe\u{301}";
+        let nfc_form = "/Users/dev/caff\u{e9}";
+        assert!(cwd_in_project(nfc_form, &[nfd.to_string()]));
+        assert!(cwd_in_project(nfd, &[nfc_form.to_string()]));
+        assert!(!cwd_in_project("/Users/dev/caffe", &[nfc_form.to_string()]));
+        // anche la cartella di sessione si cerca con il nome NFC
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(encode_project_dir(nfc_form))).unwrap();
+        assert_eq!(session_dirs_for(root.path(), &[nfd.to_string()]).len(), 1);
     }
 }
