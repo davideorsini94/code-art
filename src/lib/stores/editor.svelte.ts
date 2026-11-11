@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event'
 import { asFsError, fsRead, fsWrite } from '../ipc'
 import { projectStore } from './project.svelte'
 import type { FileContent, FsChanged } from '../types'
+import { isBinaryViewer, viewerFor, type MarkdownMode, type Viewer } from '../viewers'
 
 export type DiskAction = 'reload' | 'prompt' | 'none'
 
@@ -37,6 +38,7 @@ export type Tab = {
   error: 'too_large' | 'not_text' | 'forbidden' | 'io' | null
   prompt: boolean // "Cambiato su disco" in attesa di scelta
   diff: { before: string; after: string } | null
+  viewer: Viewer
 }
 
 function baseName(p: string) {
@@ -48,11 +50,22 @@ class EditorStore {
   tabs = $state<Tab[]>([])
   active = $state<string | null>(null)
   split = $state(false)
+  /** Modo di visualizzazione dei file markdown, ricordato per file finché l'app resta aperta. */
+  private modes = $state<Record<string, MarkdownMode>>({})
+  private reloadTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private watching = false
   private bindings = new Map<number, Binding>()
 
   get activeTab(): Tab | undefined {
     return this.tabs.find((t) => t.path === this.active)
+  }
+
+  modeOf(path: string): MarkdownMode {
+    return this.modes[path] ?? 'preview'
+  }
+
+  setMode(path: string, mode: MarkdownMode) {
+    this.modes[path] = mode
   }
 
   isDirty(t: Tab) {
@@ -74,16 +87,24 @@ class EditorStore {
   }
 
   private blank(path: string): Tab {
-    return { id: nextId++, path, name: baseName(path), baseText: '', rev: 0, dirty: false, mtimeMs: null, error: null, prompt: false, diff: null }
+    return { id: nextId++, path, name: baseName(path), baseText: '', rev: 0, dirty: false, mtimeMs: null, error: null, prompt: false, diff: null, viewer: viewerFor(baseName(path)) }
   }
 
-  async open(path: string) {
+  /** `asText`: apre come testo (es. un SVG da modificare) anche se il tipo avrebbe un'anteprima. */
+  async open(path: string, asText = false) {
     const existing = this.find(path)
-    if (existing && !existing.diff) {
+    if (existing && !existing.diff && !(asText && existing.viewer !== 'text')) {
       this.active = path
       return
     }
     const tab = this.blank(path)
+    if (asText) tab.viewer = 'text'
+    // immagini, PDF, audio/video e binari: i byte li legge il visualizzatore (fs_read_bytes), niente testo
+    if (isBinaryViewer(tab.viewer)) {
+      this.tabs = [...this.tabs.filter((t) => t.path !== path), tab]
+      this.active = path
+      return
+    }
     try {
       const c = await fsRead(path)
       tab.baseText = c.text
@@ -105,7 +126,7 @@ class EditorStore {
   /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". */
   async save(path: string) {
     const t = this.find(path)
-    if (!t || t.diff || t.error || projectStore.untrusted.length > 0) return // sola lettura
+    if (!t || t.diff || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
     try {
@@ -123,6 +144,8 @@ class EditorStore {
     const i = this.tabs.findIndex((t) => t.path === path)
     if (i < 0) return
     this.tabs = this.tabs.filter((t) => t.path !== path)
+    clearTimeout(this.reloadTimers.get(path))
+    this.reloadTimers.delete(path)
     if (this.active === path) this.active = this.tabs[Math.min(i, this.tabs.length - 1)]?.path ?? null
   }
 
@@ -142,7 +165,7 @@ class EditorStore {
   /** Scarta le modifiche locali e ricarica da disco. */
   async reload(path: string) {
     const t = this.find(path)
-    if (!t) return
+    if (!t || isBinaryViewer(t.viewer)) return
     try {
       const c = await fsRead(path)
       t.baseText = c.text
@@ -172,7 +195,12 @@ class EditorStore {
   async applyChanged(paths: string[]) {
     const set = new Set(paths)
     for (const t of this.tabs) {
-      if (t.diff || t.error || !set.has(t.path)) continue
+      if (t.diff || !set.has(t.path)) continue
+      if (isBinaryViewer(t.viewer)) {
+        this.scheduleViewerReload(t.path)
+        continue
+      }
+      if (t.error) continue
       let disk: FileContent
       try {
         disk = await fsRead(t.path)
@@ -190,6 +218,19 @@ class EditorStore {
         t.mtimeMs = disk.mtimeMs
       }
     }
+  }
+
+  /** Anteprime di byte: a ogni cambiamento su disco il visualizzatore rilegge (con attesa, per non rileggere a raffica). */
+  private scheduleViewerReload(path: string) {
+    clearTimeout(this.reloadTimers.get(path))
+    this.reloadTimers.set(
+      path,
+      setTimeout(() => {
+        this.reloadTimers.delete(path)
+        const t = this.find(path)
+        if (t) t.rev++
+      }, 250),
+    )
   }
 
   /** Ascolta `fs:changed` (una sola volta per finestra). */

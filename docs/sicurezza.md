@@ -26,6 +26,16 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   link `http(s)` con `rel="noopener noreferrer"`, intercettati (`src/lib/conv/links.ts`) e aperti nel browser
   di sistema. `src/lib/html-sites.test.ts` fallisce se compare un `{@html}` non sanificato o un
   `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`.
+- **Anteprime di file** (markdown, immagini, PDF, audio/video; `src/lib/viewers.ts`): il contenuto arriva solo
+  da `fs_read_bytes` (confinato, ≤ 50 MB) e diventa un URL `blob:` con tipo MIME da tabella fissa per
+  estensione (mai sniffing, mai il nome del file in HTML). Le immagini (anche SVG) sono mostrate con `<img>`:
+  gli script in un SVG non vengono eseguiti. Il PDF è reso da `pdfjs-dist` (caricato al primo uso, worker
+  locale) su `<canvas>`, con `isEvalSupported: false`, senza scripting, senza annotazioni/link e senza
+  richieste di rete (`disableAutoFetch`, `disableStream`, niente `cMapUrl`/font esterni). Il markdown passa
+  solo da `renderMarkdown`; con un risolutore di immagini opzionale (solo percorsi relativi al file, niente
+  schema, `//`, percorso assoluto o `..` che esce dal progetto) le immagini locali diventano `<img src="blob:…">`
+  (DOMPurify ammette `<img>` con solo `src` `blob:`, `alt`, `title`, `width`, `height`); le immagini remote o
+  `data:` restano scartate. La conversazione chiama `renderMarkdown` senza risolutore: immagini sempre scartate.
 - **Confinamento dei file**: i comandi `fs_*` e `pty_spawn` accettano solo percorsi assoluti dentro le
   cartelle del progetto della finestra chiamante (`fs_tree::ensure_inside`: canonicalizzazione, `..`,
   link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`
@@ -104,6 +114,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente | finestra | F |
 | `fs_trash` | `path` | `ensure_inside`; progetto fidato; Cestino, non cancellazione | finestra | F |
 | `fs_read` | `path` | `ensure_inside`; ≤ 5 MB, solo UTF-8 | finestra | F |
+| `fs_read_bytes` | `path` | `ensure_inside` (stesso confinamento di `fs_read`, link simbolici compresi); solo file regolari; ≤ 50 MB (`too_large`); lettura, quindi ammessa anche in progetti non fidati; risposta binaria dell'IPC | finestra | F (lettura) |
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
@@ -146,6 +157,9 @@ Rilassamenti e perché:
   transizioni di Svelte. Gli script restano solo `'self'` (Tauri aggiunge da sé gli hash dei propri script).
 - `img-src data: blob:`: le icone di Monaco sono `data:` nel suo CSS; le anteprime delle immagini incollate
   nel compositore sono URL `blob:`. Nessuna origine remota: il markdown non carica immagini.
+- `media-src 'self' blob:`: l'anteprima di audio e video usa `<audio>`/`<video>` con un URL `blob:` creato dai
+  byte letti con `fs_read_bytes` (confinati nel progetto, tipo MIME da una tabella fissa per estensione).
+  Nessuna origine remota: `blob:` può contenere solo ciò che la pagina stessa ha costruito.
 - `worker-src 'self' blob:`: i worker di Monaco (`?worker` di Vite, file in `assets/`); `blob:` per il
   meccanismo di riserva di Monaco.
 - `connect-src ipc: http://ipc.localhost`: solo il canale IPC di Tauri.

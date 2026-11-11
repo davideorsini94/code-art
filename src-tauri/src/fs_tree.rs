@@ -11,6 +11,8 @@ use std::time::{Duration, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
+/// Tetto per `fs_read_bytes` (anteprime di immagini, PDF, audio e video).
+pub const MAX_BYTES_READ: u64 = 50 * 1024 * 1024;
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -134,6 +136,29 @@ pub fn read(path: &Path) -> Result<FileContent, FsError> {
     let bytes = std::fs::read(path)?;
     let text = String::from_utf8(bytes).map_err(|_| FsError::new("not_text", "il file non è testo UTF-8"))?;
     Ok(FileContent { text, mtime_ms: mtime_ms(&meta) })
+}
+
+/// Legge i byte di un file regolare, al massimo `MAX_BYTES_READ` (anche se il file cresce durante la lettura).
+pub fn read_bytes(path: &Path) -> Result<Vec<u8>, FsError> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(FsError::new("io", "non è un file"));
+    }
+    if meta.len() > MAX_BYTES_READ {
+        return Err(FsError::new("too_large", "file oltre 50 MB"));
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize);
+    std::fs::File::open(path)?.take(MAX_BYTES_READ + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_BYTES_READ {
+        return Err(FsError::new("too_large", "file oltre 50 MB"));
+    }
+    Ok(buf)
+}
+
+/// Come `read_bytes`, ma solo dentro le radici date (stesso confinamento di `fs_read`).
+pub fn read_bytes_confined(roots: &[PathBuf], path: &Path) -> Result<Vec<u8>, FsError> {
+    read_bytes(&ensure_inside(roots, path)?)
 }
 
 /// Scrive solo se il file non è cambiato su disco rispetto a `expected` (se dato).
@@ -377,6 +402,15 @@ pub async fn fs_read(window: WebviewWindow, store: State<'_, Store>, path: Strin
     read(&checked(&window, &store, &path)?)
 }
 
+/// Byte grezzi di un file del progetto (anteprime). Lettura: ammessa anche nei progetti non fidati.
+/// Risposta binaria dell'IPC, non un array JSON; lettura fuori dal thread principale.
+#[tauri::command]
+pub async fn fs_read_bytes(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<tauri::ipc::Response, FsError> {
+    let path = checked(&window, &store, &path)?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || read_bytes(&path)).await.map_err(|e| FsError::new("io", e.to_string()))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 pub async fn fs_write(
     window: WebviewWindow,
@@ -554,6 +588,22 @@ mod tests {
         let f = d.path().join("big.txt");
         std::fs::write(&f, vec![b'a'; (MAX_READ_BYTES + 1) as usize]).unwrap();
         assert_eq!(read(&f).unwrap_err().code, "too_large");
+    }
+
+    #[test]
+    fn read_bytes_is_confined_and_capped() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        std::fs::write(r[0].join("a.bin"), [0xff, 0x00, 0x80]).unwrap();
+        assert_eq!(read_bytes_confined(&r, &r[0].join("a.bin")).unwrap(), vec![0xff, 0x00, 0x80]);
+        std::fs::write(d.path().join("out.bin"), [1]).unwrap();
+        assert_eq!(read_bytes_confined(&r, &d.path().join("out.bin")).unwrap_err().code, "forbidden");
+        std::os::unix::fs::symlink(d.path().join("out.bin"), r[0].join("link.bin")).unwrap();
+        assert_eq!(read_bytes_confined(&r, &r[0].join("link.bin")).unwrap_err().code, "forbidden");
+        let big = std::fs::File::create(r[0].join("big.bin")).unwrap();
+        big.set_len(MAX_BYTES_READ + 1).unwrap();
+        assert_eq!(read_bytes_confined(&r, &r[0].join("big.bin")).unwrap_err().code, "too_large");
+        assert_eq!(read_bytes_confined(&r, &r[0]).unwrap_err().code, "io");
     }
 
     #[test]

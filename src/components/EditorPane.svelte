@@ -2,6 +2,9 @@
   import { onMount } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
+  import { iconFor } from '../lib/fileicons'
+  import { isBinaryViewer, type MarkdownMode } from '../lib/viewers'
+  import FileIcon from './FileIcon.svelte'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -23,13 +26,53 @@
   const active = $derived(editor.activeTab)
   // cartella non fidata: editor in sola lettura, niente salvataggio (il core rifiuta comunque)
   const readOnly = $derived(projectStore.untrusted.length > 0)
-  const showCode = $derived(!!active && !active.diff && !active.error)
+  const isTextTab = (t: Tab) => !t.diff && (t.viewer === 'text' || t.viewer === 'markdown') && !t.error
+  // markdown: Anteprima (predefinita), Modifica o Affiancate; ricordato per file
+  const mdActive = $derived(active && active.viewer === 'markdown' && !active.error && !active.diff ? active : undefined)
+  const mdMode = $derived<MarkdownMode>(mdActive ? editor.modeOf(mdActive.path) : 'edit')
+  const showCode = $derived(!!active && isTextTab(active) && (!mdActive || mdMode !== 'preview'))
+  const showPreview = $derived(!!mdActive && mdMode !== 'edit')
+  const showBinary = $derived(!!active && !active.diff && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
+  const showViewer = $derived(!!active && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
+  const MODES: [MarkdownMode, string][] = [['preview', 'Anteprima'], ['edit', 'Modifica'], ['split', 'Affiancate']]
 
   onMount(() => editor.watch())
 
-  // Monaco si carica solo quando si apre il primo file
+  // testo dell'anteprima markdown: quello corrente dell'editor (modifiche non salvate comprese), con 150 ms di attesa
+  let mdText = $state('')
+  let modelTick = $state(0)
   $effect(() => {
-    if (editor.tabs.length > 0 && !monaco) {
+    const t = mdActive
+    void modelTick
+    if (!t || mdMode === 'edit') return
+    const entry = models.get(t.id)
+    if (!entry) {
+      mdText = t.baseText
+      return
+    }
+    mdText = entry.model.getValue()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const sub = entry.model.onDidChangeContent(() => {
+      clearTimeout(timer)
+      timer = setTimeout(() => (mdText = entry.model.getValue()), 150)
+    })
+    return () => {
+      clearTimeout(timer)
+      sub.dispose()
+    }
+  })
+
+  // ⌘S con la sola anteprima in vista (l'editor non ha il focus): salva comunque
+  function onWindowKey(e: KeyboardEvent) {
+    if (e.metaKey && e.key === 's' && mdActive && mdMode === 'preview') {
+      e.preventDefault()
+      void editor.save(mdActive.path)
+    }
+  }
+
+  // Monaco si carica solo quando si apre il primo file di testo
+  $effect(() => {
+    if (editor.tabs.some((t) => t.diff || isTextTab(t)) && !monaco) {
       void import('../lib/monaco').then((m) => (monaco = m.monaco))
     }
   })
@@ -116,7 +159,8 @@
   $effect(() => {
     const m = monaco
     if (!m || !main) return
-    const live = new Set(editor.tabs.filter((t) => !t.diff && !t.error).map((t) => t.id))
+    const modelsBefore = models.size
+    const live = new Set(editor.tabs.filter(isTextTab).map((t) => t.id))
     for (const [id, e] of models) {
       if (!live.has(id)) {
         e.model.dispose()
@@ -132,7 +176,7 @@
       }
     }
     for (const t of editor.tabs) {
-      if (t.error) continue
+      if (t.error || (!t.diff && !isTextTab(t))) continue
       if (t.diff) {
         if (!diffModels.has(t.id)) {
           diffModels.set(t.id, [
@@ -144,8 +188,9 @@
       }
       ensureModel(m, t)
     }
+    if (models.size !== modelsBefore) modelTick++
     const a = editor.activeTab
-    if (a && !a.diff && !a.error) {
+    if (a && isTextTab(a)) {
       const model = models.get(a.id)?.model
       if (model) {
         if (main.getModel() !== model) main.setModel(model)
@@ -158,11 +203,14 @@
   })
 </script>
 
+<svelte:window onkeydown={onWindowKey} />
+
 <div class="pane">
   <div class="tabs" role="tablist">
     {#each editor.tabs as t (t.id)}
       <div class="tab" class:on={t.path === editor.active} role="tab" aria-selected={t.path === editor.active} tabindex="0"
         onclick={() => (editor.active = t.path)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.path)}>
+        {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
         {#if editor.isDirty(t)}<span class="dot" title="Modifiche non salvate"></span>{/if}
         <button class="x" aria-label="Chiudi {t.name}" onclick={(e) => { e.stopPropagation(); editor.close(t.path) }}>×</button>
@@ -173,6 +221,14 @@
       <button class="tool" class:on={editor.split} onclick={() => (editor.split = !editor.split)} title="Vista divisa">Dividi</button>
     {/if}
   </div>
+
+  {#if mdActive}
+    <div class="modebar" role="radiogroup" aria-label="Modo di visualizzazione">
+      {#each MODES as [m, label] (m)}
+        <button class="seg" class:on={mdMode === m} role="radio" aria-checked={mdMode === m} onclick={() => editor.setMode(mdActive.path, m)}>{label}</button>
+      {/each}
+    </div>
+  {/if}
 
   {#if active?.prompt}
     <div class="bar" role="alert">
@@ -185,17 +241,45 @@
   <div class="body">
     {#if editor.tabs.length === 0}
       <p class="empty">Apri un file dall'albero</p>
-    {:else if active?.error === 'too_large' || active?.error === 'not_text'}
-      <p class="empty">File non modificabile qui</p>
+    {:else if showBinary && active}
+      {#await import('./BinaryPanel.svelte') then m}
+        {#key active.id}<m.default path={active.path} name={active.name} />{/key}
+      {/await}
     {:else if active?.error === 'forbidden'}
       <p class="empty">Percorso fuori dal progetto</p>
     {:else if active?.error}
       <p class="empty">Impossibile aprire il file</p>
     {/if}
-    <div class="editors" class:hidden={!showCode}>
+    <div class="editors" class:hidden={!showCode} data-testid="editors">
       <div class="ed" bind:this={mainEl}></div>
-      <div class="ed" class:hidden={!editor.split} bind:this={splitEl}></div>
+      <div class="ed" class:hidden={!editor.split || mdMode === 'split'} bind:this={splitEl}></div>
     </div>
+    {#if showPreview && mdActive}
+      <div class="side" class:full={mdMode === 'preview'}>
+        {#await import('./MarkdownPreview.svelte') then m}
+          <m.default text={mdText} path={mdActive.path} />
+        {/await}
+      </div>
+    {/if}
+    {#if showViewer && active}
+      <div class="side full">
+        {#key active.id}
+          {#if active.viewer === 'image'}
+            {#await import('./ImageViewer.svelte') then m}
+              <m.default path={active.path} name={active.name} rev={active.rev} onAsText={() => void editor.open(active.path, true)} />
+            {/await}
+          {:else if active.viewer === 'pdf'}
+            {#await import('./PdfViewer.svelte') then m}
+              <m.default path={active.path} rev={active.rev} />
+            {/await}
+          {:else if active.viewer === 'media'}
+            {#await import('./MediaViewer.svelte') then m}
+              <m.default path={active.path} name={active.name} rev={active.rev} />
+            {/await}
+          {/if}
+        {/key}
+      </div>
+    {/if}
     <div class="ed diff" class:hidden={!active?.diff} bind:this={diffEl}></div>
   </div>
 </div>
@@ -220,8 +304,14 @@
     background: rgba(255, 180, 84, 0.14); color: var(--wait);
   }
   .bar button { background: var(--glass2); border: 1px solid var(--edge-soft); color: var(--txt); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: default; }
-  .body { position: relative; flex: 1; min-height: 0; }
-  .editors { display: flex; height: 100%; }
+  .body { position: relative; flex: 1; min-height: 0; display: flex; }
+  .editors { display: flex; height: 100%; flex: 1; min-width: 0; }
+  .side { flex: 1; min-width: 0; height: 100%; border-left: 1px solid var(--edge-soft); }
+  .side.full { border-left: 0; }
+  .ticon { display: inline-flex; }
+  .modebar { display: inline-flex; align-self: flex-start; margin: 6px 10px; padding: 2px; gap: 2px; background: var(--glass); border: 1px solid var(--edge-soft); border-radius: 8px; flex: none; }
+  .seg { background: none; border: 0; color: var(--dim); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: default; }
+  .seg.on { background: var(--glass2); color: var(--txt); }
   .ed { flex: 1; min-width: 0; height: 100%; }
   .diff { position: absolute; inset: 0; }
   .editors .ed + .ed { border-left: 1px solid var(--edge-soft); }

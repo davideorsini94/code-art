@@ -94,6 +94,7 @@ pub fn run() {
             fs_tree::fs_rename,
             fs_tree::fs_trash,
             fs_tree::fs_read,
+            fs_tree::fs_read_bytes,
             fs_tree::fs_write,
             fs_tree::fs_all_files,
             pty::pty_spawn,

@@ -44,3 +44,38 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('![x](https://example.com/a.png)')).not.toContain('<img')
   })
 })
+
+describe('renderMarkdown with an image resolver', () => {
+  const resolveImage = (href: string) => (href === 'a.png' ? 'blob:codeart/1' : null)
+  it('shows resolved images as <img> with only src, alt and title', () => {
+    const out = renderMarkdown('![logo](a.png "Titolo")', { resolveImage })
+    expect(out).toContain('<img')
+    expect(out).toContain('src="blob:codeart/1"')
+    expect(out).toContain('alt="logo"')
+    expect(out).toContain('title="Titolo"')
+    expect(out).not.toMatch(/onerror|onload|style=/)
+  })
+  it('drops images the resolver rejects, keeping the alt text', () => {
+    for (const href of ['https://example.com/a.png', 'data:image/png;base64,AAAA', '//x/a.png', 'b.png']) {
+      const out = renderMarkdown(`![alt](${href})`, { resolveImage })
+      expect(out).not.toContain('<img')
+      expect(out).toContain('alt')
+    }
+  })
+  it('never lets a non-blob src through, even if the resolver returns one', () => {
+    for (const bad of ['https://evil.example/x.png', 'javascript:alert(1)', 'data:image/svg+xml,<svg/>', 'file:///etc/passwd']) {
+      expect(renderMarkdown('![x](a.png)', { resolveImage: () => bad })).not.toContain('<img')
+    }
+  })
+  it('stays sanitised: raw img, script and javascript links', () => {
+    const out = renderMarkdown('<img src=x onerror=alert(1)> <script>alert(1)</script> [a](javascript:alert(1)) [b](blob:codeart/1)', { resolveImage })
+    expect(out).not.toMatch(/<img|onerror|<script|javascript:|href="blob:/)
+  })
+  it('renders task lists and tables', () => {
+    const out = renderMarkdown('- [x] fatto\n- [ ] da fare\n\n| a | b |\n|---|---|\n| 1 | 2 |')
+    expect(out).toContain('☑')
+    expect(out).toContain('☐')
+    expect(out).toContain('<table>')
+    expect(out).not.toContain('<input')
+  })
+})
