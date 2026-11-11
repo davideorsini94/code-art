@@ -28,3 +28,9 @@ export function asFsError(e: unknown): FsError {
   if (e && typeof e === 'object' && 'code' in e) return e as FsError
   return { code: 'io', message: String(e) }
 }
+
+// ---- terminale ----
+export const ptySpawn = (cwd: string, cols: number, rows: number) => invoke<number>('pty_spawn', { cwd, cols, rows })
+export const ptyWrite = (id: number, data: string) => invoke<void>('pty_write', { id, data })
+export const ptyResize = (id: number, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
+export const ptyKill = (id: number) => invoke<void>('pty_kill', { id })

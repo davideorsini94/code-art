@@ -4,6 +4,7 @@
   import MissingFolder from './components/MissingFolder.svelte'
   import FileTree from './components/FileTree.svelte'
   import EditorPane from './components/EditorPane.svelte'
+  import TerminalPane from './components/TerminalPane.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
@@ -36,6 +37,38 @@
   const template = $derived(
     ['46px', ...cols.flatMap(({ col }) => (collapsed.has(col) ? ['0px', '0px'] : [`${widths[col]}px`, '6px'])), 'minmax(240px, 1fr)'].join(' '),
   )
+
+  let termVisible = $state(false)
+  let termHeight = $state(240)
+  const MIN_TERM = 100
+
+  // ⌃` mostra/nasconde il terminale (in fase di cattura: vale anche con il focus dentro xterm)
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
+        e.preventDefault()
+        e.stopPropagation()
+        termVisible = !termVisible
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
+
+  function startTermResize(e: PointerEvent) {
+    const startY = e.clientY
+    const startH = termHeight
+    const max = () => Math.max(MIN_TERM, window.innerHeight - 200)
+    const move = (ev: PointerEvent) => {
+      termHeight = Math.min(max(), Math.max(MIN_TERM, startH - (ev.clientY - startY)))
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
   function startResize(e: PointerEvent, col: ResizableCol) {
     const startX = e.clientX
@@ -75,7 +108,12 @@
         <span></span><span></span>
       {/if}
     {/each}
-    <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor"><EditorPane /></section>
+    <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor">
+      <div class="editor-area"><EditorPane /></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="vhandle" class:hidden={!termVisible} onpointerdown={startTermResize}></div>
+      <div class="term-area" class:hidden={!termVisible} style:height="{termHeight}px"><TerminalPane visible={termVisible} /></div>
+    </section>
   </main>
   {/if}
   <MissingFolder />
@@ -85,7 +123,12 @@
   .app { display: flex; flex-direction: column; height: 100%; }
   .body { flex: 1; min-height: 0; display: grid; padding: 10px; }
   .col { min-width: 0; overflow: hidden; padding: 12px; }
-  .col.editor { padding: 0; }
+  .col.editor { padding: 0; display: flex; flex-direction: column; }
+  .editor-area { flex: 1; min-height: 0; }
+  .term-area { flex: none; min-height: 0; }
+  .vhandle { flex: none; height: 5px; margin-top: -2px; cursor: row-resize; position: relative; z-index: 1; }
+  .vhandle:hover { background: var(--edge-soft); }
+  .hidden { display: none; }
   .slot.rail { display: contents; }
   .welcome { flex: 1; display: grid; place-items: center; }
   .welcome-box { padding: 32px 48px; display: flex; flex-direction: column; align-items: center; gap: 16px; }

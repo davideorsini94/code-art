@@ -179,6 +179,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
         crate::fs_tree::unwatch_project(app, id);
     }
+    app.state::<crate::pty::Ptys>().kill_owner(label);
     let quitting = app.state::<Quitting>().0.load(Ordering::SeqCst);
     let _ = handle_window_closed(&app.state::<Store>(), label, quitting);
 }

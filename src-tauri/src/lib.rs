@@ -1,5 +1,6 @@
 mod fs_tree;
 mod projects;
+mod pty;
 mod store;
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -10,6 +11,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
+        .manage(pty::Ptys::default())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
             app.manage(store::Store::open(&dir.join("codeart.db"))?);
@@ -40,6 +43,10 @@ pub fn run() {
             fs_tree::fs_trash,
             fs_tree::fs_read,
             fs_tree::fs_write,
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

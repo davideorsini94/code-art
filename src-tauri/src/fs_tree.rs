@@ -253,7 +253,7 @@ pub fn ensure_inside(roots: &[PathBuf], path: &Path) -> Result<PathBuf, FsError>
 }
 
 /// Cartelle del progetto della finestra chiamante (dall'etichetta, mai da un argomento).
-fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<PathBuf>, FsError> {
+pub(crate) fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<PathBuf>, FsError> {
     let id = window
         .label()
         .strip_prefix(crate::projects::PROJECT_PREFIX)
