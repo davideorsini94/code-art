@@ -346,7 +346,6 @@ pub fn search_cancel(window: WebviewWindow, searches: State<'_, Searches>, id: u
     Ok(())
 }
 
-
 // ---------- sostituzione ----------
 
 const MAX_REPLACE_PATHS: usize = 10_000;

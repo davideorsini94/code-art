@@ -133,6 +133,7 @@ class EditorStore {
 
   /** Apre il file e porta il cursore su riga e colonna (1-based, come Monaco). I markdown si aprono in "Modifica". */
   async openAt(path: string, line: number, col: number) {
+    this.reveal = null
     if (viewerFor(baseName(path)) === 'markdown') this.setMode(path, 'edit')
     await this.open(path)
     const t = this.find(path)

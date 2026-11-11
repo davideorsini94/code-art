@@ -181,19 +181,41 @@ pub fn stat_confined(roots: &[PathBuf], path: &Path) -> Result<FileStat, FsError
     Ok(FileStat { size: meta.len(), is_file: meta.is_file() })
 }
 
-/// Scrive solo se il file non è cambiato su disco rispetto a `expected` (se dato).
+/// Scrive in modo atomico: testo in un file temporaneo nella stessa cartella (permessi del file originale, fsync),
+/// poi `rename` sopra il destinazione; un'interruzione non lascia mai un file troncato. Se `expected` è dato, il
+/// controllo dell'mtime avviene subito prima del `rename` (il tratto scoperto è quello tra controllo e rename).
 pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsError> {
-    if let Some(exp) = expected {
-        match std::fs::metadata(path) {
-            Ok(meta) if mtime_ms(&meta) == exp => {}
-            Ok(_) => return Err(FsError::new("conflict", "il file è cambiato su disco")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)"));
-            }
-            Err(e) => return Err(e.into()),
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| FsError::new("io", "percorso senza cartella"))?;
+    let name = path.file_name().ok_or_else(|| FsError::new("io", "percorso senza nome"))?;
+    let tmp = dir.join(format!(".{}.codeart-{}-{}.tmp", name.to_string_lossy(), std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let result = (|| -> Result<(), FsError> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(meta.permissions())?;
         }
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        if let Some(exp) = expected {
+            match std::fs::metadata(path) {
+                Ok(meta) if mtime_ms(&meta) == exp => {}
+                Ok(_) => return Err(FsError::new("conflict", "il file è cambiato su disco")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)"));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::write(path, text)?;
     Ok(mtime_ms(&std::fs::metadata(path)?))
 }
 
@@ -582,6 +604,34 @@ mod tests {
         let new = write(&f, "due", Some(m)).unwrap();
         assert_eq!(read(&f).unwrap().mtime_ms, new);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+    }
+
+    #[test]
+    fn write_preserves_permissions_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("run.sh");
+        std::fs::write(&f, "uno").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o750)).unwrap();
+        write(&f, "due", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o750);
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("run.sh")]);
+    }
+
+    #[test]
+    fn write_error_keeps_original_and_removes_temp_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.txt");
+        std::fs::write(&f, "originale").unwrap();
+        let m = mtime_ms(&std::fs::metadata(&f).unwrap());
+        assert_eq!(write(&f, "nuovo", Some(m - 5000)).unwrap_err().code, "conflict");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "originale");
+        // cartella inesistente: errore di I/O, nessun residuo
+        assert!(write(&d.path().join("no/b.txt"), "x", None).is_err());
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("a.txt")]);
     }
 
     #[test]

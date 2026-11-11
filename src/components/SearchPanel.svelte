@@ -4,7 +4,7 @@
   import { tooltip } from '../lib/tooltip'
   import { iconFor } from '../lib/fileicons'
   import { relativeToFolders } from '../lib/conv/paths'
-  import { search } from '../lib/stores/search.svelte'
+  import { search, HITS_STEP } from '../lib/stores/search.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import type { SearchHit } from '../lib/types'
@@ -18,7 +18,6 @@
     const id = projectStore.project?.id
     if (id) void search.bind(id)
     input?.focus()
-    return () => search.unbind()
   })
 
   // ⌘⇧F con la vista già aperta: il focus torna sul campo
@@ -58,7 +57,7 @@
   </div>
   {#if trusted}
     <div class="field">
-      <input type="text" placeholder="Sostituisci" aria-label="Sostituisci con" bind:value={search.replacement} />
+      <input type="text" placeholder="Sostituisci" aria-label="Sostituisci con" use:tooltip={'Con .* attivo valgono $1, $2…; altrimenti il testo è letterale'} bind:value={search.replacement} />
       <button class="tog" aria-label="Sostituisci tutto" disabled={search.groups.length === 0 || search.replacing || search.status === 'running'}
         use:tooltip={'Sostituisci in tutti i file dei risultati (chiede conferma)'} onclick={() => void search.replaceAll()}>Tutto</button>
     </div>
@@ -98,15 +97,19 @@
           <span class="count">{g.hits.length}</span>
         </button>
         {#if !search.collapsed[g.path]}
+          {@const vis = search.visible(g)}
           <ul class="hits">
-            {#each g.hits as h, i (i)}
+            {#each vis.hits as h, i (i)}
               {@const p = parts(h)}
               <li>
-                <button class="hit" use:tooltip={`Riga ${h.line}`} onclick={() => void editor.openAt(h.path, h.line, h.col)}>
+                <button class="hit" data-no-tooltip="il numero di riga e il testo sono già visibili" onclick={() => void editor.openAt(h.path, h.line, h.col)}>
                   <span class="ln">{h.line}</span><span class="pv">{p.before}<mark>{p.match}</mark>{p.after}</span>
                 </button>
               </li>
             {/each}
+            {#if vis.hidden > 0}
+              <li><button class="hit more-hits" use:tooltip={'Mostra altre corrispondenze di questo file'} onclick={() => search.showMore(g.path)}>Mostra altri {Math.min(HITS_STEP, vis.hidden)}</button></li>
+            {/if}
           </ul>
         {/if}
       </li>
@@ -141,6 +144,7 @@
   .count { padding: 0 6px; border-radius: 999px; background: var(--glass2); color: var(--dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
   .ln { min-width: 24px; color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; }
   .pv { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--dim); }
+  .more-hits { color: var(--accent); }
   mark { background: var(--wait-strong); color: var(--txt); border-radius: 2px; }
   @media (prefers-reduced-motion: no-preference) { .field, .tog { transition: border-color var(--dur), background var(--dur); } }
 </style>

@@ -125,3 +125,44 @@ describe('search store', () => {
     expect(searchStart).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('search store robustness', () => {
+  it('overlapping runs: the newer run keeps its events and finishes', async () => {
+    const s = await bound()
+    let release1!: (id: number) => void
+    searchStart.mockImplementationOnce(() => new Promise<number>((r) => (release1 = r)))
+    s.setText('a', true)
+    s.setText('ab', true)
+    await vi.advanceTimersByTimeAsync(0) // la seconda risponde con id 1 (default), la prima è ancora in attesa
+    handlers['search:hits']({ payload: { id: 1, hits: [hit('/p/new')] } })
+    release1(9) // la prima risponde dopo: non deve rubare lo stato
+    await vi.advanceTimersByTimeAsync(0)
+    handlers['search:done']({ payload: { id: 1, summary: { files: 1, hits: 1, truncated: false, cancelled: false, error: null } } })
+    expect(s.status).toBe('done')
+    expect(s.groups.map((g) => g.path)).toEqual(['/p/new'])
+  })
+
+  it('listeners survive hiding the view: bind is idempotent and the debounce still fires', async () => {
+    const s = await bound()
+    await s.bind('p1')
+    s.setText('a')
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+    expect(searchStart).toHaveBeenCalledTimes(1)
+  })
+
+  it('auto-collapses groups past 1 000 hits and caps visible rows per file', async () => {
+    const s = await bound()
+    s.setText('a', true)
+    await vi.advanceTimersByTimeAsync(0)
+    handlers['search:hits']({ payload: { id: 1, hits: Array.from({ length: 150 }, (_, i) => hit('/p/a', i + 1)) } })
+    const g = s.groups[0]
+    expect(s.visible(g)).toMatchObject({ hidden: 50 })
+    expect(s.visible(g).hits).toHaveLength(100)
+    s.showMore('/p/a')
+    expect(s.visible(s.groups[0]).hidden).toBe(0)
+    expect(s.collapsed['/p/a']).toBeUndefined()
+    handlers['search:hits']({ payload: { id: 1, hits: Array.from({ length: 900 }, (_, i) => hit('/p/b', i + 1)) } })
+    handlers['search:hits']({ payload: { id: 1, hits: [hit('/p/c')] } })
+    expect(s.collapsed).toMatchObject({ '/p/a': true, '/p/b': true, '/p/c': true })
+  })
+})
