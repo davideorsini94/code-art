@@ -68,7 +68,3 @@ export function renderMarkdown(src: string, opts?: RenderOptions): string {
   return purify.sanitize(raw, CONFIG) as unknown as string
 }
 
-/** Vero se l'indirizzo si può aprire nel browser di sistema. */
-export function isSafeLink(href: string): boolean {
-  return /^https?:/i.test(href.trim())
-}
