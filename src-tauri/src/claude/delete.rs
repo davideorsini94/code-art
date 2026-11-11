@@ -42,7 +42,7 @@ pub struct SystemTrasher;
 
 impl Trasher for SystemTrasher {
     fn trash(&self, path: &Path) -> Result<()> {
-        super::trasher::move_to_trash(path)
+        crate::trasher::move_to_trash(path)
     }
 }
 

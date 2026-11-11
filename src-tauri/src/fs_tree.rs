@@ -125,7 +125,7 @@ pub fn rename(from: &Path, to: &Path) -> Result<(), FsError> {
 }
 
 pub fn trash_path(path: &Path) -> Result<(), FsError> {
-    trash::delete(path).map_err(|e| FsError::new("io", e.to_string()))
+    crate::trasher::move_to_trash(path).map_err(|e| FsError::new("io", e))
 }
 
 pub fn read(path: &Path) -> Result<FileContent, FsError> {

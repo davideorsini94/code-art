@@ -5,6 +5,7 @@ mod lifecycle;
 mod projects;
 mod pty;
 pub mod store;
+mod trasher;
 pub mod trust;
 
 use std::sync::Arc;
