@@ -28,6 +28,7 @@ export type ChatItem =
   | { kind: 'assistant'; id: string; text: string }
   | { kind: 'thinking'; id: string; text: string }
   | { kind: 'tool'; id: string; name: string; input: unknown; result: string | null; ok: boolean | null; parentId: string | null; filePath: string | null }
+  // solo lato interfaccia: lo crea il riduttore dagli eventi `ask` (la storia letta da disco non lo contiene)
   | { kind: 'ask'; id: string; requestId: string; askType: 'permission' | 'question' | 'plan'; prompt: string; options: string[]; questions: AskQuestion[]; answered: boolean }
   | { kind: 'raw'; id: string; label: string; json: string }
 export type Todo = { text: string; status: 'pending' | 'in_progress' | 'completed' }

@@ -8,8 +8,13 @@ pub mod store;
 mod trasher;
 pub mod trust;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{Manager, RunEvent, WindowEvent};
+
+/// Blocca un mutex anche se un altro thread è andato in panic tenendolo (lo stato resta usabile).
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

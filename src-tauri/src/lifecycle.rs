@@ -9,7 +9,8 @@ use crate::store::Store;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use crate::lock;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, Window};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
@@ -114,17 +115,6 @@ fn is_quit_answer(r: &MessageDialogResult) -> bool {
     matches!(r, MessageDialogResult::Custom(l) if l == BTN_QUIT)
 }
 
-fn status_of(s: &str) -> ConvStatus {
-    match s {
-        "working" => ConvStatus::Working,
-        "waiting" => ConvStatus::Waiting,
-        _ => ConvStatus::Idle,
-    }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 // ---------- stato ----------
 
@@ -159,7 +149,7 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     pub fn observe(&self, c: &Conversation) -> Observed {
-        let st = status_of(&c.status);
+        let st = ConvStatus::parse(&c.status);
         let old = lock(&self.seen).insert(c.session_id.clone(), (st, c.archived));
         if st != ConvStatus::Waiting {
             lock(&self.pending).remove(&c.session_id);
@@ -318,7 +308,7 @@ fn maybe_notify(app: &AppHandle, life: &Lifecycle, store: &Store, c: &Conversati
     if c.archived || quitting(app) {
         return;
     }
-    if !should_notify(prev, status_of(&c.status), window_focused(app, &c.project_id)) {
+    if !should_notify(prev, ConvStatus::parse(&c.status), window_focused(app, &c.project_id)) {
         return;
     }
     let Ok(Some(project)) = store.get_project(&c.project_id) else { return };
@@ -458,7 +448,7 @@ fn project_plan(app: &AppHandle, project_id: &str) -> ClosePlan {
         .map(|c| {
             let running = live.contains(&c.session_id);
             let has_ask = running && engine.has_open_ask(&c.session_id);
-            (c.session_id.clone(), status_of(&c.status), running, has_ask)
+            (c.session_id.clone(), ConvStatus::parse(&c.status), running, has_ask)
         })
         .collect();
     plan_window_close(&rows, dirty)
@@ -521,7 +511,7 @@ fn working_total(app: &AppHandle) -> usize {
         .live_ids()
         .iter()
         .filter(|id| {
-            engine.has_open_ask(id) || matches!(store.get_conversation(id), Ok(Some(c)) if status_of(&c.status) == ConvStatus::Working)
+            engine.has_open_ask(id) || matches!(store.get_conversation(id), Ok(Some(c)) if ConvStatus::parse(&c.status) == ConvStatus::Working)
         })
         .count()
 }

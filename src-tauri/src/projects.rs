@@ -277,6 +277,11 @@ pub(crate) fn window_project_id(window: &WebviewWindow) -> Result<String> {
     project_id_of_label(window.label()).map(String::from).ok_or_else(|| "questa finestra non è un progetto".into())
 }
 
+/// Progetto della finestra chiamante.
+pub(crate) fn window_project(window: &WebviewWindow, store: &Store) -> Result<Project> {
+    must_get(store, &window_project_id(window)?)
+}
+
 // ---------- menu ----------
 
 pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
@@ -352,7 +357,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
 
 #[tauri::command]
 pub fn project_current(window: WebviewWindow, store: State<Store>) -> Result<Project> {
-    must_get(&store, &window_project_id(&window)?)
+    window_project(&window, &store)
 }
 
 #[tauri::command]

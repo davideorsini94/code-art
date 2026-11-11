@@ -205,7 +205,7 @@ fn is_synthetic_text(t: &str) -> bool {
 
 /// Prompt scritto dalla persona (§11.3). `promptSource` è una lista di esclusione (solo `system`) e non la
 /// whitelist del documento (`sdk`/assente): i prompt di sessioni interattive potrebbero avere altri valori.
-///: `Some((testo, immagini))`.
+/// Restituisce `Some((testo, numero di immagini))`.
 fn human_prompt(v: &Value) -> Option<(String, usize)> {
     if v["type"] != "user"
         || v["isSidechain"] == true
@@ -945,13 +945,7 @@ pub fn unwatch_project(app: &AppHandle, project_id: &str) {
 
 // ---------- comandi ----------
 
-fn window_project(window: &WebviewWindow, store: &Store) -> Result<Project> {
-    let id = window
-        .label()
-        .strip_prefix(crate::projects::PROJECT_PREFIX)
-        .ok_or("questa finestra non è un progetto")?;
-    store.get_project(id)?.ok_or_else(|| format!("progetto {id} inesistente"))
-}
+use crate::projects::window_project;
 
 /// Lavoro su file e SQLite fuori dal thread principale (i comandi sincroni di Tauri girano lì).
 #[tauri::command]
@@ -1121,7 +1115,6 @@ mod tests {
                 ChatItem::Assistant { .. } => "assistant",
                 ChatItem::Thinking { .. } => "thinking",
                 ChatItem::Tool { .. } => "tool",
-                ChatItem::Ask { .. } => "ask",
                 ChatItem::Raw { .. } => "raw",
             })
             .collect();

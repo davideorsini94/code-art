@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
+use crate::lock;
+use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Tetto per `Unknown.json` negli eventi (le righe utente riemesse possono contenere immagini base64).
@@ -96,17 +97,6 @@ fn truncate_utf8(s: &mut String, max: usize) {
     s.truncate(end);
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-fn parse_status(s: &str) -> ConvStatus {
-    match s {
-        "working" => ConvStatus::Working,
-        "waiting" => ConvStatus::Waiting,
-        _ => ConvStatus::Idle,
-    }
-}
 
 /// Processo vivo di una conversazione.
 struct Conv {
@@ -607,7 +597,7 @@ impl Engine {
         match self.0.store.conversation_state(session_id).ok().flatten() {
             // `seen_turn` mai oltre `turn_count`: altrimenti i turni successivi finirebbero `idle` invece di `waiting`
             Some((status, turns, seen)) => ConvState {
-                status: parse_status(&status),
+                status: ConvStatus::parse(&status),
                 open_asks: 0,
                 turn_count: turns.max(0) as u32,
                 seen_turn: seen.unwrap_or(turns).clamp(0, turns.max(0)) as u32,

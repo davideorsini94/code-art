@@ -21,6 +21,15 @@ pub enum ConvStatus {
 }
 
 impl ConvStatus {
+    /// Stato letto da SQLite; un valore sconosciuto vale `Idle`.
+    pub fn parse(s: &str) -> ConvStatus {
+        match s {
+            "working" => ConvStatus::Working,
+            "waiting" => ConvStatus::Waiting,
+            _ => ConvStatus::Idle,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             ConvStatus::Working => "working",
@@ -72,18 +81,6 @@ pub enum ChatItem {
         ok: Option<bool>,
         parent_id: Option<String>,
         file_path: Option<String>,
-    },
-    /// Prodotto dal motore in streaming (task successivi); la lettura da disco non lo genera.
-    #[allow(dead_code)]
-    #[serde(rename_all = "camelCase")]
-    Ask {
-        id: String,
-        request_id: String,
-        /// 'permission' | 'question' | 'plan'
-        ask_type: String,
-        prompt: String,
-        options: Vec<String>,
-        answered: bool,
     },
     #[serde(rename_all = "camelCase")]
     Raw { id: String, label: String, json: String },

@@ -8,7 +8,8 @@ use crate::store::{Project, Result, Store};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, MutexGuard};
+use crate::lock;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RECENT_ITEMS: usize = 12;
@@ -24,9 +25,6 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Dopo un fallimento la stessa conversazione non viene riprovata subito (ogni sincronizzazione la rimetterebbe in coda).
 const RETRY_BACKOFF: Duration = Duration::from_secs(300);
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
-}
 
 // ---------- regole ----------
 
@@ -482,13 +480,7 @@ pub fn sync_and_enqueue(
 
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-fn window_project_id(window: &WebviewWindow) -> Result<String> {
-    window
-        .label()
-        .strip_prefix(crate::projects::PROJECT_PREFIX)
-        .map(String::from)
-        .ok_or_else(|| "questa finestra non è un progetto".into())
-}
+use crate::projects::window_project_id;
 
 #[tauri::command]
 pub async fn conv_rename(app: AppHandle, window: WebviewWindow, session_id: String, title: String) -> Result<()> {

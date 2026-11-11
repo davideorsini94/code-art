@@ -70,10 +70,7 @@ struct PromptState {
 #[derive(Default)]
 pub struct TrustPrompts(Mutex<HashMap<String, PromptState>>);
 
-fn window_project(window: &WebviewWindow, store: &Store) -> Result<Project> {
-    let id = crate::projects::window_project_id(window)?;
-    store.get_project(&id)?.ok_or_else(|| "progetto inesistente".into())
-}
+use crate::projects::window_project;
 
 // ---------- comandi ----------
 
