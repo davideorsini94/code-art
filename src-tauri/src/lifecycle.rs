@@ -51,6 +51,12 @@ pub fn should_notify(prev: ConvStatus, next: ConvStatus, window_focused: bool) -
     next == ConvStatus::Waiting && prev != ConvStatus::Waiting && !window_focused
 }
 
+/// "Lascia finire in sottofondo": il turno di un processo la cui finestra è chiusa è finito. Il processo si ferma,
+/// tranne se ha una richiesta aperta (permesso, domanda, piano): quella resta per quando il progetto si riapre.
+pub fn stop_after_background_turn(prev: ConvStatus, next: ConvStatus, window_open: bool, running: bool, has_ask: bool) -> bool {
+    prev == ConvStatus::Working && next != ConvStatus::Working && !window_open && running && !has_ask
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosePlan {
     /// Processi vivi senza turno in corso: si fermano comunque alla chiusura della finestra.
@@ -291,8 +297,23 @@ impl EventSink for LifecycleSink {
                 if !silenced {
                     maybe_notify(&app, &life, &store, &conv, prev);
                 }
+                stop_if_background_turn_ended(&app, &conv, prev);
             }
         });
+    }
+}
+
+/// Vedi `stop_after_background_turn`; la fermata è in sottofondo e silenziata (la notifica di fine turno è già partita).
+fn stop_if_background_turn_ended(app: &AppHandle, c: &Conversation, prev: ConvStatus) {
+    if quitting(app) {
+        return;
+    }
+    let Some(engine) = app.try_state::<Engine>() else { return };
+    let window_open = app.get_webview_window(&projects::window_label(&c.project_id)).is_some();
+    let running = engine.running(&c.project_id).contains(&c.session_id);
+    let has_ask = running && engine.has_open_ask(&c.session_id);
+    if stop_after_background_turn(prev, ConvStatus::parse(&c.status), window_open, running, has_ask) {
+        stop_in_background(app, vec![c.session_id.clone()]);
     }
 }
 
@@ -559,6 +580,18 @@ pub fn editor_set_dirty(window: tauri::WebviewWindow, life: tauri::State<Arc<Lif
 mod tests {
     use super::*;
     use ConvStatus::*;
+
+    #[test]
+    fn background_process_stops_when_its_turn_ends_with_the_window_closed() {
+        // (prev, next, finestra aperta, processo vivo, richiesta aperta)
+        assert!(stop_after_background_turn(Working, Waiting, false, true, false));
+        assert!(stop_after_background_turn(Working, Idle, false, true, false));
+        assert!(!stop_after_background_turn(Working, Waiting, false, true, true), "una domanda aperta resta");
+        assert!(!stop_after_background_turn(Working, Waiting, true, true, false), "finestra aperta");
+        assert!(!stop_after_background_turn(Working, Waiting, false, false, false), "nessun processo");
+        assert!(!stop_after_background_turn(Waiting, Idle, false, true, false), "nessun turno finito");
+        assert!(!stop_after_background_turn(Idle, Working, false, true, false), "turno appena iniziato");
+    }
 
     #[test]
     fn close_dialog_answers_map_only_known_labels() {
