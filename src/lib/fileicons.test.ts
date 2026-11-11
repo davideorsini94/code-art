@@ -40,8 +40,8 @@ describe('iconFor file', () => {
     expect(id('constructor')).toBe('file')
     expect(id('x.constructor')).toBe('file')
   })
-  it('returns a colour', () => {
-    expect(iconFor('a.ts', false, false).color).toMatch(/^(#|var\()/)
+  it('never dims files', () => {
+    expect(iconFor('.gitignore', false, false).dim).toBe(false)
   })
 })
 
@@ -59,17 +59,16 @@ describe('iconFor folder', () => {
     for (const n of ['test', 'tests', '__tests__']) expect(id(n, true)).toBe('folder-test')
     for (const n of ['dist', 'build', 'target']) expect(id(n, true)).toBe('folder-dist')
   })
-  it('dims other dot-folders', () => {
-    expect(id('.vscode', true)).toBe('folder-dot')
-    expect(id('.vscode', true, true)).toBe('folder-dot-open')
-    expect(iconFor('.vscode', true, false).color).toBe('var(--dim)')
+  it('dims other dot-folders but not known ones', () => {
+    for (const n of ['.idea', '.vscode']) {
+      expect(iconFor(n, true, false)).toEqual({ id: 'folder', dim: true })
+      expect(iconFor(n, true, true)).toEqual({ id: 'folder-open', dim: true })
+    }
+    for (const n of ['.git', '.github', 'src', 'lib']) expect(iconFor(n, true, false).dim).toBe(false)
   })
   it('is case-insensitive and ignores file extension rules for dirs', () => {
     expect(id('SRC', true)).toBe('folder-src')
     expect(id('foo.ts', true)).toBe('folder')
     expect(id('src', false)).toBe('file')
-  })
-  it('open generic folder is brighter than closed', () => {
-    expect(iconFor('x', true, true).color).not.toBe(iconFor('x', true, false).color)
   })
 })

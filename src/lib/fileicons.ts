@@ -1,23 +1,14 @@
 // Mappa nome -> icona. I nomi dei file sono testo non fidato: passano solo da questa ricerca
 // (Map, mai oggetti con prototipo) e non vengono mai interpretati.
-export type FileIconSpec = { id: string; color: string }
+export type FileIconSpec = { id: string; dim: boolean }
 
-const FOLDER = '#8fa8ff'
-const FOLDER_OPEN = '#b4c4ff'
-
-const FOLDERS = new Map<string, [string, string]>([
-  ['.git', ['git', '#f08a65']],
-  ['.github', ['git', '#f08a65']],
-  ['node_modules', ['node', '#8bc66a']],
-  ['src', ['src', '#6aa3ff']],
-  ['docs', ['docs', '#f2d36b']],
-  ['test', ['test', '#5ee0c1']],
-  ['tests', ['test', '#5ee0c1']],
-  ['__tests__', ['test', '#5ee0c1']],
-  ['dist', ['dist', '#ffb454']],
-  ['build', ['dist', '#ffb454']],
-  ['target', ['dist', '#ffb454']],
+// cartelle note -> tipo di icona (ognuna ha un gemello -open nel set)
+const FOLDERS = new Map<string, string>([
+  ['.git', 'git'], ['.github', 'git'], ['node_modules', 'node'], ['src', 'src'], ['docs', 'docs'],
+  ['test', 'test'], ['tests', 'test'], ['__tests__', 'test'],
+  ['dist', 'dist'], ['build', 'dist'], ['target', 'dist'],
 ])
+export const KNOWN_FOLDER_KINDS: ReadonlySet<string> = new Set(FOLDERS.values())
 
 const NAMES = new Map<string, string>([
   ['dockerfile', 'docker'], ['.dockerignore', 'docker'],
@@ -53,14 +44,6 @@ family('pdf', 'pdf')
 family('archive', 'zip tar gz tgz bz2 xz 7z rar')
 family('lock', 'lock')
 
-const COLORS: Record<string, string> = {
-  ts: '#6aa3ff', js: '#f2d36b', json: '#d9c26b', html: '#ff8a8a', css: '#b48cff', svelte: '#ff8a5c',
-  vue: '#6bd0a0', md: '#9aa3b8', python: '#6bb5d0', rust: '#e8a07a', go: '#5ec8e0', java: '#e8946b',
-  c: '#7aa8e8', php: '#9d9be0', ruby: '#ff7a8a', swift: '#ff9a5c', shell: '#6bd0a0', sql: '#d0a86b',
-  config: '#9aa3b8', docker: '#5aa8ff', image: '#5ee0c1', pdf: '#ff7a7a', archive: '#c9a46b',
-  lock: '#667089', git: '#f08a65', readme: '#8fa8ff', license: '#d9c26b', file: '#9aa3b8',
-}
-
 function fileId(name: string): string {
   const n = name.toLowerCase()
   const exact = NAMES.get(n)
@@ -69,7 +52,6 @@ function fileId(name: string): string {
   if (n.startsWith('license') || n.startsWith('licence')) return 'license'
   if (n.startsWith('docker-compose.')) return 'docker'
   if (n.startsWith('.env.')) return 'config'
-  if (n.endsWith('-lock.json') || n.endsWith('-lock.yaml')) return 'lock'
   const dot = n.lastIndexOf('.')
   if (dot > 0 && dot < n.length - 1) {
     const byExt = EXTS.get(n.slice(dot + 1))
@@ -83,10 +65,8 @@ export function iconFor(name: string, isDir: boolean, open: boolean): FileIconSp
     const sfx = open ? '-open' : ''
     const n = name.toLowerCase()
     const known = FOLDERS.get(n)
-    if (known) return { id: `folder-${known[0]}${sfx}`, color: known[1] }
-    if (n.startsWith('.')) return { id: `folder-dot${sfx}`, color: 'var(--dim)' }
-    return { id: `folder${sfx}`, color: open ? FOLDER_OPEN : FOLDER }
+    if (known) return { id: `folder-${known}${sfx}`, dim: false }
+    return { id: `folder${sfx}`, dim: n.startsWith('.') }
   }
-  const id = fileId(name)
-  return { id, color: COLORS[id] ?? COLORS.file }
+  return { id: fileId(name), dim: false }
 }
