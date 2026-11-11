@@ -53,13 +53,15 @@
     }
   })
 
-  async function run(op: () => Promise<unknown>) {
+  async function run(op: () => Promise<unknown>): Promise<boolean> {
     error = null
     try {
       await op()
+      return true
     } catch (e) {
       const err = asFsError(e)
       error = err.code === 'forbidden' ? 'Percorso fuori dal progetto' : err.message
+      return false
     }
   }
 
@@ -101,8 +103,7 @@
 
   async function trash(e: DirEntry) {
     menu = null
-    await run(() => fsTrash(e.path))
-    editor.closeUnder(e.path)
+    if (await run(() => fsTrash(e.path))) editor.closeUnder(e.path)
     void load(parentOf(e.path))
   }
 

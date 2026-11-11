@@ -155,8 +155,13 @@ pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsEr
 // ---------- watcher ----------
 
 /// Percorsi che non vanno notificati: dentro `.git` (tranne `.git/HEAD`, serve al branch), `node_modules`, `target`.
-pub fn is_noise(path: &Path) -> bool {
-    let comps: Vec<_> = path.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+/// Contano solo i componenti sotto la radice del progetto (una radice dentro `target/` non zittisce tutto).
+/// Fuori da ogni radice: si notifica.
+pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
+    let Some(rel) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else {
+        return false;
+    };
+    let comps: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
     if comps.iter().any(|c| c == "node_modules" || c == "target") {
         return true;
     }
@@ -173,9 +178,16 @@ pub struct Watchers(Mutex<HashMap<String, RecommendedWatcher>>);
 /// (Ri)avvia il watcher del progetto su tutte le sue cartelle; emette `fs:changed` alla sola finestra del progetto.
 pub fn watch_project(app: &AppHandle, project: &Project) {
     let (tx, rx) = channel::<PathBuf>();
+    // radici come date e canonicalizzate: gli eventi possono arrivare con l'uno o l'altro percorso
+    let roots: Vec<PathBuf> = project
+        .folders
+        .iter()
+        .flat_map(|f| [Some(PathBuf::from(f)), Path::new(f).canonicalize().ok()])
+        .flatten()
+        .collect();
     let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            for p in ev.paths.into_iter().filter(|p| !is_noise(p)) {
+            for p in ev.paths.into_iter().filter(|p| !is_noise(&roots, p)) {
                 let _ = tx.send(p);
             }
         }
@@ -236,6 +248,10 @@ pub fn ensure_inside(roots: &[PathBuf], path: &Path) -> Result<PathBuf, FsError>
         match base.canonicalize() {
             Ok(c) => break c,
             Err(_) => {
+                // un componente che esiste come symlink (pendente) non è "da creare": seguirlo uscirebbe dal controllo
+                if std::fs::symlink_metadata(base).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return Err(forbidden());
+                }
                 let (Some(parent), Some(name)) = (base.parent(), base.file_name()) else {
                     return Err(forbidden()); // include `..` finale o radice inesistente
                 };
@@ -427,7 +443,8 @@ mod tests {
 
     #[test]
     fn noise_filter() {
-        let n = |p: &str| is_noise(Path::new(p));
+        let roots = vec![PathBuf::from("/p")];
+        let n = |p: &str| is_noise(&roots, Path::new(p));
         assert!(n("/p/.git/index.lock"));
         assert!(n("/p/.git/refs/heads/x"));
         assert!(!n("/p/.git/HEAD"));
@@ -435,6 +452,29 @@ mod tests {
         assert!(n("/p/target/debug/x"));
         assert!(!n("/p/src/main.rs"));
         assert!(!n("/p/.gitignore"));
+    }
+
+    #[test]
+    fn noise_filter_is_relative_to_root() {
+        let roots = vec![PathBuf::from("/tmp/x/target/myproj")];
+        assert!(!is_noise(&roots, Path::new("/tmp/x/target/myproj/src/a.rs")));
+        assert!(is_noise(&roots, Path::new("/tmp/x/target/myproj/target/debug/a")));
+        assert!(is_noise(&roots, Path::new("/tmp/x/target/myproj/.git/index.lock")));
+    }
+
+    #[test]
+    fn dangling_symlink_to_outside_is_forbidden() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(d.path());
+        let outside = d.path().join("outside-new.txt");
+        std::os::unix::fs::symlink(&outside, r[0].join("link")).unwrap();
+        assert_eq!(ensure_inside(&r, &r[0].join("link")).unwrap_err().code, "forbidden");
+        assert!(!outside.exists());
+        // anche un link pendente a metà percorso
+        let outdir = d.path().join("outdir");
+        std::os::unix::fs::symlink(&outdir, r[0].join("dir")).unwrap();
+        assert_eq!(ensure_inside(&r, &r[0].join("dir/f.txt")).unwrap_err().code, "forbidden");
+        assert!(!outdir.exists());
     }
 
     #[test]
