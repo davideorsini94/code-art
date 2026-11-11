@@ -31,3 +31,19 @@ export type ChatItem =
   | { kind: 'ask'; id: string; requestId: string; askType: 'permission' | 'question' | 'plan'; prompt: string; options: string[]; answered: boolean }
   | { kind: 'raw'; id: string; label: string; json: string }
 export type Todo = { text: string; status: 'pending' | 'in_progress' | 'completed' }
+
+export type AskType = 'permission' | 'question' | 'plan'
+/** Evento del protocollo Claude (`conv:event`); specchio di `ClaudeEvent` in src-tauri/src/claude/protocol.rs. */
+export type ClaudeEvent =
+  | { kind: 'init'; sessionId: string; model: string; slashCommands: string[]; tools: string[]; permissionMode: string }
+  | { kind: 'textDelta'; id: string; text: string }
+  | { kind: 'thinking'; id: string; text: string }
+  | { kind: 'toolStart'; id: string; name: string; input: unknown; parentId: string | null }
+  | { kind: 'toolEnd'; id: string; ok: boolean; result: string }
+  | { kind: 'ask'; requestId: string; askType: AskType; prompt: string; options: string[]; toolName: string; input: unknown }
+  | { kind: 'askCancelled'; requestId: string }
+  | { kind: 'todos'; todos: Todo[] }
+  | { kind: 'todoDelta'; id: string; text: string | null; status: string | null }
+  | { kind: 'turnEnd'; contextUsedPct: number | null; isError: boolean }
+  | { kind: 'controlResponse'; requestId: string; ok: boolean; payload: unknown }
+  | { kind: 'unknown'; label: string; json: string }

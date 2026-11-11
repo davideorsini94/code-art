@@ -1,7 +1,30 @@
 //! Integrazione con Claude Code: tipi condivisi con l'interfaccia e lettura delle sessioni su disco.
 use serde::{Deserialize, Serialize};
 
+pub mod protocol;
 pub mod sessions;
+pub mod state;
+
+/// Stato di una conversazione mostrato nell'interfaccia.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ConvStatus {
+    Working,
+    Waiting,
+    #[default]
+    Idle,
+}
+
+impl ConvStatus {
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConvStatus::Working => "working",
+            ConvStatus::Waiting => "waiting",
+            ConvStatus::Idle => "idle",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
