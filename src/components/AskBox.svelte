@@ -8,6 +8,7 @@
   type Ask = Extract<ChatItem, { kind: 'ask' }>
   let { item, sessionId }: { item: Ask; sessionId: string } = $props()
 
+  const WAIT = 'Risposta in corso…'
   let busy = $state(false)
   let error = $state<string | null>(null)
   let free = $state('')
@@ -41,21 +42,21 @@
   {#if !item.answered}
     <div class="btns">
       {#if item.askType === 'permission'}
-        <button class="btn p" use:tooltip={'Consenti a Claude di procedere'} disabled={busy} onclick={() => answer('allow')}>Consenti</button>
-        <button class="btn" use:tooltip={'Rifiuta: Claude non eseguirà l\'azione'} disabled={busy} onclick={() => answer('deny')}>Nega</button>
+        <button class="btn p" use:tooltip={busy ? WAIT : 'Consenti a Claude di procedere'} aria-disabled={busy} onclick={() => answer('allow')}>Consenti</button>
+        <button class="btn" use:tooltip={busy ? WAIT : 'Rifiuta: Claude non eseguirà l\'azione'} aria-disabled={busy} onclick={() => answer('deny')}>Nega</button>
       {:else if item.askType === 'plan'}
-        <button class="btn p" use:tooltip={'Approva il piano: Claude lo esegue'} disabled={busy} onclick={() => answer('approve')}>Approva piano</button>
-        <button class="btn" use:tooltip={'Rifiuta il piano: Claude continua a pianificare'} disabled={busy} onclick={() => answer('reject')}>Continua a pianificare</button>
+        <button class="btn p" use:tooltip={busy ? WAIT : 'Approva il piano: Claude lo esegue'} aria-disabled={busy} onclick={() => answer('approve')}>Approva piano</button>
+        <button class="btn" use:tooltip={busy ? WAIT : 'Rifiuta il piano: Claude continua a pianificare'} aria-disabled={busy} onclick={() => answer('reject')}>Continua a pianificare</button>
       {:else}
         {#each item.options as opt, i (i)}
-          <button class="btn" class:p={i === 0} use:tooltip={`Rispondi: ${opt}`} disabled={busy} onclick={() => answer(opt)}>{opt}</button>
+          <button class="btn" class:p={i === 0} use:tooltip={busy ? WAIT : `Rispondi: ${opt}`} aria-disabled={busy} onclick={() => answer(opt)}>{opt}</button>
         {/each}
       {/if}
     </div>
     {#if item.askType === 'question'}
       <form class="free" onsubmit={(e) => { e.preventDefault(); void answer(free) }}>
         <input type="text" placeholder="Oppure scrivi una risposta…" bind:value={free} disabled={busy} aria-label="Risposta libera" />
-        <button class="btn" type="submit" use:tooltip={'Invia la risposta scritta'} disabled={busy || !free.trim()}>Invia</button>
+        <button class="btn" type="submit" use:tooltip={busy ? WAIT : free.trim() ? 'Invia la risposta scritta' : 'Scrivi una risposta per inviarla'} aria-disabled={busy || !free.trim()}>Invia</button>
       </form>
     {/if}
   {/if}
@@ -72,7 +73,7 @@
   .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .btn { padding: 4px 12px; border-radius: 999px; background: var(--glass2); border: 1px solid var(--edge); color: inherit; font-size: 11.5px; cursor: pointer; }
   .btn.p { background: rgba(255, 180, 84, 0.25); border-color: rgba(255, 180, 84, 0.5); }
-  .btn:disabled { opacity: 0.5; cursor: default; }
+  .btn[aria-disabled='true'] { opacity: 0.5; cursor: default; }
   .free { display: flex; gap: 6px; margin-top: 8px; }
   .free input { flex: 1; min-width: 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: rgba(0, 0, 0, 0.28); color: inherit; font: inherit; font-size: 12px; }
   .err { color: #ff8f8f; font-size: 11.5px; margin: 6px 0 0; }

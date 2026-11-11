@@ -261,7 +261,7 @@
       bind:this={area}
       bind:value={text}
       rows="1"
-      placeholder="Rispondi a Claude…"
+      placeholder={working ? 'Claude sta lavorando — puoi scrivere, invierai a fine turno' : 'Rispondi a Claude…'}
       aria-label="Messaggio"
       {onkeydown}
       {onpaste}
@@ -300,9 +300,9 @@
     {/if}
     {#if working}
       <button type="button" class="btn stop" use:tooltip={{ text: 'Interrompi', shortcut: 'Esc' }} onclick={interrupt}>Interrompi</button>
-      <span class="tipw" use:tooltip={'Attendi la fine del turno per inviare'}><button type="button" class="btn" disabled use:tooltip={'Attendi la fine del turno per inviare'}>Invia</button></span>
+      <span class="tipw" use:tooltip={'Attendi la fine del turno per inviare'}><button type="button" class="btn" disabled data-no-tooltip="coperto dallo span esterno">Invia</button></span>
     {:else}
-      <span class="tipw" use:tooltip={sendTip}><button type="button" class="btn go" disabled={!canSend} use:tooltip={sendTip} onclick={send}>Invia</button></span>
+      <span class="tipw" use:tooltip={sendTip}><button type="button" class="btn go" disabled={!canSend} data-no-tooltip="coperto dallo span esterno" onclick={send}>Invia</button></span>
     {/if}
   </div>
 </div>

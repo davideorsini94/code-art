@@ -41,12 +41,13 @@ export function openingTags(src: string): { name: string; text: string; line: nu
 }
 
 const INTERACTIVE_ROLES = /\brole=["'](button|tab|menuitem|radio|treeitem|option)["']/
-const HANDLERS = /\s(onclick|ondblclick|onpointerdown)=/
+const HANDLERS = /\s(onclick|ondblclick|onpointerdown|onpointerup|onmousedown|onkeydown)=/
+const FOCUSABLE_NO_ROLE = /\stabindex=["']0["']/
 
 function isInteractive({ name, text }: { name: string; text: string }): boolean {
   if (name === 'button' || name === 'select' || (name === 'a' && /\shref=/.test(text))) return true
   if (name === 'input' || name === 'textarea') return false // campi di testo: si scrive, non si clicca
-  return INTERACTIVE_ROLES.test(text) || HANDLERS.test(text)
+  return INTERACTIVE_ROLES.test(text) || HANDLERS.test(text) || (FOCUSABLE_NO_ROLE.test(text) && !/\srole=/.test(text))
 }
 
 export function missingTooltips(src: string): { name: string; line: number }[] {
@@ -74,6 +75,9 @@ describe('every interactive element has a tooltip', () => {
     expect(missingTooltips("<button use:tooltip={'Salva'} onclick={f}>x</button>")).toEqual([])
     expect(missingTooltips('<button data-no-tooltip="ha già un testo esplicito" onclick={f}>x</button>')).toEqual([])
     expect(missingTooltips('<button data-no-tooltip="" onclick={f}>x</button>')).toHaveLength(1)
+    expect(missingTooltips('<div onkeydown={f}>x</div>')).toHaveLength(1)
+    expect(missingTooltips('<div onmousedown={f}>x</div>')).toHaveLength(1)
+    expect(missingTooltips('<span tabindex="0">x</span>')).toHaveLength(1)
     expect(missingTooltips('<!-- <button> --><p>testo</p>')).toEqual([])
   })
 })

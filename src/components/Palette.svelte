@@ -271,9 +271,9 @@
 
 {#if palette.open}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="cover" onmousedown={(e) => e.target === e.currentTarget && palette.close()}>
+  <div class="cover" data-no-tooltip="sfondo che chiude la palette: nessun controllo da spiegare" onmousedown={(e) => e.target === e.currentTarget && palette.close()}>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="panel glass-strong" role="dialog" aria-modal="true" aria-label="Ricerca" tabindex="-1" onkeydown={onKey}>
+    <div class="panel glass-strong" role="dialog" aria-modal="true" aria-label="Ricerca" tabindex="-1" data-no-tooltip="finestra di dialogo: la tastiera è gestita dal campo di ricerca" onkeydown={onKey}>
       <input
         bind:this={input}
         bind:value={query}

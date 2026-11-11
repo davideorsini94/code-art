@@ -214,11 +214,11 @@
 {#if menu}
   <div class="menu glass-strong" style:left="{menu.x}px" style:top="{menu.y}px" role="menu">
     {#if menu.entry.isDir}
-      <button role="menuitem" disabled={readOnly} use:tooltip={'Crea un nuovo file in questa cartella'} onclick={() => startNew('file', menu!.entry.path)}>Nuovo file</button>
-      <button role="menuitem" disabled={readOnly} use:tooltip={'Crea una nuova cartella qui dentro'} onclick={() => startNew('dir', menu!.entry.path)}>Nuova cartella</button>
+      <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Crea un nuovo file in questa cartella'} onclick={() => !readOnly && startNew('file', menu!.entry.path)}>Nuovo file</button>
+      <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Crea una nuova cartella qui dentro'} onclick={() => !readOnly && startNew('dir', menu!.entry.path)}>Nuova cartella</button>
     {/if}
-    <button role="menuitem" disabled={readOnly} use:tooltip={'Cambia il nome'} onclick={() => startRename(menu!.entry)}>Rinomina</button>
-    <button role="menuitem" disabled={readOnly} use:tooltip={'Sposta nel Cestino (si può recuperare)'} onclick={() => void trash(menu!.entry)}>Sposta nel Cestino</button>
+    <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Cambia il nome'} onclick={() => !readOnly && startRename(menu!.entry)}>Rinomina</button>
+    <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Sposta nel Cestino (si può recuperare)'} onclick={() => !readOnly && void trash(menu!.entry)}>Sposta nel Cestino</button>
   </div>
 {/if}
 
@@ -258,6 +258,6 @@
     text-align: left; background: none; border: 0; color: var(--txt); padding: 6px 10px;
     border-radius: 6px; font-size: 12.5px; cursor: default;
   }
-  .menu button:hover:not(:disabled) { background: var(--glass2); }
-  .menu button:disabled { opacity: 0.4; cursor: default; }
+  .menu button:hover:not([aria-disabled='true']) { background: var(--glass2); }
+  .menu button[aria-disabled='true'] { opacity: 0.4; cursor: default; }
 </style>

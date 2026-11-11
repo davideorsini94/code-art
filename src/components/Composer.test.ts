@@ -105,6 +105,15 @@ describe('Composer', () => {
     expect((screen.getByLabelText('Modello') as HTMLSelectElement).value).toBe('claude-opus-4')
   })
 
+  it('while working the placeholder says that typing is possible and sending waits for the turn end', () => {
+    const { rerender } = render(Composer, { conv: { ...base, sessionId: 'sw', status: 'idle' } })
+    const ta = screen.getByLabelText('Messaggio') as HTMLTextAreaElement
+    expect(ta.placeholder).toBe('Rispondi a Claude…')
+    return rerender({ conv: { ...base, sessionId: 'sw', status: 'working' } }).then(() => {
+      expect(ta.placeholder).toBe('Claude sta lavorando — puoi scrivere, invierai a fine turno')
+    })
+  })
+
   it('model picker lists fable, opus, sonnet, haiku in order with friendly labels', () => {
     render(Composer, { conv: { ...base, sessionId: 'sf', model: 'sonnet' } })
     const opts = [...(screen.getByLabelText('Modello') as HTMLSelectElement).options]

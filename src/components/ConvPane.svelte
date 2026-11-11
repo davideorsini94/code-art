@@ -132,7 +132,7 @@
   {:else}
     <header>
       <div class="chatH">
-        <span class="dot {dotClass}" use:tooltip={STATUS[conv.status]}></span>
+        <span class="dot {dotClass}" aria-hidden="true" use:tooltip={STATUS[conv.status]}></span>
         <span class="title" use:tooltip={conv.title}>{conv.title}</span>
       </div>
       {#if conv.prevTitle}

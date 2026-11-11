@@ -67,7 +67,7 @@
   {oncontextmenu}
 >
   <div class="t">
-    <span class="dot {conv.status}" class:pulse={conv.status === 'working'} data-testid="dot" use:tooltip={statusTip}></span>
+    <span class="dot {conv.status}" class:pulse={conv.status === 'working'} data-testid="dot" aria-hidden="true" use:tooltip={statusTip}></span>
     {#if renaming}
       <input
         class="rename"

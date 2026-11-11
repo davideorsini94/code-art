@@ -141,7 +141,7 @@ describe('tooltip action', () => {
     expect(labelled.el.hasAttribute('aria-label')).toBe(false)
     const own = mount('<button aria-label="Chiudi a.ts">×</button>', 'Chiudi scheda')
     expect(own.el.getAttribute('aria-label')).toBe('Chiudi a.ts')
-    const empty = mount('<div></div>', 'Trascina')
+    const empty = mount('<div role="separator"></div>', 'Trascina')
     expect(empty.el.getAttribute('aria-label')).toBe('Trascina')
     // aggiornamento del testo: l'etichetta messa da noi lo segue
     icon.act.update('Chiudi')
@@ -199,6 +199,87 @@ describe('tooltip action', () => {
     hover(el)
     vi.advanceTimersByTime(1000)
     expect(shown()).toBe(false)
+  })
+})
+
+describe('tooltip action: more behaviour', () => {
+  const open = (el: Element) => {
+    hover(el)
+    vi.advanceTimersByTime(500)
+    expect(shown()).toBe(true)
+  }
+
+  it.each([
+    ['contextmenu', (el: Element) => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))],
+    ['dragstart', (el: Element) => el.dispatchEvent(new Event('dragstart', { bubbles: true }))],
+    ['wheel', (el: Element) => el.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))],
+    ['window blur', () => window.dispatchEvent(new Event('blur'))],
+  ])('hides on %s', (_n, fire) => {
+    const { el } = mount('<button>Salva</button>')
+    open(el)
+    fire(el)
+    expect(shown()).toBe(false)
+  })
+
+  it('a scroll elsewhere does not cancel a pending or visible tooltip', () => {
+    const { el } = mount('<button>Salva</button>')
+    const other = document.createElement('div')
+    document.body.appendChild(other)
+    hover(el)
+    other.dispatchEvent(new Event('scroll')) // streaming altrove
+    vi.advanceTimersByTime(500)
+    expect(shown()).toBe(true)
+    other.dispatchEvent(new Event('scroll'))
+    expect(shown()).toBe(true)
+  })
+
+  it('a scroll of a container of the target (or of the document) hides it', () => {
+    document.body.insertAdjacentHTML('beforeend', '<div id="sc"><button>Salva</button></div>')
+    const sc = document.getElementById('sc')!
+    const el = sc.firstElementChild as HTMLElement
+    tooltip(el, 'Testo')
+    open(el)
+    sc.dispatchEvent(new Event('scroll'))
+    expect(shown()).toBe(false)
+    vi.advanceTimersByTime(400)
+    open(el)
+    document.dispatchEvent(new Event('scroll'))
+    expect(shown()).toBe(false)
+  })
+
+  it('a keyboard-focus tooltip survives pointer moves over unrelated elements', () => {
+    const { el } = mount('<button>Salva</button>')
+    const other = document.createElement('div')
+    document.body.appendChild(other)
+    vi.spyOn(el, 'matches').mockReturnValue(true)
+    el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    expect(shown()).toBe(true)
+    hover(other)
+    leave(other)
+    leave(el)
+    expect(shown()).toBe(true)
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+    expect(shown()).toBe(false)
+  })
+
+  it('aria-label goes only on controls or elements with a nameable role, never on plain spans/divs', () => {
+    const dot = mount('<span class="dot"></span>', 'Claude sta lavorando')
+    expect(dot.el.hasAttribute('aria-label')).toBe(false)
+    const handle = mount('<div class="handle"></div>', 'Trascina')
+    expect(handle.el.hasAttribute('aria-label')).toBe(false)
+    const img = mount('<span role="img"></span>', 'Modifiche non salvate')
+    expect(img.el.getAttribute('aria-label')).toBe('Modifiche non salvate')
+    const btn = mount('<button></button>', 'Chiudi')
+    expect(btn.el.getAttribute('aria-label')).toBe('Chiudi')
+    const status = mount('<span role="status"></span>', 'Stato')
+    expect(status.el.getAttribute('aria-label')).toBe('Stato')
+  })
+
+  it('a dot inside a labelled control does not change the control accessible name', () => {
+    document.body.insertAdjacentHTML('beforeend', '<div role="button" id="card"><span class="d"></span><span>Titolo</span></div>')
+    const card = document.getElementById('card')!
+    tooltip(card.querySelector('.d') as HTMLElement, 'Claude sta lavorando')
+    expect(card.querySelector('[aria-label]')).toBeNull()
   })
 })
 

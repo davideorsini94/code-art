@@ -65,6 +65,7 @@ let textEl: HTMLSpanElement | null = null
 let keyEl: HTMLElement | null = null
 let installed = false
 let current: Element | null = null // bersaglio mostrato
+let viaFocus = false // mostrato dal focus da tastiera: non lo toglie il puntatore
 let pending: Element | null = null // bersaglio in attesa del ritardo
 let timer: ReturnType<typeof setTimeout> | undefined
 let lastHiddenAt = -Infinity
@@ -74,6 +75,16 @@ const normalize = (p: TooltipParam): { text: string; shortcut?: string; placemen
   if (!p) return null
   const o = typeof p === 'string' ? { text: p } : p
   return o.text ? o : null
+}
+
+const NATIVE_CONTROLS = new Set(['button', 'a', 'input', 'select', 'textarea', 'summary', 'img'])
+const NAMEABLE_ROLES = new Set(['button', 'tab', 'menuitem', 'radio', 'treeitem', 'option', 'link', 'checkbox', 'switch', 'img', 'status', 'separator', 'slider'])
+
+/** Solo i controlli (o gli elementi con un ruolo che accetta un nome) ricevono `aria-label`: un pallino o un
+ *  contenitore senza ruolo, dentro un controllo, inquinerebbe il nome calcolato dal contenuto. */
+function canBeNamed(node: Element): boolean {
+  const role = node.getAttribute('role')
+  return role ? NAMEABLE_ROLES.has(role) : NATIVE_CONTROLS.has(node.tagName.toLowerCase())
 }
 
 /** Il bersaglio ha già un nome accessibile (testo con lettere o cifre, aria-label, alt, etichetta)? */
@@ -145,6 +156,7 @@ function hide() {
   pending = null
   if (!current) return
   current = null
+  viaFocus = false
   observer?.disconnect()
   if (box) box.style.display = 'none'
   lastHiddenAt = Date.now()
@@ -173,12 +185,12 @@ const onOver = (e: Event) => {
   if (pe.pointerType === 'touch' || pe.buttons) return
   const host = hostFor(e.target)
   if (host) schedule(host)
-  else if (current || pending) hide()
+  else if ((current || pending) && !viaFocus) hide()
 }
 
 const onOut = (e: Event) => {
   const host = hostFor(e.target)
-  if (!host || (host !== current && host !== pending)) return
+  if (viaFocus || !host || (host !== current && host !== pending)) return
   const to = (e as PointerEvent).relatedTarget
   if (to instanceof Node && host.contains(to)) return
   hide()
@@ -189,6 +201,7 @@ const onFocusIn = (e: Event) => {
   if (host && focusVisible(host)) {
     hide()
     show(host)
+    viaFocus = true
   }
 }
 
@@ -205,6 +218,14 @@ const onAny = () => {
   if (current || pending) hide()
 }
 
+// scroll: solo se a scorrere è il documento o un contenitore del bersaglio (l'output in streaming altrove non conta)
+const onScroll = (e: Event) => {
+  const host = current ?? pending
+  if (!host) return
+  const t = e.target
+  if (t === document || t === document.documentElement || (t instanceof Node && t.contains(host))) hide()
+}
+
 const DOC_EVENTS: [string, EventListener, boolean][] = [
   ['pointerover', onOver, true],
   ['pointerout', onOut, true],
@@ -212,7 +233,7 @@ const DOC_EVENTS: [string, EventListener, boolean][] = [
   ['focusout', onFocusOut, true],
   ['pointerdown', onAny, true],
   ['keydown', onKey, true],
-  ['scroll', onAny, true],
+  ['scroll', onScroll, true],
   ['wheel', onAny, true],
   ['contextmenu', onAny, true],
   ['dragstart', onAny, true],
@@ -252,7 +273,7 @@ function apply(node: HTMLElement, param: TooltipParam) {
   // nome accessibile: solo per i controlli senza un nome proprio (icone); lo si aggiorna se lo avevamo messo noi
   let labelled = prev?.labelled ?? false
   if (labelled) node.setAttribute('aria-label', o.text)
-  else if (!node.hasAttribute('aria-label') && !hasOwnName(node)) {
+  else if (!node.hasAttribute('aria-label') && canBeNamed(node) && !hasOwnName(node)) {
     node.setAttribute('aria-label', o.text)
     labelled = true
   }

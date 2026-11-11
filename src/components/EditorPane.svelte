@@ -223,7 +223,7 @@
         onclick={() => (editor.active = t.path)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.path)}>
         {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
-        {#if editor.isDirty(t)}<span class="dot" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
+        {#if editor.isDirty(t)}<span class="dot" role="img" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
         <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.close(t.path) }}>×</button>
       </div>
     {/each}

@@ -193,7 +193,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-<div class="viewer" tabindex="0" role="application" aria-label="Anteprima PDF" onkeydown={key}>
+<div class="viewer" tabindex="0" role="application" aria-label="Anteprima PDF" data-no-tooltip="contenitore di scelte da tastiera: i controlli al suo interno hanno il proprio suggerimento" onkeydown={key}>
   <div class="pages" bind:this={scroller} onscroll={onScroll}>
     {#if status === 'loading'}
       <p class="msg">Caricamento…</p>

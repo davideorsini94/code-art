@@ -62,7 +62,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-<div class="viewer" bind:this={root} tabindex="0" role="application" aria-label="Anteprima immagine" onkeydown={key}>
+<div class="viewer" bind:this={root} tabindex="0" role="application" aria-label="Anteprima immagine" data-no-tooltip="contenitore di scelte da tastiera: i controlli al suo interno hanno il proprio suggerimento" onkeydown={key}>
   <div class="stage" class:fit={zoom === 'fit'}>
     {#if failed}
       <p class="msg">{failed}</p>

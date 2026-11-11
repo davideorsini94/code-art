@@ -45,7 +45,7 @@ body {
   border-radius: 8px;
   font: 12px/1.35 -apple-system, 'SF Pro Text', system-ui, sans-serif;
   color: var(--txt);
-  background: rgba(24, 27, 38, 0.96);
+  background: var(--surface-pop);
   border: 1px solid var(--edge);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(24px) saturate(160%);
