@@ -153,13 +153,30 @@ pub fn show_project_window(app: &AppHandle, project: &Project) -> Result<()> {
         build_window(app, &label, &project.name).map_err(|e| e.to_string())?;
     }
     store.set_open_flag(&project.id, true)?;
-    crate::fs_tree::watch_project(app, project);
-    crate::claude::sessions::watch_project(app, project);
+    start_watchers(app, project);
     if let Some(w) = app.get_webview_window(WELCOME_LABEL) {
         let _ = w.close();
     }
     let _ = rebuild_menu(app);
     Ok(())
+}
+
+/// Avvia (o riavvia) i watcher del progetto (albero file e sessioni) su un thread a parte: `canonicalize` e
+/// l'iscrizione agli eventi del disco non devono bloccare il thread principale (anche da `restore_windows` in
+/// `setup`). Un avvio alla volta, così l'ultimo elenco di cartelle vince; se intanto la finestra è stata chiusa,
+/// i watcher appena avviati si fermano.
+pub fn start_watchers(app: &AppHandle, project: &Project) {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (app, project) = (app.clone(), project.clone());
+    std::thread::spawn(move || {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::fs_tree::watch_project(&app, &project);
+        crate::claude::sessions::watch_project(&app, &project);
+        if app.get_webview_window(&window_label(&project.id)).is_none() {
+            crate::fs_tree::unwatch_project(&app, &project.id);
+            crate::claude::sessions::unwatch_project(&app, &project.id);
+        }
+    });
 }
 
 pub fn show_welcome_window(app: &AppHandle) -> Result<()> {
@@ -352,8 +369,7 @@ pub async fn project_pick_and_add_folder(app: AppHandle, window: WebviewWindow) 
     let id = window_project_id(&window)?;
     let Some(path) = pick_folder_for(&app, &window, "Aggiungi cartella al progetto").await? else { return Ok(None) };
     let p = add_folder(&app.state::<Store>(), &id, &path)?;
-    crate::fs_tree::watch_project(&app, &p);
-    crate::claude::sessions::watch_project(&app, &p);
+    start_watchers(&app, &p);
     Ok(Some(p))
 }
 
@@ -366,14 +382,19 @@ pub async fn project_pick_relocate(app: AppHandle, window: WebviewWindow, old: S
     }
     let Some(path) = pick_folder_for(&app, &window, "Scegli la nuova posizione").await? else { return Ok(None) };
     let p = relocate(&app.state::<Store>(), &id, &old, &path)?;
-    crate::fs_tree::watch_project(&app, &p);
-    crate::claude::sessions::watch_project(&app, &p);
+    start_watchers(&app, &p);
     Ok(Some(p))
 }
 
+/// Lavoro sul disco fuori dal thread principale (i comandi sincroni di Tauri girano lì).
+async fn off_main<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
-pub fn project_missing_folders(window: WebviewWindow, store: State<Store>) -> Result<Vec<String>> {
-    missing_folders(&store, &window_project_id(&window)?)
+pub async fn project_missing_folders(app: AppHandle, window: WebviewWindow) -> Result<Vec<String>> {
+    let id = window_project_id(&window)?;
+    off_main(move || missing_folders(&app.state::<Store>(), &id)).await
 }
 
 #[tauri::command]
@@ -382,8 +403,9 @@ pub fn project_pick_and_open(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn project_branch(window: WebviewWindow, store: State<Store>) -> Result<Option<String>> {
-    branch(&store, &window_project_id(&window)?)
+pub async fn project_branch(app: AppHandle, window: WebviewWindow) -> Result<Option<String>> {
+    let id = window_project_id(&window)?;
+    off_main(move || branch(&app.state::<Store>(), &id)).await
 }
 
 /// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
@@ -487,6 +509,22 @@ mod tests {
         ] {
             assert!(!src.contains(".emit_to("), "{file}: usare projects::emit_to_project");
         }
+    }
+
+    #[test]
+    fn folder_io_stays_off_the_main_thread() {
+        let src = include_str!("projects.rs");
+        let body = |f: &str| {
+            let start = src.find(f).unwrap();
+            &src[start..start + src[start..].find("\n}\n").unwrap()]
+        };
+        // i comandi che toccano le cartelle sono asincroni e passano da spawn_blocking
+        assert!(src.contains("pub async fn project_missing_folders("));
+        assert!(src.contains("pub async fn project_branch("));
+        // i watcher (canonicalize, FSEvents) partono da un thread a parte
+        assert!(!body("pub fn show_project_window(").contains("watch_project"));
+        assert!(body("pub fn start_watchers(").contains("std::thread::spawn"));
+        assert!(!src.contains(concat!("::watch_project(", "&app, &p)")));
     }
 
     #[test]
