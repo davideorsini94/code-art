@@ -3,6 +3,7 @@
   import type { Conversation } from '../lib/types'
   import { relativeTime } from '../lib/conv/time'
   import { tooltip } from '../lib/tooltip'
+  import { STATUS_TIP } from '../lib/conv/labels'
 
   type Props = {
     conv: Conversation
@@ -20,8 +21,7 @@
 
   const LABEL = { waiting: 'aspetta te', working: 'al lavoro', idle: '' } as const
   const label = $derived(LABEL[conv.status])
-  const STATUS = { waiting: 'Aspetta una tua risposta', working: 'Claude sta lavorando', idle: 'Nessuna attività in corso' } as const
-  const statusTip = $derived(STATUS[conv.status])
+  const statusTip = $derived(STATUS_TIP[conv.status])
 
   let draft = $state('')
   let finished = false

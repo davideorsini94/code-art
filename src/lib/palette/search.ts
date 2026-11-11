@@ -57,10 +57,6 @@ export function rankIndices(query: string, items: string[], limit: number): numb
   return scored.slice(0, limit).map((s) => s.i)
 }
 
-export function fuzzyRank(query: string, items: string[], limit: number): string[] {
-  return rankIndices(query, items, limit).map((i) => items[i])
-}
-
 /** Posizioni (indici di carattere) della corrispondenza fuzzy di `query` in `text`, per l'evidenziazione. */
 export function fuzzyPositions(query: string, text: string): number[] {
   const q = fold(query.trim())
@@ -132,12 +128,7 @@ export function createLatest<T>(run: (q: string) => Promise<T>, onResult: (q: st
 /** Azioni che dipendono da componenti: le registrano App, Titlebar e Palette al montaggio. */
 export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openModes: () => {} }
 
-export const PERMISSION_MODES: [mode: string, label: string][] = [
-  ['bypassPermissions', 'Senza conferme'],
-  ['acceptEdits', 'Accetta modifiche'],
-  ['plan', 'Piano'],
-  ['default', 'Chiedi sempre'],
-]
+export { PERMISSION_MODES } from '../conv/labels'
 
 export type Command = { id: string; title: string; run(): void }
 

@@ -57,7 +57,6 @@ export const convHistory = (sessionId: string) => invoke<ChatItem[]>('conv_histo
 import type { ClaudeCheck, ClaudeEvent, ConvDeleteOutcome, ConvStartOpts } from './types'
 export const claudeCheck = () => invoke<ClaudeCheck>('claude_check')
 export const convStart = (projectId: string, opts: ConvStartOpts = {}) => invoke<string>('conv_start', { projectId, opts })
-export const convResume = (sessionId: string) => invoke<void>('conv_resume', { sessionId })
 export const convSend = (sessionId: string, text: string, imagePaths: string[] = []) =>
   invoke<void>('conv_send', { sessionId, text, imagePaths })
 /** `choice`: permesso `allow`/`deny`; piano `approve`/`reject`; domanda = etichetta scelta o testo libero. */
@@ -71,9 +70,6 @@ export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_vie
 export const convArchive = (sessionId: string, archived: boolean) => invoke<void>('conv_archive', { sessionId, archived })
 /** Elimina la conversazione (file di sessione nel Cestino) dopo una conferma NATIVA mostrata dal core. */
 export const convDelete = (sessionId: string) => invoke<ConvDeleteOutcome>('conv_delete', { sessionId })
-export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })
-/** Ferma il processo della conversazione (interrompe un turno in corso); si riprende al prossimo invio. */
-export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessionId })
 /** Richieste (permesso/domanda/piano) ancora aperte, dalla più vecchia: servono a chi apre la scheda dopo che sono state emesse. */
 export const convPending = (sessionId: string) => invoke<ClaudeEvent[]>('conv_pending', { sessionId })
 export const convRename = (sessionId: string, title: string) => invoke<void>('conv_rename', { sessionId, title })

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { absolutePath, commands, createLatest, fuzzyRank, segments } from './search'
+import { absolutePath, commands, createLatest, rankIndices, segments } from './search'
+
+const fuzzyRank = (query: string, items: string[], limit: number) => rankIndices(query, items, limit).map((i) => items[i])
 
 describe('fuzzyRank', () => {
   it('matches a subsequence and ranks the best file first', () => {

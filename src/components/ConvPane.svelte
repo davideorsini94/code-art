@@ -12,6 +12,7 @@
   import { variableRange } from '../lib/conv/window'
   import { shouldStick } from '../lib/conv/stick'
   import { tooltip } from '../lib/tooltip'
+  import { STATUS_TIP } from '../lib/conv/labels'
 
   /** Altezza stimata di una riga non ancora misurata. */
   const ESTIMATE = 72
@@ -19,6 +20,8 @@
 
   const id = $derived(conversations.activeId)
   const conv = $derived(conversations.all.find((c) => c.sessionId === id))
+  // solo lo stato: un upsert che cambia titolo o attività non deve riscrivere "vista" nel database
+  const status = $derived(conv?.status)
   const cs = $derived(id ? chat.states[id] : undefined)
   const rows = $derived(cs ? buildRows(cs.items) : [])
 
@@ -63,7 +66,7 @@
   // "vista": la conversazione è sullo schermo con la finestra attiva (anche quando cambia lo stato, es. torna `waiting`)
   $effect(() => {
     const sid = id
-    void conv?.status
+    void status
     if (sid && focused) void convMarkViewed(sid).catch(() => {})
   })
 
@@ -121,7 +124,6 @@
     return { destroy: () => ro.disconnect() }
   }
 
-  const STATUS = { waiting: 'Aspetta una tua risposta', working: 'Claude sta lavorando', idle: 'Nessuna attività in corso' } as const
   const dotClass = $derived(conv ? { working: 'work', waiting: 'wait', idle: 'done' }[conv.status] : 'done')
 </script>
 
@@ -131,7 +133,7 @@
   {:else}
     <header>
       <div class="chatH">
-        <span class="dot {dotClass}" aria-hidden="true" use:tooltip={STATUS[conv.status]}></span>
+        <span class="dot {dotClass}" aria-hidden="true" use:tooltip={STATUS_TIP[conv.status]}></span>
         <span class="title" use:tooltip={conv.title}>{conv.title}</span>
       </div>
       {#if conv.prevTitle}

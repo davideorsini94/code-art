@@ -19,6 +19,7 @@ vi.mock('../lib/ipc', () => ({
 
 import ConvPane from './ConvPane.svelte'
 import { chat } from '../lib/stores/chat.svelte'
+import * as ipc from '../lib/ipc'
 import { conversations } from '../lib/stores/conversations.svelte'
 import { initialState } from '../lib/conv/reduce'
 import type { Conversation } from '../lib/types'
@@ -47,6 +48,26 @@ describe('ConvPane', () => {
       flushSync()
     }
     expect(open).toHaveBeenCalledTimes(1)
+    conversations.activeId = null
+  })
+
+  it('marks the conversation viewed on id or status change only, not on every upsert', () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    vi.mocked(ipc.convMarkViewed).mockClear()
+    conversations.all = [conv]
+    conversations.activeId = 's1'
+    render(ConvPane)
+    flushSync()
+    expect(ipc.convMarkViewed).toHaveBeenCalledTimes(1)
+    // upsert con lo stesso stato (titolo, attività): nessuna nuova scrittura
+    conversations.all = [{ ...conv, title: 'Altro', lastActivity: 5 }]
+    flushSync()
+    conversations.all = [{ ...conv, title: 'Altro ancora', lastActivity: 9 }]
+    flushSync()
+    expect(ipc.convMarkViewed).toHaveBeenCalledTimes(1)
+    conversations.all = [{ ...conv, status: 'waiting' }]
+    flushSync()
+    expect(ipc.convMarkViewed).toHaveBeenCalledTimes(2)
     conversations.activeId = null
   })
 })

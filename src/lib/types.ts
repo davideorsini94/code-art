@@ -58,8 +58,6 @@ export type ClaudeEvent =
 export type ClaudeCheck = { found: boolean; version: string | null; path: string | null }
 /** Opzioni di `conv_start`: senza `permissionMode` vale l'impostazione `default_permission_mode`. */
 export type ConvStartOpts = { model?: string; permissionMode?: string }
-/** Modalità permessi accettate dal motore. */
-export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
 /** Payload dell'evento `conv:event`. */
 export type ConvEventPayload = { sessionId: string; event: ClaudeEvent }
 
