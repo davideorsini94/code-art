@@ -38,7 +38,7 @@
       }}
     />
   {:else}
-    <div class="proj" data-tauri-drag-region ondblclick={startEdit} role="presentation" title="Doppio click per rinominare">
+    <div class="proj" ondblclick={startEdit} role="presentation" title="Doppio click per rinominare">
       {projectStore.project?.name ?? 'Code Art'}
     </div>
   {/if}

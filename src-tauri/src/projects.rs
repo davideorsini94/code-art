@@ -148,19 +148,39 @@ pub fn restore_windows(app: &AppHandle) -> Result<()> {
         return show_welcome_window(app);
     }
     for p in &open {
-        show_project_window(app, p)?;
+        if let Err(e) = show_project_window(app, p) {
+            eprintln!("impossibile riaprire il progetto {}: {e}", p.name);
+        }
     }
     Ok(())
 }
 
-pub fn on_window_destroyed(app: &AppHandle, label: &str) {
-    if app.state::<Quitting>().0.load(Ordering::SeqCst) {
-        return;
+/// La chiusura di una finestra azzera `was_open` solo se non stiamo uscendo dall'app.
+pub fn should_clear_open_flag(quitting: bool) -> bool {
+    !quitting
+}
+
+/// Dimentica lo stato "aperto" di un progetto dopo la chiusura della sua finestra.
+pub fn handle_window_closed(store: &Store, label: &str, quitting: bool) -> Result<()> {
+    if !should_clear_open_flag(quitting) {
+        return Ok(());
     }
+    match label.strip_prefix(PROJECT_PREFIX) {
+        Some(id) => store.set_open_flag(id, false),
+        None => Ok(()),
+    }
+}
+
+pub fn mark_quitting(app: &AppHandle) {
+    app.state::<Quitting>().0.store(true, Ordering::SeqCst);
+}
+
+pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
         crate::fs_tree::unwatch_project(app, id);
-        let _ = app.state::<Store>().set_open_flag(id, false);
     }
+    let quitting = app.state::<Quitting>().0.load(Ordering::SeqCst);
+    let _ = handle_window_closed(&app.state::<Store>(), label, quitting);
 }
 
 pub fn pick_and_open(app: &AppHandle) {
@@ -211,7 +231,7 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::hide(app, Some("Nascondi Code Art"))?,
             &PredefinedMenuItem::hide_others(app, Some("Nascondi altri"))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, Some("Esci da Code Art"))?,
+            &MenuItem::with_id(app, "quit", "Esci da Code Art", true, Some("CmdOrCtrl+Q"))?,
         ],
     )?;
     let edit = Submenu::with_items(
@@ -239,7 +259,10 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn on_menu_event(app: &AppHandle, id: &str) {
-    if id == "open_folder" {
+    if id == "quit" {
+        mark_quitting(app);
+        app.exit(0);
+    } else if id == "open_folder" {
         pick_and_open(app);
     } else if let Some(pid) = id.strip_prefix("recent:") {
         if let Ok(Some(p)) = app.state::<Store>().get_project(pid) {
@@ -371,6 +394,22 @@ mod tests {
         s.upsert_project(&p).unwrap();
         assert!(s.get_project("p1").unwrap().is_some());
         assert_eq!(missing_folders(&s, "p1").unwrap(), vec!["/definitely/not/here".to_string()]);
+    }
+
+    #[test]
+    fn closing_window_clears_flag_only_when_not_quitting() {
+        assert!(should_clear_open_flag(false));
+        assert!(!should_clear_open_flag(true));
+        let (_d, s) = store();
+        let p = open_folder(&s, "/tmp/x/a").unwrap();
+        let label = window_label(&p.id);
+        s.set_open_flag(&p.id, true).unwrap();
+        handle_window_closed(&s, &label, true).unwrap();
+        assert_eq!(s.open_projects().unwrap().len(), 1);
+        handle_window_closed(&s, "welcome", false).unwrap();
+        assert_eq!(s.open_projects().unwrap().len(), 1);
+        handle_window_closed(&s, &label, false).unwrap();
+        assert!(s.open_projects().unwrap().is_empty());
     }
 
     #[test]

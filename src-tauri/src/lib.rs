@@ -2,7 +2,6 @@ mod fs_tree;
 mod projects;
 mod store;
 
-use std::sync::atomic::Ordering;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -47,7 +46,7 @@ pub fn run() {
 
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } = event {
-            app.state::<projects::Quitting>().0.store(true, Ordering::SeqCst);
+            projects::mark_quitting(app);
         }
     });
 }
