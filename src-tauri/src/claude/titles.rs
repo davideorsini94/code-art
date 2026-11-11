@@ -6,9 +6,8 @@ use super::engine::{EventSink, LaunchCell};
 use super::{sessions, ChatItem, Conversation};
 use crate::store::{Project, Result, Store};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -21,10 +20,9 @@ const RENAME_MAX_CHARS: usize = 80;
 const RETITLE_EVERY_TURNS: u32 = 3;
 const IMPORT_LIMIT: usize = 20;
 const MAX_PARALLEL: usize = 2;
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Dopo un fallimento la stessa conversazione non viene riprovata subito (ogni sincronizzazione la rimetterebbe in coda).
 const RETRY_BACKOFF: Duration = Duration::from_secs(300);
-const STDOUT_CAP: u64 = 1024 * 1024;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -162,12 +160,39 @@ fn extract_result(stdout: &str) -> Option<String> {
     v.get("result")?.as_str().map(String::from)
 }
 
-/// `claude -p` con modello haiku, nessuno strumento e nessuna sessione salvata, in una cartella temporanea.
+/// Argomenti della chiamata: nessuno strumento, nessuna sessione salvata e nessuna personalizzazione
+/// dell'utente (hook, plugin, server MCP, CLAUDE.md, comandi, impostazioni): il testo della conversazione
+/// è non fidato e la chiamata non deve poter avere effetti. L'accesso (account) resta quello normale.
+const TITLE_ARGS: &[&str] = &[
+    "-p",
+    "--model",
+    "haiku",
+    "--output-format",
+    "json",
+    "--permission-mode",
+    "default",
+    "--tools",
+    "",
+    "--no-session-persistence",
+    "--safe-mode",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+    "--disable-slash-commands",
+];
+
+/// `claude -p` con modello haiku in una cartella temporanea vuota (rimossa dopo la chiamata).
 pub struct ClaudeRunner {
     pub launch: Arc<LaunchCell>,
+    pub timeout: Duration,
+    pub temp_base: PathBuf,
 }
 
 impl ClaudeRunner {
+    pub fn new(launch: Arc<LaunchCell>) -> ClaudeRunner {
+        ClaudeRunner { launch, timeout: CALL_TIMEOUT, temp_base: std::env::temp_dir().join("CodeArt/titles") }
+    }
+
     fn claude_path(&self) -> Option<PathBuf> {
         let l = &**self.launch;
         l.claude.clone().or_else(|| super::locate::find_claude(&l.env))
@@ -177,53 +202,14 @@ impl ClaudeRunner {
 impl TitleRunner for ClaudeRunner {
     fn run(&self, prompt: &str) -> Option<String> {
         let claude = self.claude_path()?;
-        let dir = std::env::temp_dir().join("CodeArt/titles").join(uuid::Uuid::new_v4().to_string());
+        let dir = self.temp_base.join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&dir).ok()?;
-        let out = run_claude(&claude, &self.launch.env, &dir, prompt);
+        let mut cmd = Command::new(&claude);
+        cmd.args(TITLE_ARGS).current_dir(&dir).env_clear().envs(&self.launch.env);
+        let out = super::locate::run_capture(cmd, self.timeout, Some(prompt.as_bytes().to_vec()));
         let _ = std::fs::remove_dir_all(&dir);
         extract_result(&out?)
     }
-}
-
-fn run_claude(claude: &Path, env: &HashMap<String, String>, cwd: &Path, prompt: &str) -> Option<String> {
-    let mut child = Command::new(claude)
-        .args(["-p", "--model", "haiku", "--output-format", "json", "--permission-mode", "default", "--tools", "", "--no-session-persistence"])
-        .current_dir(cwd)
-        .env_clear()
-        .envs(env)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    let mut stdout = child.stdout.take()?;
-    let text = prompt.to_string();
-    // scrittura e lettura in thread: né un prompt grande né un'uscita grande possono bloccare l'attesa
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(text.as_bytes());
-    });
-    let reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = (&mut stdout).take(STDOUT_CAP).read_to_string(&mut buf);
-        buf
-    });
-    let deadline = Instant::now() + CALL_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let _ = writer.join();
-    let out = reader.join().ok()?;
-    status.filter(|s| s.success())?;
-    Some(out)
 }
 
 // ---------- coda ----------
@@ -237,6 +223,8 @@ struct QState {
     failed: HashMap<String, Instant>,
     /// Progetti già passati dall'importazione (le 20 più recenti si mettono in coda una volta per avvio).
     imported: HashSet<String>,
+    /// Titolazioni "di importazione" già concesse per progetto in questo avvio (tetto 20).
+    import_used: HashMap<String, usize>,
 }
 
 struct QInner {
@@ -299,7 +287,8 @@ impl TitleQueue {
                     }
                 }
             };
-            let ok = self.process(&sid);
+            // un panico nell'esecutore o nell'elaborazione non deve lasciare la coda bloccata
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process(&sid))).unwrap_or(false);
             let mut st = lock(&self.0.state);
             st.known.remove(&sid);
             if ok {
@@ -325,6 +314,8 @@ impl TitleQueue {
         let prompt = build_title_prompt(current, &items);
         let Some((title, summary)) = self.0.runner.run(&prompt).and_then(|r| parse_title_reply(&r)) else { return false };
         let mut c = conv.clone();
+        // l'eco "invariato" del modello passa dalla stessa normalizzazione del prompt (spazi, `<`)
+        let title = if title_turn.is_some() && defang(&title, 200) == defang(&conv.title, 200) { conv.title.clone() } else { title };
         if title_turn.is_none() {
             c.title.clear();
         }
@@ -390,10 +381,20 @@ impl TitleQueue {
 
     // ---------- sincronizzazione ----------
 
+    /// Concede fino a `wanted` titolazioni di importazione per il progetto (tetto 20 per avvio): le altre
+    /// sessioni si titolano quando la scheda viene aperta.
+    fn take_import_budget(&self, project_id: &str, wanted: usize) -> usize {
+        let mut st = lock(&self.0.state);
+        let used = st.import_used.entry(project_id.to_string()).or_insert(0);
+        let granted = wanted.min(IMPORT_LIMIT.saturating_sub(*used));
+        *used += granted;
+        granted
+    }
+
     /// Un solo file sincronizzato (watcher): `before` = `turn_count` salvato prima della sincronizzazione.
     pub fn after_file_sync(&self, conv: &Conversation, before: Option<i64>) {
         let Ok(tt) = self.0.store.title_turn(&conv.session_id) else { return };
-        let new_untitled = before.is_none() && tt.is_none() && due(conv, tt);
+        let new_untitled = before.is_none() && tt.is_none() && due(conv, tt) && self.take_import_budget(&conv.project_id, 1) == 1;
         if new_untitled || foreign_progress(conv, tt, before) {
             self.enqueue(&conv.session_id);
         }
@@ -445,6 +446,7 @@ pub fn sync_and_enqueue(
     let fresh: Vec<Conversation> =
         if first { list.clone() } else { list.iter().filter(|c| !before.contains_key(&c.session_id)).cloned().collect() };
     let mut ids = select_import(&fresh, &turns, is_running);
+    ids.truncate(queue.take_import_budget(&project.id, ids.len()));
     for c in &list {
         let tt = turns.get(&c.session_id).copied().flatten();
         if !is_running(&c.session_id) && foreign_progress(c, tt, before.get(&c.session_id).copied()) {
@@ -878,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn import_runs_once_per_project_then_only_new_sessions() {
+    fn import_budget_is_20_per_project_per_launch() {
         let e = env(Fake::new(REPLY));
         for n in 1..=22 {
             write_session(&e, &sid(n), 1);
@@ -894,6 +896,120 @@ mod tests {
         write_session(&e, &sid(30), 1);
         sync();
         e.queue.wait_idle();
-        assert_eq!(e.fake.calls(), 21);
+        assert_eq!(e.fake.calls(), 20, "tetto di 20 per progetto e per avvio: le altre all'apertura");
+    }
+
+    #[test]
+    fn watcher_new_sessions_share_the_import_budget() {
+        let e = env(Fake::new(REPLY));
+        for n in 1..=22 {
+            let id = sid(n);
+            seed(&e, &id, 1);
+            let c = e.store.get_conversation(&id).unwrap().unwrap();
+            e.queue.after_file_sync(&c, None);
+        }
+        e.queue.wait_idle();
+        assert_eq!(e.fake.calls(), 20);
+    }
+
+    #[test]
+    fn unchanged_title_echo_survives_normalisation() {
+        let e = env(Fake::new(r#"{"title":"Fix <b> bug","summary":"nuovo"}"#));
+        let id = sid(1);
+        seed(&e, &id, 1);
+        e.store.upsert_synced_conversation("p1", &id, "/Users/dev/proj", "x", 2, 4).unwrap();
+        let mut c = e.store.get_conversation(&id).unwrap().unwrap();
+        c.title = "Fix  <b> bug".into();
+        assert!(e.store.apply_title_result(&c, 1).unwrap());
+        e.queue.enqueue_if_due(&id);
+        e.queue.wait_idle();
+        let c = e.store.get_conversation(&id).unwrap().unwrap();
+        assert_eq!((c.title.as_str(), c.prev_title, c.summary.as_str()), ("Fix  <b> bug", None, "nuovo"));
+    }
+
+    struct Panicky;
+    impl TitleRunner for Panicky {
+        fn run(&self, _: &str) -> Option<String> {
+            panic!("boom");
+        }
+    }
+
+    #[test]
+    fn panicking_runner_does_not_wedge_the_queue() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(&d.path().join("t.db")).unwrap();
+        let root = d.path().join("projects");
+        std::fs::create_dir_all(root.join("-Users-dev-proj")).unwrap();
+        let q = TitleQueue::new(store.clone(), Arc::new(FakeSink::default()), root.clone(), Arc::new(Panicky));
+        let id = sid(1);
+        std::fs::write(root.join("-Users-dev-proj").join(format!("{id}.jsonl")), "").unwrap();
+        store.upsert_synced_conversation("p1", &id, "/Users/dev/proj", "t", 1, 1).unwrap();
+        q.enqueue_if_due(&id);
+        q.wait_idle();
+        assert_eq!(lock(&q.0.state).running, 0);
+    }
+
+    // ---------- esecutore reale con un finto `claude` ----------
+
+    fn fake_claude(dir: &Path, body: &str) -> Arc<LaunchCell> {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-claude");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = super::super::engine::Launch { claude: Some(p), env: HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]) };
+        Arc::new(std::sync::LazyLock::new(Box::new(move || launch) as Box<dyn FnOnce() -> super::super::engine::Launch + Send>))
+    }
+
+    #[test]
+    fn real_runner_passes_isolation_flags_prompt_on_stdin_and_cleans_up() {
+        let d = tempfile::tempdir().unwrap();
+        let (argv, stdin_copy, cwd_copy) = (d.path().join("argv"), d.path().join("stdin"), d.path().join("cwd"));
+        let launch = fake_claude(
+            d.path(),
+            &format!(
+                "for a in \"$@\"; do printf '%s\\n' \"[$a]\" >> {}; done; pwd > {}; cat > {}; echo '{{\"type\":\"result\",\"is_error\":false,\"result\":\"{{}}\"}}'",
+                argv.display(), cwd_copy.display(), stdin_copy.display()
+            ),
+        );
+        let base = d.path().join("tmp");
+        let r = ClaudeRunner { launch, timeout: Duration::from_secs(10), temp_base: base.clone() };
+        assert_eq!(r.run("PROMPT-TEXT").as_deref(), Some("{}"));
+        let args: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(|l| l.trim_matches(|c| c == '[' || c == ']').to_string()).collect();
+        assert_eq!(args, TITLE_ARGS);
+        for flag in ["--tools", "--no-session-persistence", "--safe-mode", "--strict-mcp-config", "--setting-sources", "--disable-slash-commands"] {
+            assert!(args.iter().any(|a| a == flag), "{flag}");
+        }
+        let i = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[i + 1], "", "nessuno strumento");
+        assert_eq!(std::fs::read_to_string(&stdin_copy).unwrap(), "PROMPT-TEXT", "il prompt va su stdin, non negli argomenti");
+        assert!(!args.iter().any(|a| a.contains("PROMPT")));
+        let cwd = std::fs::read_to_string(&cwd_copy).unwrap();
+        assert!(cwd.trim().contains("tmp"), "cartella temporanea: {cwd}");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0, "cartella temporanea rimossa");
+    }
+
+    #[test]
+    fn real_runner_times_out_kills_the_group_and_cleans_up() {
+        let d = tempfile::tempdir().unwrap();
+        let pidfile = d.path().join("pid");
+        // un nipote che tiene aperta la pipe: il gruppo va ucciso per intero e nessuno aspetta la pipe
+        let launch = fake_claude(d.path(), &format!("sleep 300 &\necho $! > {}\nsleep 300", pidfile.display()));
+        let base = d.path().join("tmp");
+        let r = ClaudeRunner { launch, timeout: Duration::from_millis(500), temp_base: base.clone() };
+        let t = Instant::now();
+        assert!(r.run("x").is_none());
+        assert!(t.elapsed() < Duration::from_secs(5), "ritorno entro il timeout, non a pipe chiusa");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..100 {
+            // SAFETY: segnale 0 = solo verifica di esistenza
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone, "il discendente è stato ucciso");
     }
 }

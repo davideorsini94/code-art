@@ -44,9 +44,20 @@ const DRAIN_GRACE: Duration = Duration::from_millis(300);
 /// Esegue `cmd` con stdin chiuso e restituisce lo stdout se il processo termina entro `timeout`
 /// con successo; altrimenti uccide il suo gruppo e restituisce `None`. Non resta mai bloccata:
 /// lo stdout si legge in un buffer condiviso, senza aspettare la chiusura della pipe.
-fn stdout_with_timeout(mut cmd: Command, timeout: Duration) -> Option<String> {
+fn stdout_with_timeout(cmd: Command, timeout: Duration) -> Option<String> {
+    run_capture(cmd, timeout, None)
+}
+
+/// Come `stdout_with_timeout`, ma con `input` (se presente) scritto sullo stdin del figlio.
+pub fn run_capture(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Option<String> {
     in_new_session(&mut cmd);
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    let mut child = cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    if let (Some(data), Some(mut si)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut si, &data);
+        });
+    }
     let mut out = child.stdout.take()?;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let (done_tx, done_rx) = mpsc::channel::<()>();

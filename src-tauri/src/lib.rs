@@ -32,7 +32,7 @@ pub fn run() {
                 store.clone(),
                 sink,
                 claude::sessions::default_root(),
-                std::sync::Arc::new(claude::titles::ClaudeRunner { launch }),
+                std::sync::Arc::new(claude::titles::ClaudeRunner::new(launch)),
             );
             engine.set_titles(titles.clone());
             app.manage(engine);
