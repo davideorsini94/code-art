@@ -71,17 +71,18 @@ pub fn run() {
             pty::pty_kill,
             claude::sessions::conv_list,
             claude::sessions::conv_history,
-            claude::engine::claude_check,
-            claude::engine::conv_start,
-            claude::engine::conv_resume,
-            claude::engine::conv_send,
-            claude::engine::conv_answer,
-            claude::engine::conv_interrupt,
-            claude::engine::conv_set_model,
-            claude::engine::conv_set_permission_mode,
-            claude::engine::conv_mark_viewed,
-            claude::engine::conv_archive,
-            claude::engine::conv_running,
+            claude::commands::claude_check,
+            claude::commands::conv_start,
+            claude::commands::conv_resume,
+            claude::commands::conv_send,
+            claude::commands::conv_answer,
+            claude::commands::conv_interrupt,
+            claude::commands::conv_set_model,
+            claude::commands::conv_set_permission_mode,
+            claude::commands::conv_mark_viewed,
+            claude::commands::conv_archive,
+            claude::commands::conv_running,
+            claude::commands::conv_stop,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
         ])
@@ -89,8 +90,11 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| {
-        if let RunEvent::ExitRequested { .. } = event {
-            projects::mark_quitting(app);
+        match event {
+            RunEvent::ExitRequested { .. } => projects::mark_quitting(app),
+            // i processi `claude` non sopravvivono all'app (la chiusura di una finestra invece non li ferma)
+            RunEvent::Exit => app.state::<claude::engine::Engine>().stop_all(),
+            _ => {}
         }
     });
 }

@@ -578,7 +578,8 @@ pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// `is_running(session_id)`: la conversazione è pilotata adesso da un processo del motore.
+/// `is_running(session_id)`: la conversazione è pilotata da un processo del motore (vivo, o uscito da meno
+/// di 60 s: le scritture recenti sul file sono nostre). Vedi `Engine::is_ours`.
 pub type IsRunning<'a> = &'a dyn Fn(&str) -> bool;
 
 pub fn sync_project_sessions(
@@ -711,7 +712,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                         if let Some(q) = handle.try_state::<super::titles::TitleQueue>() {
                             q.after_file_sync(&conv, before);
                         }
-                        let running = handle.try_state::<Engine>().is_some_and(|e| e.is_running(&conv.session_id));
+                        let running = handle.try_state::<Engine>().is_some_and(|e| e.is_ours(&conv.session_id));
                         fill_elsewhere(&mut conv, &dirs, now_ms(), running);
                         let _ = handle.emit_to(label.as_str(), "conv:upsert", conv);
                     }
@@ -749,7 +750,7 @@ pub async fn conv_list(app: AppHandle, window: WebviewWindow, project_id: String
     }
     tauri::async_runtime::spawn_blocking(move || {
         let engine = app.state::<Engine>();
-        let running = |id: &str| engine.is_running(id);
+        let running = |id: &str| engine.is_ours(id);
         super::titles::sync_and_enqueue(
             &app.state::<super::titles::TitleQueue>(),
             &default_root(),

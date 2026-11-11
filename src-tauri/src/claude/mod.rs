@@ -1,6 +1,7 @@
 //! Integrazione con Claude Code: tipi condivisi con l'interfaccia e lettura delle sessioni su disco.
 use serde::{Deserialize, Serialize};
 
+pub mod commands;
 pub mod engine;
 pub mod locate;
 pub mod protocol;

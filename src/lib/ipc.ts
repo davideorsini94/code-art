@@ -57,5 +57,7 @@ export const convSetPermissionMode = (sessionId: string, mode: string) =>
 export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_viewed', { sessionId })
 export const convArchive = (sessionId: string, archived: boolean) => invoke<void>('conv_archive', { sessionId, archived })
 export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })
+/** Ferma il processo della conversazione (interrompe un turno in corso); si riprende al prossimo invio. */
+export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessionId })
 export const convRename = (sessionId: string, title: string) => invoke<void>('conv_rename', { sessionId, title })
 export const convUnlockTitle = (sessionId: string) => invoke<void>('conv_unlock_title', { sessionId })

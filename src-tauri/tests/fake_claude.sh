@@ -7,6 +7,12 @@
 #   FAKE_CLAUDE_CRASH_AFTER se impostata: dopo N righe della fixture scrive su stderr ed esce con 1
 #   FAKE_CLAUDE_BARRIER     se impostata a N: prima di ristampare aspetta (max 5 s) che N processi
 #                           abbiano ricevuto un messaggio; scrive "ok" o "timeout" in <sessione>.barrier
+#   FAKE_CLAUDE_STRAY       stderr|stdout: avvia un processo in background (sleep 5) che eredita quella pipe
+#   FAKE_CLAUDE_EXIT_AT_START  al primo avvio della sessione esce subito con questo codice
+#   FAKE_CLAUDE_HANG        dopo un messaggio utente resta bloccato (sleep 30 in background + wait), ignora stdin
+#
+# Ogni avvio aggiunge una riga a <sessione>.spawns; prima di un'uscita volontaria scrive <sessione>.exited;
+# FAKE_CLAUDE_HANG scrive il pid del processo in background in <sessione>.hang.
 #
 # Una riga `control_request` della fixture sospende la ristampa finché su stdin non arriva una
 # `control_response` (come la CLI vera, che aspetta la decisione dell'host).
@@ -22,6 +28,15 @@ done
 
 : > "$out/$sid.args"
 for a in "$@"; do printf '%s\n' "$a" >> "$out/$sid.args"; done
+echo x >> "$out/$sid.spawns"
+case "$FAKE_CLAUDE_STRAY" in
+  stderr) sleep 5 < /dev/null > /dev/null & ;;
+  stdout) sleep 5 < /dev/null 2> /dev/null & ;;
+esac
+if [ -n "$FAKE_CLAUDE_EXIT_AT_START" ] && [ "$(grep -c . "$out/$sid.spawns")" -eq 1 ]; then
+  : > "$out/$sid.exited"
+  exit "$FAKE_CLAUDE_EXIT_AT_START"
+fi
 pwd -P > "$out/$sid.cwd"
 : > "$out/$sid.stdin"
 
@@ -47,6 +62,7 @@ replay() {
     count=$((count + 1))
     if [ -n "$FAKE_CLAUDE_CRASH_AFTER" ] && [ "$count" -ge "$FAKE_CLAUDE_CRASH_AFTER" ]; then
       echo "errore finto: connessione persa" >&2
+      : > "$out/$sid.exited"
       exit 1
     fi
     case "$line" in
@@ -63,7 +79,14 @@ replay() {
 while IFS= read -r msg; do
   printf '%s\n' "$msg" >> "$out/$sid.stdin"
   case "$msg" in
-    *'"type":"user"'*) replay ;;
+    *'"type":"user"'*)
+      if [ -n "$FAKE_CLAUDE_HANG" ]; then
+        sleep 30 &
+        echo $! > "$out/$sid.hang"
+        wait
+      fi
+      replay
+      ;;
   esac
 done
 exit 0

@@ -306,6 +306,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_conversation(&self, session_id: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM conversations WHERE session_id = ?1", [session_id]).map_err(err)?;
+        Ok(())
+    }
+
     pub fn set_conversation_archived(&self, session_id: &str, archived: bool) -> Result<()> {
         self.conn()
             .execute("UPDATE conversations SET archived = ?2 WHERE session_id = ?1", params![session_id, archived])
