@@ -25,6 +25,8 @@
   let nextKey = 1
   let starting = false
   let unlisten: (() => void)[] = []
+  let listening: Promise<void> | undefined
+  const pendingExit = new Set<number>() // pty:exit arrivato prima che spawn() restituisse l'id
 
   function decode(b64: string): Uint8Array {
     const bin = atob(b64)
@@ -40,8 +42,12 @@
     return loading
   }
 
-  async function listenOnce() {
-    if (unlisten.length) return
+  function listenOnce(): Promise<void> {
+    listening ??= register()
+    return listening
+  }
+
+  async function register() {
     const win = getCurrentWebviewWindow()
     unlisten = await Promise.all([
       win.listen<{ id: number; data: string }>('pty:data', ({ payload }) => {
@@ -54,19 +60,24 @@
         }
       }),
       win.listen<{ id: number }>('pty:exit', ({ payload }) => {
-        const key = byPty.get(payload.id)
-        if (key === undefined) return
-        byPty.delete(payload.id)
-        const l = live.get(key)
-        if (l) l.id = null
-        const t = tabs.find((x) => x.key === key)
-        if (t) {
-          t.exited = true
-          t.id = null
-        }
-        l?.term.write('\r\n\x1b[2m[processo terminato]\x1b[0m\r\n')
+        if (!byPty.has(payload.id)) pendingExit.add(payload.id)
+        else markExited(payload.id)
       }),
     ])
+  }
+
+  function markExited(id: number) {
+    const key = byPty.get(id)
+    if (key === undefined) return
+    byPty.delete(id)
+    const l = live.get(key)
+    if (l) l.id = null
+    const t = tabs.find((x) => x.key === key)
+    if (t) {
+      t.exited = true
+      t.id = null
+    }
+    l?.term.write('\r\n\x1b[2m[processo terminato]\x1b[0m\r\n')
   }
 
   const theme = {
@@ -112,18 +123,22 @@
     term.open(el)
     const l: Live = { term, fit, el, id: null }
     live.set(key, l)
-    tabs.push({ key, title: `zsh ${key}`, id: null, exited: false })
+    tabs.push({ key, title: `terminale ${key}`, id: null, exited: false })
     select(key)
     await tick()
     fit.fit()
     try {
-      const id = await ptySpawn(cwd, term.cols, term.rows)
+      const { id, shell } = await ptySpawn(cwd, term.cols, term.rows)
       l.id = id
       const t = tabs.find((x) => x.key === key)
-      if (t) t.id = id
+      if (t) {
+        t.id = id
+        t.title = `${shell} ${key}`
+      }
       byPty.set(id, key)
       for (const b of pending.get(id) ?? []) term.write(b)
       pending.delete(id)
+      if (pendingExit.delete(id)) markExited(id)
       term.onData((d) => void ptyWrite(id, d).catch(() => {}))
       term.onResize(({ cols, rows }) => void ptyResize(id, cols, rows).catch(() => {}))
     } catch {

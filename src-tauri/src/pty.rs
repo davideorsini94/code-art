@@ -15,16 +15,18 @@ const MAX_PER_WINDOW: usize = 16;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_DIM: u16 = 1000;
 
+/// Maniglie del PTY, ciascuna con il proprio lock: un'operazione bloccata (es. scrittura su una
+/// shell che non legge) non deve tenere fermo il lock globale della mappa né le altre operazioni.
 struct Session {
     owner: String,
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Ptys {
-    next: AtomicU32,
+    next: Arc<AtomicU32>,
     sessions: Arc<Mutex<HashMap<u32, Session>>>,
 }
 
@@ -72,7 +74,11 @@ impl Ptys {
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let session = Session { owner: owner.to_string(), master: pair.master, writer, killer: child.clone_killer() };
+        let session = Session {
+            owner: owner.to_string(), master: Arc::new(Mutex::new(pair.master)),
+            writer: Arc::new(Mutex::new(writer)),
+            killer: Arc::new(Mutex::new(child.clone_killer())),
+        };
         self.sessions.lock().unwrap().insert(id, session);
 
         let sessions = self.sessions.clone();
@@ -91,34 +97,49 @@ impl Ptys {
         Ok(id)
     }
 
-    fn with_owned<T>(&self, owner: &str, id: u32, f: impl FnOnce(&mut Session) -> T) -> Result<T, String> {
-        let mut map = self.sessions.lock().unwrap();
-        match map.get_mut(&id) {
-            Some(s) if s.owner == owner => Ok(f(s)),
-            _ => Err("terminale inesistente".into()), // anche se di un'altra finestra: stessa risposta
-        }
+    /// Verifica il proprietario e restituisce `f` applicata a un clone della sessione: il lock della
+    /// mappa è già rilasciato quando `f` (potenzialmente bloccante) viene eseguita.
+    fn owned<T>(&self, owner: &str, id: u32, f: impl FnOnce(&Session) -> T) -> Result<T, String> {
+        let s = {
+            let map = self.sessions.lock().unwrap();
+            match map.get(&id) {
+                Some(s) if s.owner == owner => Session {
+                    owner: s.owner.clone(),
+                    master: s.master.clone(),
+                    writer: s.writer.clone(),
+                    killer: s.killer.clone(),
+                },
+                _ => return Err("terminale inesistente".into()), // anche se di un'altra finestra: stessa risposta
+            }
+        };
+        Ok(f(&s))
     }
 
     pub fn write(&self, owner: &str, id: u32, data: &[u8]) -> Result<(), String> {
         if data.len() > MAX_WRITE_BYTES {
             return Err("dati troppo grandi".into());
         }
-        self.with_owned(owner, id, |s| s.writer.write_all(data).and_then(|_| s.writer.flush()).map_err(|e| e.to_string()))?
+        self.owned(owner, id, |s| {
+            let mut w = s.writer.lock().unwrap();
+            w.write_all(data).and_then(|_| w.flush()).map_err(|e| e.to_string())
+        })?
     }
 
     pub fn resize(&self, owner: &str, id: u32, cols: u16, rows: u16) -> Result<(), String> {
         let size = size(cols, rows)?;
-        self.with_owned(owner, id, |s| s.master.resize(size).map_err(|e| e.to_string()))?
+        self.owned(owner, id, |s| s.master.lock().unwrap().resize(size).map_err(|e| e.to_string()))?
     }
 
     pub fn kill(&self, owner: &str, id: u32) -> Result<(), String> {
-        self.with_owned(owner, id, |s| s.killer.kill().map_err(|e| e.to_string()))?
+        self.owned(owner, id, |s| s.killer.lock().unwrap().kill().map_err(|e| e.to_string()))?
     }
 
     /// Chiude tutti i PTY di una finestra (alla sua distruzione).
     pub fn kill_owner(&self, owner: &str) {
-        for s in self.sessions.lock().unwrap().values_mut().filter(|s| s.owner == owner) {
-            let _ = s.killer.kill();
+        let killers: Vec<_> =
+            self.sessions.lock().unwrap().values().filter(|s| s.owner == owner).map(|s| s.killer.clone()).collect();
+        for k in killers {
+            let _ = k.lock().unwrap().kill();
         }
     }
 }
@@ -129,6 +150,13 @@ impl Ptys {
 struct DataEvent {
     id: u32,
     data: String, // base64 dei byte grezzi: il testo UTF-8 può essere spezzato tra un chunk e l'altro
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnInfo {
+    id: u32,
+    shell: String, // nome della shell (basename), per il titolo della scheda
 }
 
 #[derive(Clone, Serialize)]
@@ -145,7 +173,7 @@ pub async fn pty_spawn(
     cwd: String,
     cols: u16,
     rows: u16,
-) -> Result<u32, String> {
+) -> Result<SpawnInfo, String> {
     let roots = roots_of(&window, &store).map_err(|e| e.message)?;
     let cwd: PathBuf = ensure_inside(&roots, Path::new(&cwd)).map_err(|e| e.message)?;
     if !cwd.is_dir() {
@@ -154,9 +182,10 @@ pub async fn pty_spawn(
     let label = window.label().to_string();
     let (a1, l1) = (app.clone(), label.clone());
     let (a2, l2) = (app, label.clone());
-    ptys.spawn(
+    let shell = login_shell();
+    let id = ptys.spawn(
         &label,
-        &login_shell(),
+        &shell,
         &["-l"],
         &cwd,
         cols,
@@ -168,22 +197,32 @@ pub async fn pty_spawn(
         move |id| {
             let _ = a2.emit_to(l2.as_str(), "pty:exit", ExitEvent { id });
         },
-    )
+    )?;
+    let shell = Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "shell".into());
+    Ok(SpawnInfo { id, shell })
+}
+
+/// Esegue un'operazione potenzialmente bloccante fuori dai worker async.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn pty_write(window: WebviewWindow, ptys: State<'_, Ptys>, id: u32, data: String) -> Result<(), String> {
-    ptys.write(window.label(), id, data.as_bytes())
+    let (p, l) = (ptys.inner().clone(), window.label().to_string());
+    blocking(move || p.write(&l, id, data.as_bytes())).await
 }
 
 #[tauri::command]
 pub async fn pty_resize(window: WebviewWindow, ptys: State<'_, Ptys>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    ptys.resize(window.label(), id, cols, rows)
+    let (p, l) = (ptys.inner().clone(), window.label().to_string());
+    blocking(move || p.resize(&l, id, cols, rows)).await
 }
 
 #[tauri::command]
 pub async fn pty_kill(window: WebviewWindow, ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
-    ptys.kill(window.label(), id)
+    let (p, l) = (ptys.inner().clone(), window.label().to_string());
+    blocking(move || p.kill(&l, id)).await
 }
 
 #[cfg(test)]
@@ -243,6 +282,34 @@ mod tests {
         assert!(!String::from_utf8_lossy(&out.lock().unwrap()).contains("intruso"));
         p.kill_owner("w1");
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), id);
+    }
+
+    #[test]
+    fn blocked_write_does_not_block_kill_or_other_ptys() {
+        let p = Ptys::default();
+        let (tx, rx) = channel();
+        // un figlio che non legge mai dal tty: una scrittura grande si blocca
+        let stuck = p
+            .spawn("w1", "/bin/sh", &["-c", "stty raw -echo; sleep 30"], Path::new("/tmp"), 80, 24, |_, _| {}, move |id| {
+                let _ = tx.send(id);
+            })
+            .unwrap();
+        let (other, other_out, _rx2) = start(&p, "w1");
+        std::thread::sleep(Duration::from_millis(300)); // lascia applicare stty
+        let p2 = p.clone();
+        let writer = std::thread::spawn(move || {
+            let _ = p2.write("w1", stuck, &vec![b'x'; 1024 * 1024]);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!writer.is_finished(), "la scrittura doveva essere bloccata");
+        let t = Instant::now();
+        p.write("w1", other, b"echo vivo-$((1+1))\n").unwrap();
+        assert!(wait_for(&other_out, "vivo-2"));
+        p.resize("w1", other, 90, 30).unwrap();
+        p.kill("w1", stuck).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), stuck);
+        assert!(t.elapsed() < Duration::from_secs(2));
+        p.kill_owner("w1");
     }
 
     #[test]
