@@ -2,12 +2,12 @@
 
 Data: 2026-11-11 · Stato: in attesa di approvazione
 
-Legenda: **[Davide]** = detto o confermato da lui. **[scelta mia]** = decisione
-presa da Claude, non discussa: Davide può ribaltarla.
+Legenda: **[utente]** = detto o confermato dall'utente. **[scelta mia]** = decisione
+presa da Claude, non discussa: l'utente può ribaltarla.
 
 ## 1. Perché
 
-Davide sviluppa da mesi quasi solo attraverso Claude Code, usando l'estensione
+L'utente sviluppa da mesi quasi solo attraverso Claude Code, usando l'estensione
 di VS Code. Lì le conversazioni sono tab dell'editor mescolate ai file, tutte
 con titoli poco parlanti. Il tempo perso ogni giorno è **capire quale tab è la
 conversazione giusta**. In Mission Control, inoltre, le finestre non dicono a
@@ -19,25 +19,25 @@ di mano nella stessa finestra.
 
 ## 2. Obiettivi
 
-1. **Trovare la conversazione giusta in un colpo d'occhio.** [Davide]
+1. **Trovare la conversazione giusta in un colpo d'occhio.** [utente]
    - Il titolo di ogni conversazione descrive il suo argomento principale e si
-     aggiorna da solo quando l'argomento cambia. [Davide]
+     aggiorna da solo quando l'argomento cambia. [utente]
    - Ogni conversazione mostra uno stato: *al lavoro* / *aspetta te* /
      *inattiva*. [scelta mia, vista e approvata nel mockup]
    - Esiste una vista d'insieme delle conversazioni del progetto (schede con
      titolo, riassunto di due righe, stato, ultima attività), non una fila di
      tab strette. [scelta mia, approvata nel mockup]
 2. **Una finestra = un progetto, con il nome del progetto come titolo della
-   finestra macOS**, leggibile in Mission Control. [Davide]
+   finestra macOS**, leggibile in Mission Control. [utente]
 3. **Funzionalità da IDE sul modello di VS Code**: albero delle cartelle dei
-   progetti aperti, editor, terminale, git/GitHub, ricerca. [Davide]
+   progetti aperti, editor, terminale, git/GitHub, ricerca. [utente]
 4. **SSH**: terminale sul server e file remoti navigabili come una cartella
-   locale, con copia/spostamento tra Mac e server. [Davide]
+   locale, con copia/spostamento tra Mac e server. [utente]
 5. **Database**: Postgres, MongoDB, Oracle; query per vedere, aggiungere e
-   modificare dati. [Davide]
+   modificare dati. [utente]
 6. **Grafica**: tema scuro riposante in stile "liquid glass" Apple, che
-   sorprenda. [Davide]
-7. **Leggero e rapido**, app installabile su Mac. [Davide]
+   sorprenda. [utente]
+7. **Leggero e rapido**, app installabile su Mac. [utente]
 
 ## 3. Non-obiettivi [scelte mie]
 
@@ -45,8 +45,8 @@ di mano nella stessa finestra.
 - Windows e Linux.
 - Sviluppo remoto "alla VS Code Remote" (nessun agente installato sul server;
   Claude gira solo in locale).
-- Debugger grafico (breakpoint, step). Si usa il terminale. *Chiesto a
-  Davide, non ha risposto su questo punto: resta escluso finché non lo
+- Debugger grafico (breakpoint, step). Si usa il terminale. *Chiesto
+  all'utente, non ha risposto su questo punto: resta escluso finché non lo
   chiede; sarebbe una tappa 5 a sé.*
 - Tema chiaro.
 - Collaborazione in tempo reale, sincronizzazione impostazioni su cloud.
@@ -61,7 +61,7 @@ di mano nella stessa finestra.
 - Titoli delle conversazioni che cambiano così spesso da non essere più
   riconoscibili.
 
-## 5. Tecnologia [scelte mie, comunicate a Davide: "scegli tu"]
+## 5. Tecnologia [scelte mie, comunicate all'utente: "scegli tu"]
 
 | Parte | Scelta | Motivo |
 |---|---|---|
@@ -69,7 +69,7 @@ di mano nella stessa finestra.
 | Interfaccia | **Svelte 5 + TypeScript + Vite** | runtime minimo, reattività fine |
 | Editor | **Monaco** | stesso motore di VS Code: scorciatoie, multi-cursore, diff |
 | Terminale | **xterm.js** + PTY in Rust (`portable-pty`) | standard, veloce |
-| Claude | **CLI `claude` già installata** (v2.1.x in `~/.local/bin`), pilotata in modalità streaming JSON | riusa login, impostazioni, MCP e sessioni esistenti di Davide; nessuna chiave API |
+| Claude | **CLI `claude` già installata** (v2.1.x in `~/.local/bin`), pilotata in modalità streaming JSON | riusa login, impostazioni, MCP e sessioni esistenti dell'utente; nessuna chiave API |
 | Git | `git` di sistema | affidabile, zero dipendenze |
 | GitHub | CLI `gh` già installata e autenticata | PR e repo senza gestire token |
 | SSH/SFTP | crate Rust `russh` + `russh-sftp` | nessun processo esterno, trasferimenti con avanzamento |
@@ -87,7 +87,7 @@ Applicazioni [scelta mia].
 
 ## 6. La finestra
 
-Layout approvato da Davide sul mockup
+Layout approvato dall'utente sul mockup
 (`.superpowers/brainstorm/41040-1794386226/content/main-window.html`, che fa
 da riferimento visivo). Da sinistra a destra:
 
@@ -110,7 +110,7 @@ progetto col nome della cartella; il nome è modificabile. Il titolo nativo
 della finestra macOS è sempre e solo il nome del progetto. Ogni progetto apre
 la propria finestra; riaprire un progetto già aperto porta in primo piano la
 sua finestra. All'avvio si riaprono le finestre dell'ultima sessione. [scelta
-mia nei dettagli, requisito di Davide nella sostanza]
+mia nei dettagli, requisito dell'utente nella sostanza]
 
 **Progetti con più cartelle** [scelta mia]: la prima cartella è la *principale*.
 Le nuove conversazioni partono lì, con le altre cartelle aggiunte come
@@ -187,7 +187,7 @@ interrotti non ripartono da soli. Nessun processo supervisore separato.
   attuale e deve restituirlo invariato se l'argomento principale non è
   cambiato (stabilità prima di tutto).
 - Sotto il titolo resta visibile il titolo precedente con l'ora del cambio.
-- Davide può rinominare a mano; un titolo manuale blocca l'aggiornamento
+- L'utente può rinominare a mano; un titolo manuale blocca l'aggiornamento
   automatico finché non lo sblocca.
 - Per le sessioni importate il titolo si genera alla prima apertura del
   progetto, in sottofondo, partendo dalle più recenti (massimo 20; le altre
@@ -197,7 +197,7 @@ interrotti non ripartono da soli. Nessun processo supervisore separato.
 ### Stati
 - **al lavoro**: un turno è in corso.
 - **aspetta te**: c'è una richiesta di permesso o una domanda aperta, oppure
-  il turno è finito e Davide non ha ancora aperto la conversazione.
+  il turno è finito e l'utente non ha ancora aperto la conversazione.
 - **inattiva**: turno finito e già visto.
 - Le conversazioni si possono **archiviare** (spariscono dalla lista, restano
   ricercabili).
@@ -215,7 +215,7 @@ Dock contano le *aspetta te*. Notifica macOS quando una conversazione passa ad
   nell'editor a fianco con un click.
 - Campo di risposta con invio ⌘↵, allegare file trascinandoli dall'albero,
   interrompere il turno, scegliere modello e modalità dei permessi.
-- **Parità con l'uso quotidiano di Davide** [Davide: "agenti, plugin, cambio
+- **Parità con l'uso quotidiano dell'utente** [utente: "agenti, plugin, cambio
   modelli, quasi sempre bypass permissions, Playwright e altri plugin, tutto
   quello che serve"]. Poiché il motore è la sua CLI, plugin, skill, server MCP
   (Playwright compreso), agenti e impostazioni funzionano così come sono
@@ -251,27 +251,27 @@ Dock contano le *aspetta te*. Notifica macOS quando una conversazione passa ad
 ## 9. Tappe
 
 Ogni tappa ha un suo piano di realizzazione e termina con un'app installabile
-e usabile. Ordine proposto da Claude, visto da Davide.
+e usabile. Ordine proposto da Claude, visto dall'utente.
 
 1. **Il cuore** — sezioni 6, 7, 8.
 2. **Strumenti da dev**
    - Git: modifiche, diff, stage, commit, fetch, pull, push, merge, cambio e
-     creazione branch, risoluzione conflitti nell'editor. [Davide]
+     creazione branch, risoluzione conflitti nell'editor. [utente]
    - GitHub: creare repository, pull request (creare, elencare, vedere stato
-     e controlli, unire). [Davide] Clonare un repo dal proprio account
+     e controlli, unire). [utente] Clonare un repo dal proprio account
      [scelta mia].
    - Ricerca e sostituzione in tutto il progetto (con `ripgrep` incluso).
    - Completamento intelligente: TypeScript/JavaScript, JSON, HTML, CSS già in
      Monaco; altri linguaggi tramite i language server installati sulla
-     macchina. *I linguaggi da coprire per primi vanno chiesti a Davide
+     macchina. *I linguaggi da coprire per primi vanno chiesti all'utente
      all'inizio di questa tappa.*
 3. **SSH**
    - Elenco server (letti anche da `~/.ssh/config`), chiavi e ssh-agent,
      password nel Portachiavi.
    - Il server compare nell'albero: espandi, crea, rinomina, sposta, elimina.
    - Trascinamento tra Mac e server nei due sensi, con avanzamento e
-     annullamento. [Davide]
-   - Terminale remoto, aperto nella cartella selezionata. [Davide]
+     annullamento. [utente]
+   - Terminale remoto, aperto nella cartella selezionata. [utente]
    - Doppio click apre il file remoto nell'editor; salvare lo riscrive sul
      server [scelta mia].
 4. **Database**
@@ -282,7 +282,7 @@ e usabile. Ordine proposto da Claude, visto da Davide.
    - Modifica in griglia: le celle cambiate, le righe aggiunte ed eliminate
      diventano istruzioni mostrate in anteprima e applicate solo dopo
      conferma, in transazione. Tabelle senza chiave primaria: sola lettura in
-     griglia. Mongo: documenti modificabili come JSON. [Davide nella sostanza,
+     griglia. Mongo: documenti modificabili come JSON. [utente nella sostanza,
      scelte mie nei dettagli]
    - Ordine: 4a Postgres e MongoDB; 4b Oracle (richiede l'installazione di
      Oracle Instant Client, guidata dall'app) [scelta mia].
@@ -312,7 +312,7 @@ e usabile. Ordine proposto da Claude, visto da Davide.
 
 ## 11 bis. Sicurezza
 
-Requisito di Davide (aggiunto in corso d'opera): "un IDE sicuro". Le misure
+Requisito dell'utente (aggiunto in corso d'opera): "un IDE sicuro". Le misure
 concrete sono [scelte mie]:
 
 **Principio**: l'interfaccia è una pagina web che mostra contenuti non fidati
@@ -342,8 +342,8 @@ potenzialmente compromessa: il core Rust non si fida di ciò che gli chiede.
   lista di argomenti, mai componendo una riga di comando da testo.
 - **Segreti solo nel Portachiavi macOS.** Password SSH e DB non finiscono mai
   in SQLite, file, log o messaggi di errore.
-- **Bypass permissions resta una scelta visibile.** È il default voluto da
-  Davide, ma la modalità attiva è sempre in vista (ambra) e alla prima
+- **Bypass permissions resta una scelta visibile.** È il default voluto
+  dall'utente, ma la modalità attiva è sempre in vista (ambra) e alla prima
   apertura di una cartella mai vista l'app chiede conferma che sia fidata
   prima di avviare Claude lì dentro.
 - **SSH** (tappa 3): verifica della chiave del server contro `known_hosts`,
@@ -366,7 +366,7 @@ potenzialmente compromessa: il core Rust non si fida di ciò che gli chiede.
 - Interfaccia: test dei componenti con Vitest per lista conversazioni
   (ordinamento, stati) e albero.
 - Fine di ogni tappa: prova manuale dell'app installata dal `.dmg` su un
-  progetto reale di Davide, con controllo degli obiettivi di prestazione.
+  progetto reale dell'utente, con controllo degli obiettivi di prestazione.
 
 ## 13. Lasciato al costruttore
 
