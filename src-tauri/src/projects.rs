@@ -101,8 +101,6 @@ pub fn window_label(project_id: &str) -> String {
 
 /// Il titolo nativo resta impostato (Mission Control, menu Finestra, Dock) ma non va disegnato
 /// nella barra: lo disegna già `Titlebar.svelte`.
-const HIDE_NATIVE_TITLE: bool = true;
-
 fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
@@ -110,7 +108,7 @@ fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<Webv
         .min_inner_size(900.0, 560.0)
         .transparent(true)
         .title_bar_style(TitleBarStyle::Overlay)
-        .hidden_title(HIDE_NATIVE_TITLE)
+        .hidden_title(true)
         .disable_drag_drop_handler() // serve per il drag & drop HTML5 dell'albero file
         .build()?;
     apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None)
@@ -391,12 +389,20 @@ mod tests {
     use super::*;
     use crate::store::{Project, Store};
 
+    /// Corpo di `build_window` letto dal sorgente: i test sotto fissano le opzioni della finestra.
+    fn build_window_source() -> &'static str {
+        let src = include_str!("projects.rs");
+        let start = src.find("fn build_window(").unwrap();
+        let end = start + src[start..].find("\n}\n").unwrap();
+        &src[start..end]
+    }
+
     #[test]
-    fn native_title_hidden_in_title_bar() {
-        // senza questo il titolo appare doppio (nativo + Titlebar.svelte)
-        assert!(HIDE_NATIVE_TITLE);
-        let conf = include_str!("../tauri.conf.json");
-        assert!(!conf.contains("\"hiddenTitle\": false"));
+    fn native_title_hidden_but_still_set() {
+        // senza hidden_title il titolo appare doppio (nativo + Titlebar.svelte); .title resta per Mission Control
+        let body = build_window_source();
+        assert!(body.contains(".hidden_title(true)"), "{body}");
+        assert!(body.contains(".title(title)"), "{body}");
     }
 
     fn store() -> (tempfile::TempDir, Store) {

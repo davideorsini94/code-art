@@ -17,7 +17,7 @@ Misure fatte da riga di comando su macOS (Apple Silicon), build release firmata 
 |---|---|---|
 | `Code Art.app` < 40 MB | 11 MB (`du -sh "…/Code Art.app"`); dmg 7,3 MB (`ls -l`) | OK (Monaco è caricato in modo pigro, nessuna riduzione necessaria) |
 | Avvio a freddo → finestra ≤ 1 s | 339–608 ms (3 lanci; il primo, a freddo, 608 ms) | OK |
-| RAM app + WebKit < 250 MB | ~95 MB di `footprint` (app 28–34, WebContent 46, GPU 14, Networking 6) sulla finestra di benvenuto; RSS sommato ~200 MB | OK |
+| RAM app + WebKit < 250 MB | ~95 MB di `footprint` (app 28–34, WebContent 46, GPU 14, Networking 6) sulla finestra di benvenuto; RSS sommato ~200 MB | provvisorio (solo finestra di benvenuto) |
 
 Metodi:
 - Avvio: piccolo programma Swift che lancia il binario e interroga `CGWindowListCopyWindowInfo` ogni 3 ms
