@@ -17,6 +17,7 @@
   import { editor } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { tooltip } from '../lib/tooltip'
+  import { errorText } from '../lib/errors'
 
   type Item = { key: string; section: string; label: string; labelPos: number[]; detail?: string; detailPos?: number[]; badge?: string; run: () => void | Promise<void> }
 
@@ -228,7 +229,7 @@
         await item.run()
         palette.close()
       } catch (e) {
-        error = `Impossibile salvare: ${String(e)}`
+        error = `Impossibile salvare: ${errorText(e)}`
       }
       return
     }

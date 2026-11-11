@@ -15,21 +15,16 @@
   import { tooltip } from '../lib/tooltip'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
   import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, PATH_DRAG_TYPE, imageExt, mentionFor } from '../lib/conv/paths'
+  import { PERMISSION_MODES as MODES, UNTRUSTED_HINT } from '../lib/conv/labels'
   import type { Conversation } from '../lib/types'
 
   let { conv }: { conv: Conversation } = $props()
-
-  const MODES: [string, string][] = [
-    ['bypassPermissions', 'Senza conferme'],
-    ['acceptEdits', 'Accetta modifiche'],
-    ['plan', 'Piano'],
-    ['default', 'Chiedi sempre'],
-  ]
 
   type Thumb = { url: string; bytes: Uint8Array; ext: string; name: string; path?: string }
 
   const sessionId = $derived(conv.sessionId)
   const working = $derived(conv.status === 'working')
+  const untrusted = $derived(projectStore.untrusted.length > 0)
   const init = $derived(conversations.inits[sessionId])
   const commands = $derived(init?.slashCommands?.length ? init.slashCommands : BUILTIN_COMMANDS)
   const currentModel = $derived(displayedModel({ convModel: conv.model, initModel: init?.model ?? null, lastSetAt: modelSetAt[sessionId] ?? null, initAt: init?.at ?? null }))
@@ -149,7 +144,7 @@
     thumbs = thumbs.filter((x) => x !== t)
   }
 
-  const canSend = $derived(!working && !busy && (text.trim() !== '' || thumbs.length > 0))
+  const canSend = $derived(!working && !busy && !untrusted && (text.trim() !== '' || thumbs.length > 0))
 
   async function send() {
     if (!canSend) return
@@ -181,7 +176,7 @@
     try {
       await op()
     } catch (e) {
-      error = String(e)
+      error = errorText(e)
     }
   }
   const interrupt = () => run(() => convInterrupt(sessionId))
@@ -191,7 +186,7 @@
     try {
       await op()
     } catch (e) {
-      error = String(e)
+      error = errorText(e)
       el.value = actual
     }
   }
@@ -229,13 +224,18 @@
     }
   }
 
-  const sendTip = $derived<string | { text: string; shortcut: string }>(canSend ? { text: 'Invia il messaggio', shortcut: '⌘↵' } : busy ? 'Invio in corso…' : 'Scrivi un messaggio per inviare')
+  const sendTip = $derived<string | { text: string; shortcut: string }>(
+    untrusted ? UNTRUSTED_HINT : canSend ? { text: 'Invia il messaggio', shortcut: '⌘↵' } : busy ? 'Invio in corso…' : 'Scrivi un messaggio per inviare',
+  )
   const modeLabel = $derived(modes.find(([m]) => m === conv.permissionMode)?.[1] ?? conv.permissionMode)
   const R = 8
   const C = 2 * Math.PI * R
 </script>
 
 <div class="composer" role="group" aria-label="Rispondi a Claude" {ondragover} {ondrop}>
+  {#if conv.maybeOpenElsewhere}
+    <p class="warn" role="note">Questa conversazione sembra aperta anche in un altro programma: le risposte potrebbero mescolarsi.</p>
+  {/if}
   {#if thumbs.length}
     <ul class="thumbs" aria-label="Immagini allegate">
       {#each thumbs as t (t)}
@@ -272,7 +272,7 @@
     <span class="hint" use:tooltip={{ text: 'Invia il messaggio', shortcut: '⌘↵' }}>⌘↵</span>
   </div>
 
-  {#if error}<p class="err" role="alert">{error}</p>{/if}
+  {#if error}<p class="err" role="alert">{error}</p>{:else if untrusted}<p class="ro">{UNTRUSTED_HINT}</p>{/if}
 
   <div class="bar">
     <label class="chip mode" class:bypass={conv.permissionMode === 'bypassPermissions'}>
@@ -341,5 +341,7 @@
   .btn.go { background: var(--accent); color: #10131c; border-color: transparent; font-weight: 600; }
   .btn.stop { border-color: var(--wait); color: var(--wait); }
   .err { color: var(--err); font-size: 11.5px; margin: 0; }
+  .ro { color: var(--faint); font-size: 11.5px; margin: 0; }
+  .warn { color: var(--wait); font-size: 11.5px; margin: 0; }
   @media (prefers-reduced-motion: no-preference) { .chip, .box { transition: border-color var(--dur); } }
 </style>

@@ -22,6 +22,7 @@ vi.mock('../lib/ipc', () => ({
 import Composer from './Composer.svelte'
 import { chat } from '../lib/stores/chat.svelte'
 import { conversations } from '../lib/stores/conversations.svelte'
+import { projectStore } from '../lib/stores/project.svelte'
 import * as ipc from '../lib/ipc'
 import type { Conversation } from '../lib/types'
 
@@ -35,6 +36,7 @@ beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
   conversations.inits = {}
+  projectStore.untrusted = []
   vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() }))
 })
 afterEach(cleanup)
@@ -230,5 +232,29 @@ describe('Composer', () => {
     localStorage.setItem('codeart.draft.sz', 'x')
     await conversations.archive('sz', true)
     expect(localStorage.getItem('codeart.draft.sz')).toBeNull()
+  })
+
+  it('untrusted folder: send is disabled with the reason, before any click', async () => {
+    projectStore.untrusted = ['/Users/dev/app']
+    render(Composer, { conv: { ...base, sessionId: 'su' } })
+    const ta = screen.getByLabelText('Messaggio')
+    await fireEvent.input(ta, { target: { value: 'ciao' } })
+    expect((screen.getByRole('button', { name: 'Invia' }) as HTMLButtonElement).disabled).toBe(true)
+    await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true })
+    expect(ipc.convSend).not.toHaveBeenCalled()
+    expect(screen.getByText('Cartella non fidata — sola lettura')).toBeTruthy()
+  })
+
+  it('command errors use the readable text, never the raw code', async () => {
+    vi.mocked(ipc.convSetModel).mockRejectedValueOnce('untrusted_folder')
+    render(Composer, { conv: { ...base, sessionId: 'se' } })
+    await fireEvent.change(screen.getByLabelText('Modello') as HTMLSelectElement, { target: { value: 'opus' } })
+    await screen.findByText('Cartella non fidata: sola lettura, Claude e terminale disattivati')
+    expect(screen.queryByText('untrusted_folder')).toBeNull()
+  })
+
+  it('warns above the composer when the conversation may be open elsewhere', () => {
+    render(Composer, { conv: { ...base, sessionId: 'sx', maybeOpenElsewhere: true } })
+    expect(screen.getByRole('note').textContent).toMatch(/aperta anche in un altro programma/)
   })
 })

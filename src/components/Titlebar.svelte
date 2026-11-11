@@ -6,9 +6,12 @@
   import { hooks } from '../lib/palette/search'
   import { onMount } from 'svelte'
   import { tooltip } from '../lib/tooltip'
+  import { errorText } from '../lib/errors'
 
   let editing = $state(false)
   let draft = $state('')
+  let renameError = $state<string | null>(null)
+  let errorTimer: ReturnType<typeof setTimeout> | undefined
 
   function startEdit() {
     if (!projectStore.project) return
@@ -20,7 +23,15 @@
     if (!editing) return
     editing = false
     const name = draft.trim()
-    if (name && name !== projectStore.project?.name) await projectStore.rename(name)
+    if (!name || name === projectStore.project?.name) return
+    clearTimeout(errorTimer)
+    renameError = null
+    try {
+      await projectStore.rename(name)
+    } catch (e) {
+      renameError = `Impossibile rinominare: ${errorText(e)}`
+      errorTimer = setTimeout(() => (renameError = null), 5000)
+    }
   }
 
   onMount(() => {
@@ -52,13 +63,16 @@
       {projectStore.project?.name ?? 'Code Art'}
     </div>
   {/if}
+  {#if renameError}<span class="err" role="alert">{renameError}</span>{/if}
   {#if projectStore.branch}
     <div class="branch" data-tauri-drag-region use:tooltip={`Ramo Git: ${projectStore.branch}`}>⎇ {projectStore.branch}</div>
   {/if}
   {#if conversations.active > 0}
     <div class="active" data-tauri-drag-region>{activeLabel(conversations.active)}</div>
   {/if}
-  <button class="pal" use:tooltip={{ text: 'Cerca file, conversazioni e comandi', shortcut: '⌘K' }} onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
+  {#if projectStore.project}
+    <button class="pal" use:tooltip={{ text: 'Cerca file, conversazioni e comandi', shortcut: '⌘K' }} onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
+  {/if}
   {#if conversations.waiting > 0}
     <span class="chip" use:tooltip={'Conversazioni che aspettano una tua risposta'}><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
   {/if}
@@ -87,6 +101,7 @@
     background: var(--glass);
     outline: none;
   }
+  .err { font-size: 12px; color: var(--err); }
   .branch { font-size: 12px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; }
   .active { font-size: 12px; color: var(--faint); white-space: nowrap; }
   .chip {

@@ -1,10 +1,14 @@
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { listenProject } from '../events'
 import { convArchive, convDelete, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
-import { errorText } from '../errors'
+import { errorText, UNTRUSTED } from '../errors'
+import { projectStore } from './project.svelte'
 import { activeCount, nextActiveAfterRemoval, removeConversation, sortConversations, upsertConversation, waitingCount } from '../conv/order'
 import { clearDraft } from '../conv/draft'
 import type { Conversation } from '../types'
+
+/** Per quanto resta visibile un avviso non bloccante. */
+export const NOTICE_MS = 8000
 
 class ConversationStore {
   /** Tutte le conversazioni del progetto (anche archiviate), una per sessionId. */
@@ -22,6 +26,7 @@ class ConversationStore {
   private unlistenFocus: UnlistenFn | null = null
   private unlistenRemoved: UnlistenFn | null = null
   private generation = 0
+  private noticeTimer: ReturnType<typeof setTimeout> | null = null
 
   list = $derived(sortConversations(this.all, this.showArchived))
   waiting = $derived(waitingCount(this.all))
@@ -104,9 +109,22 @@ class ConversationStore {
     }
   }
 
+  /** Mostra (o toglie) l'avviso; sparisce da solo dopo `NOTICE_MS`. */
+  private setNotice(msg: string | null) {
+    if (this.noticeTimer) clearTimeout(this.noticeTimer)
+    this.noticeTimer = msg === null ? null : setTimeout(() => this.setNotice(null), NOTICE_MS)
+    this.notice = msg
+  }
+
   /** Nuova conversazione nel progetto corrente; la seleziona. Il sessionId è nuovo: nessun segnaposto in lista, arriva con `conv:upsert`. */
   async create(): Promise<string | null> {
     if (!this.projectId) return null
+    this.setNotice(null)
+    // cartella non fidata: il core rifiuterebbe; il pulsante è già spento, qui vale anche per la palette
+    if (projectStore.untrusted.length > 0) {
+      this.error = errorText(UNTRUSTED)
+      return null
+    }
     try {
       const id = await convStart(this.projectId)
       await this.select(id)
@@ -117,8 +135,10 @@ class ConversationStore {
     }
   }
 
-  private async run(op: () => Promise<unknown>) {
+  /** Esegue un'azione dell'utente: l'avviso precedente sparisce (tranne per `keepNotice`). */
+  private async run(op: () => Promise<unknown>, keepNotice = false) {
     this.error = null
+    if (!keepNotice) this.setNotice(null)
     try {
       await op()
     } catch (e) {
@@ -134,8 +154,8 @@ class ConversationStore {
     this.run(async () => {
       const out = await convDelete(id)
       if (out.kind === 'busy') return // altra conferma già aperta: niente cambia, nemmeno un avviso esistente
-      this.notice = out.kind === 'deletedWithWarning' ? out.message : null
-    })
+      this.setNotice(out.kind === 'deletedWithWarning' ? out.message : null)
+    }, true)
   archive = (id: string, archived: boolean) =>
     this.run(async () => {
       await convArchive(id, archived)

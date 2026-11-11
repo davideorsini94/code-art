@@ -17,7 +17,7 @@
       {it.icon}
     </button>
   {/each}
-  <button class="bottom" use:tooltip={'Impostazioni (in arrivo)'} aria-label="Impostazioni">⚙</button>
+  <button class="bottom" use:tooltip={'Impostazioni: in arrivo'} aria-label="Impostazioni" aria-disabled="true">⚙</button>
 </nav>
 
 <style>
@@ -29,4 +29,5 @@
   }
   button.on { background: var(--glass2); color: var(--txt); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2); }
   .bottom { margin-top: auto; }
+  .bottom[aria-disabled='true'] { opacity: 0.4; cursor: default; }
 </style>
