@@ -1,13 +1,12 @@
 //! Strumenti di sistema (`git`, `gh`, language server): ricerca nell'ambiente di login ed esecuzione con
 //! timeout. Processi sempre con lista di argomenti, in una sessione propria (`kill_group` raggiunge i discendenti).
-// `find_tool`, `tool_command` e `run_tool` servono ai moduli git/gh/lsp dei task successivi.
-#![allow(dead_code)]
 use crate::claude::locate::{in_new_session, kill_group, login_env};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -17,6 +16,8 @@ const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 const HOME_DIRS: &[&str] = &[".cargo/bin", "go/bin"];
 /// Quanto stderr si conserva (il resto viene scartato).
 const STDERR_MAX: usize = 8 * 1024;
+/// Quanto stdout si accetta: oltre, il processo viene ucciso e `run_tool` restituisce un errore.
+const STDOUT_MAX: usize = 16 * 1024 * 1024;
 /// Dopo l'uscita del processo, quanto aspettare ancora la chiusura delle pipe.
 const DRAIN_GRACE: Duration = Duration::from_millis(300);
 
@@ -31,12 +32,8 @@ pub const LSP_SERVERS: &[(&str, &[&str], &str)] = &[
 
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Registra l'ambiente di login già calcolato all'avvio (evita una seconda shell di login).
-pub fn set_env(env: HashMap<String, String>) {
-    let _ = ENV.set(env);
-}
-
-/// Ambiente di login in cache; se nessuno l'ha ancora registrato lo calcola.
+/// Ambiente di login in cache. Condiviso con l'avvio dell'app (`engine::app_launch` lo usa): `OnceLock`
+/// serializza i chiamanti, quindi la shell di login parte una volta sola.
 pub fn env() -> &'static HashMap<String, String> {
     ENV.get_or_init(login_env)
 }
@@ -60,21 +57,25 @@ fn find_tool_in(env: &HashMap<String, String>, name: &str, system_dirs: &[&str])
         .find(|p| is_executable(p))
 }
 
+// usata dai moduli git/gh/lsp dei task successivi
+#[allow(dead_code)]
 /// Cerca `name` nel `PATH` dell'ambiente di login, poi in Homebrew, `~/.cargo/bin` e `~/go/bin`.
 pub fn find_tool(env: &HashMap<String, String>, name: &str) -> Option<PathBuf> {
     find_tool_in(env, name, SYSTEM_DIRS)
 }
 
-/// Comando per `name` con l'ambiente di login e in una sessione propria.
+// usata dai moduli git/gh/lsp dei task successivi
+#[allow(dead_code)]
+/// Comando per `name` con l'ambiente di login (la sessione propria la crea `run_tool`).
 pub fn tool_command(name: &str) -> Result<Command, String> {
     let env = env();
     let path = find_tool(env, name).ok_or_else(|| format!("`{name}` non trovato"))?;
     let mut cmd = Command::new(path);
     cmd.env_clear().envs(env);
-    in_new_session(&mut cmd);
     Ok(cmd)
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ToolOutput {
     pub status: i32,
@@ -83,7 +84,7 @@ pub struct ToolOutput {
     pub stderr: String,
 }
 
-fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap: usize, done: mpsc::Sender<()>) {
+fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap: usize, over: Option<Arc<AtomicBool>>, done: mpsc::Sender<()>) {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         while let Ok(n) = r.read(&mut chunk) {
@@ -93,11 +94,18 @@ fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap
             let mut b = buf.lock().unwrap_or_else(|p| p.into_inner());
             let room = cap.saturating_sub(b.len());
             b.extend_from_slice(&chunk[..n.min(room)]);
+            if n > room {
+                if let Some(o) = &over {
+                    o.store(true, Ordering::Relaxed);
+                }
+            }
         }
         let _ = done.send(());
     });
 }
 
+// usata dai moduli git/gh/lsp dei task successivi
+#[allow(dead_code)]
 /// Esegue `cmd` (stdin chiuso o alimentato da `input`); allo scadere di `timeout` uccide il gruppo e
 /// restituisce "tempo scaduto". Non resta mai bloccata su pipe tenute aperte da discendenti.
 pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<ToolOutput, String> {
@@ -111,16 +119,22 @@ pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> 
     }
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let overflow = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<()>();
     if let Some(o) = child.stdout.take() {
-        spawn_reader(o, out_buf.clone(), usize::MAX, tx.clone());
+        spawn_reader(o, out_buf.clone(), STDOUT_MAX, Some(overflow.clone()), tx.clone());
     }
     if let Some(e) = child.stderr.take() {
-        spawn_reader(e, err_buf.clone(), STDERR_MAX, tx.clone());
+        spawn_reader(e, err_buf.clone(), STDERR_MAX, None, tx.clone());
     }
     drop(tx);
     let deadline = Instant::now() + timeout;
     let status = loop {
+        if overflow.load(Ordering::Relaxed) {
+            kill_group(child.id());
+            let _ = child.wait();
+            return Err(format!("output oltre {} MB", STDOUT_MAX / (1024 * 1024)));
+        }
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
@@ -138,6 +152,9 @@ pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> 
         if rx.recv_timeout(until.saturating_duration_since(Instant::now())).is_err() {
             break;
         }
+    }
+    if overflow.load(Ordering::Relaxed) {
+        return Err(format!("output oltre {} MB", STDOUT_MAX / (1024 * 1024)));
     }
     let stdout = out_buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
@@ -261,6 +278,24 @@ mod tests {
         assert_eq!(o.status, 0);
         assert_eq!(o.stderr.len(), STDERR_MAX);
         assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "ok");
+    }
+
+    #[test]
+    fn tool_command_runs_through_run_tool() {
+        let mut c = tool_command("sh").expect("sh trovato");
+        c.args(["-c", "echo ciao"]);
+        let o = run_tool(c, Duration::from_secs(5), None).unwrap();
+        assert_eq!(o.status, 0);
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "ciao");
+        assert!(tool_command("assente-xyz").unwrap_err().contains("non trovato"));
+    }
+
+    #[test]
+    fn run_tool_rejects_oversized_stdout() {
+        let mut c = Command::new("sh");
+        c.args(["-c", "yes | head -c 20000000"]);
+        let e = run_tool(c, Duration::from_secs(20), None).unwrap_err();
+        assert!(e.contains("output oltre"), "{e}");
     }
 
     #[test]

@@ -1111,8 +1111,8 @@ impl EventSink for TauriSink {
 /// Ambiente di lancio dell'app: shell di login, calcolata in sottofondo all'avvio.
 pub fn app_launch() -> Arc<LaunchCell> {
     let cell: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(|| {
-        let env = super::locate::login_env();
-        crate::tools::set_env(env.clone());
+        // stessa cache di `tools`: una sola shell di login
+        let env = crate::tools::env().clone();
         Launch { claude: super::locate::find_claude(&env), env }
     })));
     let warm = cell.clone();
