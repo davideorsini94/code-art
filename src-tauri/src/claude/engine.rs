@@ -129,7 +129,9 @@ impl Conv {
 struct Runtime {
     state: ConvState,
     /// Richieste aperte: request id → evento `Ask` (serve `tool_name`/`input` per rispondere).
-    pending: HashMap<String, ClaudeEvent>,
+    /// Il numero d'ordine di arrivo serve a restituirle dalla più vecchia (`pending_asks`).
+    pending: HashMap<String, (u64, ClaudeEvent)>,
+    ask_seq: u64,
     next_req: u64,
     /// Stdin dato per chiuso (scrittura fallita o uscita): il processo non accetta più messaggi.
     closed: bool,
@@ -207,6 +209,17 @@ impl Engine {
     pub fn is_ours(&self, session_id: &str) -> bool {
         self.is_running(session_id)
             || lock(&self.0.exits).get(session_id).is_some_and(|t| t.elapsed() < OWN_WRITE_WINDOW)
+    }
+
+    /// Richieste ancora aperte della conversazione (eventi `Ask`, dalla più vecchia): servono a chi apre la
+    /// scheda dopo che la richiesta è già stata emessa.
+    pub fn pending_asks(&self, project_id: &str, session_id: &str) -> Result<Vec<ClaudeEvent>> {
+        self.owned_conv(project_id, session_id)?;
+        let Some(conv) = self.live(session_id) else { return Ok(vec![]) };
+        let rt = lock(&conv.rt);
+        let mut asks: Vec<&(u64, ClaudeEvent)> = rt.pending.values().collect();
+        asks.sort_by_key(|(seq, _)| *seq);
+        Ok(asks.into_iter().map(|(_, ev)| ev.clone()).collect())
     }
 
     pub fn running(&self, project_id: &str) -> Vec<String> {
@@ -326,9 +339,9 @@ impl Engine {
         // durante la scrittura: se fallisce torna aperta
         let (ask, response) = {
             let mut rt = lock(&conv.rt);
-            let ask = rt.pending.get(request_id).ok_or("richiesta non più aperta")?;
+            let (_, ask) = rt.pending.get(request_id).ok_or("richiesta non più aperta")?;
             let response = answer_payload(ask, choice)?;
-            let ask = rt.pending.remove(request_id).ok_or("richiesta non più aperta")?;
+            let (_, ask) = rt.pending.remove(request_id).ok_or("richiesta non più aperta")?;
             rt.state = next_status(rt.state, StateInput::AskAnswered);
             self.save(session_id, &rt.state, false);
             (ask, response)
@@ -341,7 +354,9 @@ impl Engine {
             let mut rt = lock(&conv.rt);
             if !rt.finished {
                 rt.state = next_status(rt.state, StateInput::Event(&ask));
-                rt.pending.insert(request_id.to_string(), ask);
+                rt.ask_seq += 1;
+                let seq = rt.ask_seq;
+                rt.pending.insert(request_id.to_string(), (seq, ask));
                 self.save(session_id, &rt.state, false);
             }
         }
@@ -624,6 +639,7 @@ impl Engine {
             rt: Mutex::new(Runtime {
                 state: self.load_state(session_id),
                 pending: HashMap::new(),
+                ask_seq: 0,
                 next_req: 0,
                 closed: false,
                 stopping: false,
@@ -734,7 +750,9 @@ impl Engine {
                 changed |= self.persist_metadata(session_id, &ev);
                 let forward = match &ev {
                     ClaudeEvent::Ask { request_id, .. } => {
-                        rt.pending.insert(request_id.clone(), ev.clone());
+                        rt.ask_seq += 1;
+                        let seq = rt.ask_seq;
+                        rt.pending.insert(request_id.clone(), (seq, ev.clone()));
                         true
                     }
                     // annullamento di una richiesta già chiusa da noi (risposta o interruzione): ignorato
@@ -1179,6 +1197,22 @@ mod tests {
                     && l["response"]["response"] == json!({"behavior": "allow", "updatedInput": ask["input"]})
             })
         });
+    }
+
+    #[test]
+    fn pending_asks_lists_open_requests_until_answered() {
+        let fx = fixture("permission-request");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
+        env.engine.send("p1", &sid, "scrivi", &[]).unwrap();
+        wait_until("richiesta", || env.sink.has_kind(&sid, "ask"));
+        let asks = env.engine.pending_asks("p1", &sid).unwrap();
+        assert_eq!(asks.len(), 1);
+        assert!(matches!(&asks[0], ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b"));
+        assert!(env.engine.pending_asks("p2", &sid).is_err()); // altro progetto
+        env.engine.answer("p1", &sid, "c6b1b64f-8800-4372-b30a-5b4c4e3c465b", "allow").unwrap();
+        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
     }
 
     #[test]

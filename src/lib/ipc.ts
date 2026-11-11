@@ -41,7 +41,7 @@ export const convList = (projectId: string) => invoke<Conversation[]>('conv_list
 export const convHistory = (sessionId: string) => invoke<ChatItem[]>('conv_history', { sessionId })
 
 // ---- motore conversazioni ----
-import type { ClaudeCheck, ConvStartOpts } from './types'
+import type { ClaudeCheck, ClaudeEvent, ConvStartOpts } from './types'
 export const claudeCheck = () => invoke<ClaudeCheck>('claude_check')
 export const convStart = (projectId: string, opts: ConvStartOpts = {}) => invoke<string>('conv_start', { projectId, opts })
 export const convResume = (sessionId: string) => invoke<void>('conv_resume', { sessionId })
@@ -59,5 +59,7 @@ export const convArchive = (sessionId: string, archived: boolean) => invoke<void
 export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })
 /** Ferma il processo della conversazione (interrompe un turno in corso); si riprende al prossimo invio. */
 export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessionId })
+/** Richieste (permesso/domanda/piano) ancora aperte, dalla più vecchia: servono a chi apre la scheda dopo che sono state emesse. */
+export const convPending = (sessionId: string) => invoke<ClaudeEvent[]>('conv_pending', { sessionId })
 export const convRename = (sessionId: string, title: string) => invoke<void>('conv_rename', { sessionId, title })
 export const convUnlockTitle = (sessionId: string) => invoke<void>('conv_unlock_title', { sessionId })

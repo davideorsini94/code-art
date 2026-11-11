@@ -1,6 +1,7 @@
 //! Comandi Tauri del motore delle conversazioni: involucri sottili attorno a `Engine`, eseguiti fuori dal
 //! thread principale e confinati al progetto della finestra chiamante.
 use super::engine::{ClaudeCheck, Engine, StartOpts};
+use super::protocol::ClaudeEvent;
 use crate::store::Result;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
@@ -89,6 +90,12 @@ pub async fn conv_running(app: AppHandle, window: WebviewWindow, project_id: Str
         Ok(e.running(pid))
     })
     .await
+}
+
+/// Richieste di permesso/domanda/piano ancora aperte (eventi `Ask`, dalla più vecchia).
+#[tauri::command]
+pub async fn conv_pending(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<Vec<ClaudeEvent>> {
+    with_engine(app, window, move |e, pid| e.pending_asks(pid, &session_id)).await
 }
 
 #[tauri::command]

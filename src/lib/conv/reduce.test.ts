@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { answerAsk, appendUser, buildRows, initialState, reduce, reduceAll } from './reduce'
+import { answerAsk, appendUser, buildRows, initialState, reconcile, reduce, reduceAll } from './reduce'
 import type { ChatItem, ClaudeEvent } from '../types'
 
 const run = (evs: ClaudeEvent[], history: ChatItem[] = []) => reduceAll(initialState(history), evs)
@@ -131,5 +131,41 @@ describe('buildRows', () => {
     const rows = buildRows(s.items)
     expect(rows.map((r) => r.item.id)).toEqual(['p', 'x', 'o'])
     expect(rows[0].children.map((c) => c.id)).toEqual(['c1'])
+  })
+})
+
+describe('reconcile', () => {
+  const hist: ChatItem[] = [
+    { kind: 'user', id: 'u', text: 'ciao', images: [] },
+    { kind: 'assistant', id: 'uuid-1', text: 'ciao a te' },
+  ]
+  const live = () =>
+    reduceAll(initialState([]), [
+      { kind: 'textDelta', id: 'msg:0', text: 'ciao a' }, // taglio: la storia ha il testo completo
+      { kind: 'todoDelta', id: '1', text: 'Fai', status: 'pending' },
+      { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], toolName: 'Bash', input: {} },
+      { kind: 'turnEnd', contextUsedPct: 12, isError: false },
+    ])
+
+  it('replaces items with history, no duplicated or cut text', () => {
+    const r = reconcile(live(), hist)
+    expect(r.items.filter((i) => i.kind === 'assistant')).toEqual([{ kind: 'assistant', id: 'uuid-1', text: 'ciao a te' }])
+  })
+  it('keeps todos, context and unanswered asks', () => {
+    const r = reconcile(live(), hist)
+    expect(r.todos).toHaveLength(1)
+    expect(r.contextUsedPct).toBe(12)
+    expect(r.items.filter((i) => i.kind === 'ask')).toHaveLength(1)
+  })
+  it('drops answered asks and does not duplicate asks already in history', () => {
+    const answered = answerAsk(live(), 'r1')
+    expect(reconcile(answered, hist).items.some((i) => i.kind === 'ask')).toBe(false)
+    const withAsk: ChatItem[] = [...hist, { kind: 'ask', id: 'h', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], answered: false }]
+    expect(reconcile(live(), withAsk).items.filter((i) => i.kind === 'ask')).toHaveLength(1)
+  })
+  it('pending asks applied afterwards are deduplicated by requestId', () => {
+    const ask: ClaudeEvent = { kind: 'ask', requestId: 'r1', askType: 'permission', prompt: 'x', options: [], toolName: 'Bash', input: {} }
+    const r = reduceAll(reconcile(live(), hist), [ask])
+    expect(r.items.filter((i) => i.kind === 'ask')).toHaveLength(1)
   })
 })

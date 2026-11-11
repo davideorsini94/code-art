@@ -2,7 +2,7 @@
   import type { ChatItem } from '../lib/types'
   import { chat } from '../lib/stores/chat.svelte'
   import { renderMarkdown } from '../lib/safe-markdown'
-  import { openLink } from '../lib/conv/links'
+  import { links } from '../lib/conv/links'
 
   type Ask = Extract<ChatItem, { kind: 'ask' }>
   let { item, sessionId }: { item: Ask; sessionId: string } = $props()
@@ -32,8 +32,7 @@
   {#if item.answered}<span class="tag">risposto</span>{:else}<div class="sub">Serve una tua scelta per continuare.</div>{/if}
 
   {#if item.askType === 'plan'}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="md plan" onclick={openLink}>{@html renderMarkdown(item.prompt)}</div>
+    <div class="md plan" use:links>{@html renderMarkdown(item.prompt)}</div>
   {:else}
     <p class="prompt">{item.prompt}</p>
   {/if}

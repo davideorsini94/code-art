@@ -3,7 +3,7 @@
   import AskBox from './AskBox.svelte'
   import PlainBlock from './PlainBlock.svelte'
   import { renderMarkdown } from '../lib/safe-markdown'
-  import { openLink } from '../lib/conv/links'
+  import { links } from '../lib/conv/links'
   import { diffAction, isSubagent, prettyJson, toolSummary } from '../lib/conv/tools'
   import { editor } from '../lib/stores/editor.svelte'
   import type { Row } from '../lib/conv/reduce'
@@ -28,8 +28,7 @@
 {#if item.kind === 'user'}
   <div class="msg me"><span class="txt">{item.text}</span></div>
 {:else if item.kind === 'assistant'}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="msg ai md" onclick={openLink} onauxclick={openLink}>{@html renderMarkdown(item.text)}</div>
+  <div class="msg ai md" use:links>{@html renderMarkdown(item.text)}</div>
 {:else if item.kind === 'thinking'}
   <div class="think">
     <button class="head" aria-expanded={open} onclick={() => (open = !open)}>{open ? '▾' : '▸'} Ragionamento</button>

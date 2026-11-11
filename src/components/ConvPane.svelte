@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte'
+  import { onMount, tick, untrack } from 'svelte'
   import ChatItem from './ChatItem.svelte'
   import TodoStrip from './TodoStrip.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
@@ -9,6 +9,7 @@
   import { relativeTime } from '../lib/conv/time'
   import { WINDOW_THRESHOLD } from '../lib/conv/order'
   import { variableRange } from '../lib/conv/window'
+  import { shouldStick } from '../lib/conv/stick'
 
   /** Altezza stimata di una riga non ancora misurata. */
   const ESTIMATE = 72
@@ -45,12 +46,17 @@
     }
   })
 
-  // carica la storia quando cambia la conversazione mostrata
+  // cambia la conversazione mostrata: riparte dal fondo e carica la storia. `chat.open` legge `chat.states`:
+  // va fuori dal tracciamento, altrimenti l'effetto ripartirebbe a ogni frame di streaming e ri-agganciherebbe il fondo.
+  let lastId: string | null = null
   $effect(() => {
-    if (id) {
-      stick = true
-      void chat.open(id)
-    }
+    const cur = id
+    if (!cur) return
+    const idChanged = cur !== lastId
+    lastId = cur
+    stick = shouldStick(stick, { idChanged })
+    if (idChanged) heights.clear()
+    untrack(() => void chat.open(cur))
   })
 
   // "vista": la conversazione è sullo schermo con la finestra attiva (anche quando cambia lo stato, es. torna `waiting`)
@@ -63,7 +69,7 @@
   const virtual = $derived(rows.length > WINDOW_THRESHOLD)
   const hs = $derived.by(() => {
     void ver
-    return rows.map((r) => heights.get(r.item.id) ?? ESTIMATE)
+    return rows.map((r) => heights.get(`${id}/${r.item.id}`) ?? ESTIMATE)
   })
   const range = $derived(virtual ? variableRange(hs, scrollTop, viewport) : { start: 0, end: rows.length, top: 0, bottom: 0 })
   const visible = $derived(rows.slice(range.start, range.end))
@@ -81,7 +87,8 @@
   function onscroll(e: Event & { currentTarget: HTMLDivElement }) {
     const el = e.currentTarget
     scrollTop = el.scrollTop
-    stick = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX
+    stick = shouldStick(stick, { idChanged: false, atBottom, scrolledUp: !atBottom })
   }
 
   function frameBump() {
@@ -134,8 +141,8 @@
     </header>
 
     <div class="list" bind:this={scroller} use:measureViewport {onscroll} role="log" aria-label="Messaggi">
-      {#if chat.error && !cs}
-        <p class="err" role="alert">{chat.error}</p>
+      {#if chat.errorFor(id) && !cs}
+        <p class="err" role="alert">{chat.errorFor(id)}</p>
       {:else if !cs}
         <p class="empty">Carico la conversazione…</p>
       {:else if rows.length === 0}
@@ -143,7 +150,7 @@
       {:else}
         {#if virtual}<div style:height="{range.top}px" aria-hidden="true"></div>{/if}
         {#each visible as row (row.item.id)}
-          <div class="r" use:measureRow={row.item.id}><ChatItem {row} sessionId={id} /></div>
+          <div class="r" use:measureRow={`${id}/${row.item.id}`}><ChatItem {row} sessionId={id} /></div>
         {/each}
         {#if virtual}<div style:height="{range.bottom}px" aria-hidden="true"></div>{/if}
       {/if}

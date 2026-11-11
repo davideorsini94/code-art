@@ -1,22 +1,27 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { convAnswer, convHistory } from '../ipc'
-import { answerAsk, appendUser, initialState, reduceAll, type ChatState } from '../conv/reduce'
+import { convAnswer, convHistory, convPending } from '../ipc'
+import { answerAsk, appendUser, initialState, reconcile, reduceAll, type ChatState } from '../conv/reduce'
 import type { ClaudeEvent, ConvEventPayload } from '../types'
 
 /** Quante conversazioni tengono lo stato in memoria (le ultime viste). */
 export const CACHE_SIZE = 5
 
-const frame = (cb: () => void) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(cb) : setTimeout(cb, 16))
+/** Un frame; a finestra nascosta i frame non partono, quindi si ripiega su un timer. */
+const frame = (cb: () => void) =>
+  typeof requestAnimationFrame === 'function' && !(typeof document !== 'undefined' && document.hidden) ? requestAnimationFrame(cb) : setTimeout(cb, 16)
 
 /**
  * Stato delle conversazioni aperte di recente: storia (`conv_history`) + eventi `conv:event`.
  * - sessione in cache: gli eventi si accumulano e si applicano al massimo una volta per frame;
  * - sessione in caricamento: gli eventi si tengono da parte e si applicano sopra la storia appena letta;
  * - altre sessioni: gli eventi si scartano (alla prossima apertura la storia dal file li contiene già).
+ * - a fine turno la storia si rilegge e sostituisce lo stato (`reconcile`): risolve duplicati e messaggi tagliati.
+ * - le richieste ancora aperte (`conv_pending`) si applicano dopo la storia, anche per chi apre la scheda in ritardo.
  */
 class ChatStore {
   states = $state.raw<Record<string, ChatState>>({})
-  error = $state<string | null>(null)
+  /** Errore di caricamento per sessione. */
+  errors = $state.raw<Record<string, string>>({})
 
   private order: string[] = [] // dalla più recente
   private buffering = new Map<string, ClaudeEvent[]>()
@@ -43,24 +48,58 @@ class ChatStore {
     this.unlisten = null
   }
 
-  /** Porta in primo piano la sessione; se non è in cache ne legge la storia. */
+  errorFor(sessionId: string | null): string | null {
+    return sessionId ? (this.errors[sessionId] ?? null) : null
+  }
+
+  private setError(sessionId: string, msg: string | null) {
+    const { [sessionId]: _old, ...rest } = this.errors
+    this.errors = msg === null ? rest : { ...rest, [sessionId]: msg }
+  }
+
+  private async fetch(sessionId: string) {
+    const [history, pending] = await Promise.all([convHistory(sessionId), convPending(sessionId).catch(() => [])])
+    return { history, pending }
+  }
+
+  /** Porta in primo piano la sessione; se non è in cache ne legge la storia e le richieste aperte. */
   async open(sessionId: string): Promise<void> {
     this.order = [sessionId, ...this.order.filter((s) => s !== sessionId)]
     this.evict()
     if (this.states[sessionId] || this.buffering.has(sessionId)) return
     const gen = this.generation
     this.buffering.set(sessionId, [])
-    this.error = null
+    this.setError(sessionId, null)
     try {
-      const history = await convHistory(sessionId)
+      const { history, pending } = await this.fetch(sessionId)
       const early = this.buffering.get(sessionId) ?? []
       this.buffering.delete(sessionId)
       if (gen !== this.generation || !this.order.includes(sessionId)) return
-      this.states = { ...this.states, [sessionId]: reduceAll(initialState(history), early) }
+      this.states = { ...this.states, [sessionId]: reduceAll(reduceAll(initialState(history), pending), early) }
     } catch (e) {
       this.buffering.delete(sessionId)
-      this.error = String(e)
+      this.setError(sessionId, String(e))
     }
+  }
+
+  /** Fine turno: rilegge la storia e la fonde con lo stato live (todo e richieste aperte restano). */
+  private async resync(sessionId: string) {
+    if (this.buffering.has(sessionId) || !this.states[sessionId]) return
+    const gen = this.generation
+    this.flush()
+    this.buffering.set(sessionId, [])
+    let fetched: Awaited<ReturnType<ChatStore['fetch']>> | null = null
+    try {
+      fetched = await this.fetch(sessionId)
+    } catch (e) {
+      this.setError(sessionId, String(e))
+    }
+    const early = this.buffering.get(sessionId) ?? []
+    this.buffering.delete(sessionId)
+    const cur = this.states[sessionId]
+    if (gen !== this.generation || !cur) return
+    const base = fetched ? reduceAll(reconcile(cur, fetched.history), fetched.pending) : cur
+    this.states = { ...this.states, [sessionId]: reduceAll(base, early) }
   }
 
   private evict() {
@@ -84,6 +123,7 @@ class ChatStore {
       this.scheduled = true
       frame(() => this.flush())
     }
+    if (event.kind === 'turnEnd') void this.resync(sessionId)
   }
 
   /** Applica gli eventi in coda (uno stato nuovo per sessione, indipendentemente da quanti eventi sono arrivati). */

@@ -130,3 +130,13 @@ export function buildRows(items: ChatItem[]): Row[] {
   }
   return rows
 }
+
+/**
+ * Fine turno: sostituisce lo stato con la storia riletta dal file (risolve duplicati e messaggi tagliati tra
+ * storia e eventi live), mantenendo ciò che la storia non porta: todo, contesto e richieste ancora senza risposta.
+ */
+export function reconcile(live: ChatState, history: ChatItem[]): ChatState {
+  const known = new Set(history.filter((i) => i.kind === 'ask').map((i) => (i as Extract<ChatItem, { kind: 'ask' }>).requestId))
+  const asks = live.items.filter((i) => i.kind === 'ask' && !i.answered && !known.has(i.requestId))
+  return { items: [...history, ...asks], todos: live.todos, contextUsedPct: live.contextUsedPct }
+}
