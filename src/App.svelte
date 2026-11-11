@@ -20,7 +20,7 @@
   import { guardWindowDrops } from './lib/dropguard'
   import { onMount } from 'svelte'
   import { tooltip } from './lib/tooltip'
-  import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
+  import { canCollapse, clampWidths, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
 
@@ -48,7 +48,8 @@
   })
 
   const initial = loadLayout()
-  let widths = $state(initial.widths)
+  // un layout salvato su uno schermo più grande non deve spingere l'editor fuori dalla finestra
+  let widths = $state(clampWidths(initial.widths, initial.collapsed, window.innerWidth))
   let collapsed = $state(new Set<string>(initial.collapsed))
 
   $effect(() => {

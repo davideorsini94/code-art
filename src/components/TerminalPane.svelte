@@ -4,6 +4,7 @@
   import { openExternal } from '../lib/external'
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
+  import { PtyInbox } from '../lib/pty-inbox'
   import { projectStore } from '../lib/stores/project.svelte'
   import { tooltip } from '../lib/tooltip'
 
@@ -21,7 +22,7 @@
   let host = $state<HTMLDivElement>()
   const live = new Map<number, Live>() // per chiave di scheda
   const byPty = new Map<number, number>() // id PTY -> chiave
-  const pending = new Map<number, Uint8Array[]>() // dati arrivati prima che spawn() restituisse l'id
+  const inbox = new PtyInbox() // dati arrivati prima che spawn() restituisse l'id (scartati per i PTY chiusi)
   let mods: Mods | undefined
   let loading: Promise<Mods> | undefined
   let nextKey = 1
@@ -57,7 +58,7 @@
         const key = byPty.get(payload.id)
         const bytes = decode(payload.data)
         if (key === undefined) {
-          pending.set(payload.id, [...(pending.get(payload.id) ?? []), bytes])
+          inbox.hold(payload.id, bytes)
         } else {
           live.get(key)?.term.write(bytes)
         }
@@ -73,6 +74,7 @@
     const key = byPty.get(id)
     if (key === undefined) return
     byPty.delete(id)
+    inbox.close(id)
     const l = live.get(key)
     if (l) l.id = null
     const t = tabs.find((x) => x.key === key)
@@ -137,8 +139,7 @@
         t.title = `${shell} ${key}`
       }
       byPty.set(id, key)
-      for (const b of pending.get(id) ?? []) term.write(b)
-      pending.delete(id)
+      for (const b of inbox.take(id)) term.write(b)
       if (pendingExit.delete(id)) markExited(id)
       term.onData((d) => void ptyWrite(id, d).catch(() => {}))
       term.onResize(({ cols, rows }) => void ptyResize(id, cols, rows).catch(() => {}))
@@ -169,6 +170,7 @@
     const l = live.get(key)
     if (l?.id != null) {
       byPty.delete(l.id)
+      inbox.close(l.id)
       void ptyKill(l.id).catch(() => {})
     }
     l?.term.dispose()
