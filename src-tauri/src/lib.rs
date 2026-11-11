@@ -4,6 +4,7 @@ pub mod fs_tree;
 mod lifecycle;
 mod projects;
 mod pty;
+pub mod search;
 pub mod store;
 mod tools;
 mod trasher;
@@ -33,6 +34,7 @@ pub fn run() {
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
+        .manage(search::Searches::default())
         .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
@@ -130,6 +132,8 @@ pub fn run() {
             trust::trust_accept,
             lifecycle::editor_set_dirty,
             tools::tools_check,
+            search::search_start,
+            search::search_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

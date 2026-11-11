@@ -1,0 +1,525 @@
+//! Ricerca nel progetto: in sola lettura, a blocchi e annullabile.
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
+use ignore::overrides::{Override, OverrideBuilder};
+use ignore::WalkState;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
+use unicode_normalization::UnicodeNormalization;
+
+use crate::store::Store;
+
+pub const CHUNK: usize = 200;
+pub const MAX_HITS: usize = 10_000;
+pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+pub const PREVIEW_CHARS: usize = 240;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SearchQuery {
+    pub text: String,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub len: u32,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSummary {
+    pub files: u32,
+    pub hits: u32,
+    pub truncated: bool,
+    pub error: Option<String>,
+}
+
+struct Shared<F> {
+    sink: F,
+    buf: Vec<SearchHit>,
+    files: u32,
+    hits: usize,
+    truncated: bool,
+}
+
+impl<F: FnMut(Vec<SearchHit>)> Shared<F> {
+    /// Aggiunge le corrispondenze di un file e consegna i blocchi pieni; `false` = limite raggiunto.
+    fn push(&mut self, hits: Vec<SearchHit>) -> bool {
+        self.files += 1;
+        let room = MAX_HITS - self.hits;
+        if hits.len() > room {
+            self.truncated = true;
+        }
+        self.hits += hits.len().min(room);
+        self.buf.extend(hits.into_iter().take(room));
+        while self.buf.len() >= CHUNK {
+            let rest = self.buf.split_off(CHUNK);
+            (self.sink)(std::mem::replace(&mut self.buf, rest));
+        }
+        !self.truncated && self.hits < MAX_HITS
+    }
+}
+
+/// Raccoglie le corrispondenze di un file; scarta tutto se il file risulta binario.
+struct Collector<'a, M: Matcher> {
+    matcher: &'a M,
+    path: &'a str,
+    cancel: &'a AtomicBool,
+    hits: Vec<SearchHit>,
+    binary: bool,
+}
+
+impl<M: Matcher> Sink for Collector<'_, M> {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, m: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let line_no = m.line_number().unwrap_or(0) as u32;
+        let bytes = m.bytes();
+        let line = String::from_utf8_lossy(bytes);
+        let line = line.trim_end_matches(['\n', '\r']);
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        let _ = self.matcher.find_iter(line.as_bytes(), |mm| {
+            if mm.end() > mm.start() {
+                found.push((mm.start(), mm.end()));
+            }
+            found.len() < MAX_HITS
+        });
+        // con il testo sostituito da `from_utf8_lossy` gli scarti sono in byte della stringa lossy: ok, la
+        // corrispondenza è stata cercata proprio su quella stringa
+        for (s, e) in found {
+            let (col, len) = (utf16_len(&line[..s]) + 1, utf16_len(&line[s..e]));
+            self.hits.push(SearchHit { path: self.path.to_string(), line: line_no, col, len, preview: preview(line, s, e) });
+            if self.hits.len() >= MAX_HITS {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn binary_data(&mut self, _: &Searcher, _: u64) -> Result<bool, Self::Error> {
+        self.binary = true;
+        Ok(false)
+    }
+}
+
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// Riga intera se sta in `PREVIEW_CHARS` caratteri, altrimenti una finestra che contiene la corrispondenza.
+fn preview(line: &str, s: usize, e: usize) -> String {
+    if line.chars().count() <= PREVIEW_CHARS {
+        return line.to_string();
+    }
+    let before = line[..s].chars().count();
+    let mlen = line[s..e].chars().count().min(PREVIEW_CHARS);
+    let skip = before.saturating_sub((PREVIEW_CHARS - mlen) / 4).min(before);
+    line.chars().skip(skip).take(PREVIEW_CHARS).collect()
+}
+
+fn build_matcher(q: &SearchQuery) -> Result<RegexMatcher, String> {
+    RegexMatcherBuilder::new()
+        .case_insensitive(!q.case_sensitive)
+        .word(q.whole_word)
+        .fixed_strings(!q.regex)
+        .build(&q.text)
+        .map_err(|e| format!("Espressione non valida: {e}"))
+}
+
+/// Un `Override` per radice: `include` = whitelist, `exclude` = `!glob` (sintassi gitignore).
+fn build_overrides(roots: &[PathBuf], q: &SearchQuery) -> Result<Vec<(PathBuf, Override)>, String> {
+    roots
+        .iter()
+        .map(|r| {
+            let mut b = OverrideBuilder::new(r);
+            for g in q.include.iter().map(|g| g.trim().trim_start_matches('!')).filter(|g| !g.is_empty()) {
+                b.add(g).map_err(|e| format!("Filtro non valido «{g}»: {e}"))?;
+            }
+            for g in q.exclude.iter().map(|g| g.trim().trim_start_matches('!')).filter(|g| !g.is_empty()) {
+                b.add(&format!("!{g}")).map_err(|e| format!("Filtro non valido «{g}»: {e}"))?;
+            }
+            Ok((r.clone(), b.build().map_err(|e| e.to_string())?))
+        })
+        .collect()
+}
+
+fn nfc(p: &Path) -> String {
+    p.to_string_lossy().nfc().collect()
+}
+
+/// Cerca `q` nei file sotto `roots`. Le corrispondenze arrivano a `sink` in blocchi di al più `CHUNK`, da thread
+/// diversi ma mai in parallelo; `cancel` ferma la ricerca appena possibile.
+pub fn search(roots: &[PathBuf], q: &SearchQuery, cancel: &AtomicBool, sink: impl FnMut(Vec<SearchHit>) + Send) -> SearchSummary {
+    let mut summary = SearchSummary::default();
+    if q.text.is_empty() || roots.is_empty() {
+        return summary;
+    }
+    let (matcher, overrides) = match (build_matcher(q), build_overrides(roots, q)) {
+        (Ok(m), Ok(o)) => (m, o),
+        (Err(e), _) | (_, Err(e)) => {
+            summary.error = Some(e);
+            return summary;
+        }
+    };
+    let noise_roots = roots.to_vec();
+    let overrides = Arc::new(overrides);
+    let mut wb = ignore::WalkBuilder::new(&roots[0]);
+    for r in &roots[1..] {
+        wb.add(r);
+    }
+    wb.hidden(false).follow_links(false).require_git(false).max_filesize(Some(MAX_FILE_BYTES));
+    {
+        let overrides = overrides.clone();
+        wb.filter_entry(move |e| {
+            if crate::fs_tree::is_noise(&noise_roots, e.path()) {
+                return false;
+            }
+            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+            match overrides.iter().find(|(r, _)| e.path().starts_with(r)) {
+                Some((_, ov)) => !ov.matched(e.path(), is_dir).is_ignore(),
+                None => true,
+            }
+        });
+    }
+    let shared = Mutex::new(Shared { sink, buf: Vec::new(), files: 0, hits: 0, truncated: false });
+    wb.build_parallel().run(|| {
+        let matcher = matcher.clone();
+        let shared = &shared;
+        let mut searcher = SearcherBuilder::new().binary_detection(BinaryDetection::quit(0)).line_number(true).build();
+        Box::new(move |res| {
+            if cancel.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            let Ok(entry) = res else { return WalkState::Continue };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                return WalkState::Continue;
+            }
+            // `max_filesize` vale anche per i file: ricontrollo esplicito, per non dipendere da un dettaglio
+            if entry.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(true) {
+                return WalkState::Continue;
+            }
+            let path = nfc(entry.path());
+            let mut c = Collector { matcher: &matcher, path: &path, cancel, hits: Vec::new(), binary: false };
+            if searcher.search_path(&matcher, entry.path(), &mut c).is_err() || c.binary {
+                return WalkState::Continue; // illeggibile o binario
+            }
+            let mut sh = crate::lock(shared);
+            let more = sh.push(c.hits);
+            if more && !cancel.load(Ordering::Relaxed) { WalkState::Continue } else { WalkState::Quit }
+        })
+    });
+    let mut sh = shared.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !cancel.load(Ordering::Relaxed) && !sh.buf.is_empty() {
+        let rest = std::mem::take(&mut sh.buf);
+        (sh.sink)(rest);
+    }
+    summary.files = sh.files;
+    summary.hits = sh.hits as u32;
+    summary.truncated = sh.truncated;
+    summary
+}
+
+// ---------- comandi ----------
+
+const MAX_TEXT_CHARS: usize = 1000;
+const MAX_GLOBS: usize = 50;
+const MAX_GLOB_CHARS: usize = 200;
+
+/// Una ricerca attiva per progetto: (id, flag di annullamento).
+#[derive(Default)]
+pub struct Searches {
+    next: AtomicU64,
+    active: Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>,
+}
+
+#[derive(Serialize, Clone)]
+struct HitsEvent {
+    id: u64,
+    hits: Vec<SearchHit>,
+}
+
+#[derive(Serialize, Clone)]
+struct DoneEvent {
+    id: u64,
+    summary: SearchSummary,
+}
+
+/// La pagina non è fidata: lunghezze e numero di filtri limitati.
+fn validate(q: &SearchQuery) -> Result<(), String> {
+    if q.text.chars().count() > MAX_TEXT_CHARS {
+        return Err("Testo da cercare troppo lungo".into());
+    }
+    if q.include.len() > MAX_GLOBS || q.exclude.len() > MAX_GLOBS || q.include.iter().chain(&q.exclude).any(|g| g.chars().count() > MAX_GLOB_CHARS) {
+        return Err("Filtri troppo numerosi o troppo lunghi".into());
+    }
+    Ok(())
+}
+
+/// Avvia una ricerca nelle cartelle del progetto della finestra chiamante e restituisce il suo id; la precedente
+/// della stessa finestra viene annullata. Risultati su `search:hits`, fine su `search:done`.
+#[tauri::command]
+pub fn search_start(app: AppHandle, window: WebviewWindow, store: State<'_, Store>, searches: State<'_, Searches>, query: SearchQuery) -> Result<u64, String> {
+    validate(&query)?;
+    let project_id = crate::projects::window_project_id(&window)?;
+    let roots = crate::fs_tree::roots_of(&window, &store).map_err(|e| e.message)?;
+    let id = searches.next.fetch_add(1, Ordering::Relaxed) + 1;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some((_, old)) = crate::lock(&searches.active).insert(project_id.clone(), (id, cancel.clone())) {
+        old.store(true, Ordering::Relaxed);
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let emit_id = project_id.clone();
+        let summary = search(&roots, &query, &cancel, |hits| {
+            crate::projects::emit_to_project(&handle, &emit_id, "search:hits", HitsEvent { id, hits });
+        });
+        crate::projects::emit_to_project(&handle, &project_id, "search:done", DoneEvent { id, summary });
+        let searches = handle.state::<Searches>();
+        let mut active = crate::lock(&searches.active);
+        if active.get(&project_id).is_some_and(|(cur, _)| *cur == id) {
+            active.remove(&project_id);
+        }
+    });
+    Ok(id)
+}
+
+/// Annulla la ricerca `id` se è quella attiva della finestra chiamante.
+#[tauri::command]
+pub fn search_cancel(window: WebviewWindow, searches: State<'_, Searches>, id: u64) -> Result<(), String> {
+    let project_id = crate::projects::window_project_id(&window)?;
+    if let Some((cur, flag)) = crate::lock(&searches.active).get(&project_id) {
+        if *cur == id {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+
+    fn q(text: &str) -> SearchQuery {
+        SearchQuery { text: text.into(), ..Default::default() }
+    }
+
+    fn run(root: &Path, query: &SearchQuery) -> (Vec<SearchHit>, SearchSummary) {
+        let mut hits = Vec::new();
+        let s = search(&[root.to_path_buf()], query, &AtomicBool::new(false), |c| {
+            assert!(c.len() <= CHUNK);
+            hits.extend(c)
+        });
+        hits.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
+        (hits, s)
+    }
+
+    fn names(root: &Path, hits: &[SearchHit]) -> Vec<String> {
+        let mut v: Vec<String> = hits.iter().map(|h| h.path.strip_prefix(&format!("{}/", root.display())).unwrap().to_string()).collect();
+        v.dedup();
+        v
+    }
+
+    fn w(root: &Path, rel: &str, content: impl AsRef<[u8]>) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn finds_literal_with_line_and_col() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "uno\n  due needle tre needle\nquattro\n");
+        let (hits, s) = run(d.path(), &q("needle"));
+        assert_eq!(hits.len(), 2);
+        assert_eq!((hits[0].line, hits[0].col, hits[0].len), (2, 7, 6));
+        assert_eq!((hits[1].line, hits[1].col), (2, 18));
+        assert_eq!(hits[0].preview, "  due needle tre needle");
+        assert!(hits[0].path.starts_with('/'));
+        assert_eq!((s.files, s.hits, s.truncated, s.error), (1, 2, false, None));
+    }
+
+    #[test]
+    fn col_counts_utf16_units() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "è😀x needle\n");
+        let (hits, _) = run(d.path(), &q("needle"));
+        assert_eq!(hits[0].col, 6); // è=1, 😀=2, x=1, spazio=1
+    }
+
+    #[test]
+    fn regex_and_whole_word() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "foo foobar f.o\n");
+        let (hits, _) = run(d.path(), &SearchQuery { text: "fo+".into(), regex: true, ..Default::default() });
+        assert_eq!(hits.len(), 2);
+        let (hits, _) = run(d.path(), &SearchQuery { text: "foo".into(), whole_word: true, ..Default::default() });
+        assert_eq!(hits.len(), 1);
+        // senza regex il punto è letterale
+        let (hits, _) = run(d.path(), &q("f.o"));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn case_insensitive_default() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "Hello hello HELLO\n");
+        assert_eq!(run(d.path(), &q("hello")).0.len(), 3);
+        let cs = SearchQuery { text: "hello".into(), case_sensitive: true, ..Default::default() };
+        assert_eq!(run(d.path(), &cs).0.len(), 1);
+    }
+
+    #[test]
+    fn respects_gitignore_and_noise() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), ".git/config", "needle\n");
+        w(d.path(), ".gitignore", "ignorato/\n*.log\n");
+        w(d.path(), "ignorato/x.txt", "needle\n");
+        w(d.path(), "x.log", "needle\n");
+        w(d.path(), "node_modules/m/i.js", "needle\n");
+        w(d.path(), "target/t.txt", "needle\n");
+        w(d.path(), "src/ok.txt", "needle\n");
+        let (hits, _) = run(d.path(), &q("needle"));
+        assert_eq!(names(d.path(), &hits), vec!["src/ok.txt"]);
+    }
+
+    #[test]
+    fn include_exclude_globs() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "src/a.rs", "needle\n");
+        w(d.path(), "src/b.ts", "needle\n");
+        w(d.path(), "docs/c.rs", "needle\n");
+        let inc = SearchQuery { text: "needle".into(), include: vec!["*.rs".into()], ..Default::default() };
+        assert_eq!(names(d.path(), &run(d.path(), &inc).0), vec!["docs/c.rs", "src/a.rs"]);
+        let exc = SearchQuery { text: "needle".into(), exclude: vec!["docs/".into(), "*.ts".into()], ..Default::default() };
+        assert_eq!(names(d.path(), &run(d.path(), &exc).0), vec!["src/a.rs"]);
+        let both = SearchQuery { text: "needle".into(), include: vec!["src/**".into()], exclude: vec!["*.ts".into()], ..Default::default() };
+        assert_eq!(names(d.path(), &run(d.path(), &both).0), vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn skips_binary_and_large_files() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "bin.dat", b"needle\nabc\0def\n".as_slice());
+        w(d.path(), "bin2.dat", b"\0\0needle\n".as_slice());
+        let mut big = vec![b'x'; (MAX_FILE_BYTES + 1) as usize];
+        big.extend_from_slice(b"\nneedle\n");
+        w(d.path(), "big.txt", big);
+        w(d.path(), "ok.txt", "needle\n");
+        let (hits, s) = run(d.path(), &q("needle"));
+        assert_eq!(names(d.path(), &hits), vec!["ok.txt"]);
+        assert_eq!(s.files, 1);
+    }
+
+    #[test]
+    fn stops_at_limit_with_truncated() {
+        let d = tempfile::tempdir().unwrap();
+        let line = "a ".repeat(100) + "\n";
+        for i in 0..6 {
+            w(d.path(), &format!("f{i}.txt"), line.repeat(100)); // 10 000 corrispondenze per file
+        }
+        let mut chunks = 0;
+        let s = search(&[d.path().to_path_buf()], &q("a"), &AtomicBool::new(false), |c| {
+            assert!(c.len() <= CHUNK);
+            chunks += 1;
+        });
+        assert_eq!(s.hits as usize, MAX_HITS);
+        assert!(s.truncated);
+        assert_eq!(chunks, MAX_HITS / CHUNK);
+    }
+
+    #[test]
+    fn cancel_stops_early() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            w(d.path(), &format!("f{i}.txt"), "needle\n".repeat(100));
+        }
+        let cancel = AtomicBool::new(true);
+        let mut n = 0;
+        let s = search(&[d.path().to_path_buf()], &q("needle"), &cancel, |c| n += c.len());
+        assert_eq!(n, 0);
+        assert!(s.error.is_none());
+        // annullata a metà: smette di consegnare
+        let cancel = AtomicBool::new(false);
+        let mut n = 0;
+        let s = search(&[d.path().to_path_buf()], &q("needle"), &cancel, |c| {
+            n += c.len();
+            cancel.store(true, Ordering::Relaxed);
+        });
+        assert!(n < 50 * 100, "n = {n}");
+        assert!(s.hits as usize <= n + CHUNK * 8);
+    }
+
+    #[test]
+    fn invalid_regex_reports_error() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", "x\n");
+        let (hits, s) = run(d.path(), &SearchQuery { text: "(".into(), regex: true, ..Default::default() });
+        assert!(hits.is_empty());
+        assert!(s.error.is_some());
+        let (_, s) = run(d.path(), &SearchQuery { text: "x".into(), include: vec!["[".into()], ..Default::default() });
+        assert!(s.error.is_some());
+    }
+
+    #[test]
+    fn non_utf8_file_does_not_panic() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "latin1.txt", b"caff\xe8 needle \xff\xfe\n".as_slice());
+        let (hits, s) = run(d.path(), &q("needle"));
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].preview.contains("needle"));
+        assert!(s.error.is_none());
+    }
+
+    #[test]
+    fn nfd_filename_reported_as_nfc() {
+        use unicode_normalization::UnicodeNormalization;
+        let d = tempfile::tempdir().unwrap();
+        let nfd: String = "perche\u{301}.txt".into();
+        w(d.path(), &nfd, "needle\n");
+        let (hits, _) = run(d.path(), &q("needle"));
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with("perch\u{e9}.txt"), "{}", hits[0].path);
+        assert_eq!(hits[0].path, hits[0].path.nfc().collect::<String>());
+    }
+
+    #[test]
+    fn long_line_preview_is_bounded_and_contains_match() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", format!("{}needle{}\n", "é".repeat(1000), "è".repeat(1000)));
+        let (hits, _) = run(d.path(), &q("needle"));
+        assert!(hits[0].preview.chars().count() <= PREVIEW_CHARS);
+        assert!(hits[0].preview.contains("needle"));
+    }
+
+    #[test]
+    fn does_not_follow_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        let (proj, out) = (d.path().join("p"), d.path().join("out"));
+        w(&out, "s.txt", "needle\n");
+        w(&proj, "ok.txt", "needle\n");
+        std::os::unix::fs::symlink(&out, proj.join("link")).unwrap();
+        std::os::unix::fs::symlink(out.join("s.txt"), proj.join("s.txt")).unwrap();
+        let (hits, _) = run(&proj, &q("needle"));
+        assert_eq!(names(&proj, &hits), vec!["ok.txt"]);
+    }
+}

@@ -241,3 +241,30 @@ fn every_command_is_registered_and_listed() {
         assert!(!declared.contains(gone), "{gone} accetterebbe un percorso dalla WebView");
     }
 }
+
+#[test]
+fn search_never_returns_files_outside_the_project_even_through_symlinks() {
+    use code_art_lib::search::{search, SearchQuery};
+    use std::sync::atomic::AtomicBool;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (proj, outside) = (base.join("progetto"), base.join("fuori"));
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("segreto.txt"), "needle\n").unwrap();
+    std::fs::write(proj.join("dentro.txt"), "needle\n").unwrap();
+    std::os::unix::fs::symlink(&outside, proj.join("scorciatoia")).unwrap();
+    std::os::unix::fs::symlink(outside.join("segreto.txt"), proj.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink("/etc", proj.join("etc")).unwrap();
+    // anche in un progetto non fidato la ricerca funziona (sola lettura), ma resta nel progetto
+    let store = store_with(&base, &[&proj], false);
+    let roots = fs_tree::roots_for_label(&store, LABEL).unwrap();
+    let mut paths = Vec::new();
+    let q = SearchQuery { text: "needle".into(), ..Default::default() };
+    let s = search(&roots, &q, &AtomicBool::new(false), |c| paths.extend(c.into_iter().map(|h| h.path)));
+    assert_eq!(paths, vec![proj.join("dentro.txt").to_string_lossy().into_owned()]);
+    assert_eq!(s.hits, 1);
+    let etc = SearchQuery { text: "root".into(), ..Default::default() };
+    let s = search(&roots, &etc, &AtomicBool::new(false), |c| assert!(c.is_empty(), "{c:?}"));
+    assert_eq!(s.hits, 0);
+}
