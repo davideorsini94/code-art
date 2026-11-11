@@ -141,19 +141,29 @@ fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// Cerca `claude` nel `PATH` dell'ambiente dato, poi nei percorsi d'installazione abituali sotto `HOME`.
-pub fn find_claude(env: &HashMap<String, String>) -> Option<PathBuf> {
+/// Cartelle d'installazione abituali fuori da `HOME` (Homebrew su Apple Silicon e Intel): servono quando la shell di
+/// login non risponde in tempo e il `PATH` è quello minimo del processo avviato dal Finder.
+const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// Candidati in ordine: `PATH` dell'ambiente, poi `dirs`, poi i percorsi d'installazione abituali sotto `HOME`.
+fn claude_candidates(env: &HashMap<String, String>, dirs: &[&str]) -> Vec<PathBuf> {
     let from_path = env
         .get("PATH")
         .into_iter()
         .flat_map(|p| p.split(':'))
+        .chain(dirs.iter().copied())
         .filter(|d| Path::new(d).is_absolute())
         .map(|d| Path::new(d).join("claude"));
     let from_home = env
         .get("HOME")
         .into_iter()
         .flat_map(|h| [".local/bin/claude", ".claude/local/claude"].map(|rel| Path::new(h).join(rel)));
-    from_path.chain(from_home).find(|p| is_executable(p))
+    from_path.chain(from_home).collect()
+}
+
+/// Cerca `claude` nel `PATH` dell'ambiente dato, poi in Homebrew, poi nei percorsi d'installazione abituali sotto `HOME`.
+pub fn find_claude(env: &HashMap<String, String>) -> Option<PathBuf> {
+    claude_candidates(env, SYSTEM_DIRS).into_iter().find(|p| is_executable(p))
 }
 
 /// Prima riga di `claude --version`, se il comando riesce.
@@ -198,7 +208,26 @@ mod tests {
         .into();
         assert_eq!(find_claude(&env), Some(exe.clone()));
         assert_eq!(claude_version(&exe, &env).as_deref(), Some("9.9.9 (Claude Code)"));
-        assert_eq!(find_claude(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn falls_back_to_homebrew_and_home_installs() {
+        // ambiente minimo (shell di login scaduta): Homebrew e le installazioni sotto HOME restano candidati
+        let env: HashMap<String, String> =
+            [("PATH".to_string(), "/usr/bin:/bin".to_string()), ("HOME".to_string(), "/Users/dev".to_string())].into();
+        let got: Vec<String> = claude_candidates(&env, SYSTEM_DIRS).iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(
+            got,
+            [
+                "/usr/bin/claude",
+                "/bin/claude",
+                "/opt/homebrew/bin/claude",
+                "/usr/local/bin/claude",
+                "/Users/dev/.local/bin/claude",
+                "/Users/dev/.claude/local/claude",
+            ]
+        );
+        assert!(claude_candidates(&HashMap::new(), &[]).is_empty());
     }
 
     fn script(dir: &Path, body: &str) -> PathBuf {
