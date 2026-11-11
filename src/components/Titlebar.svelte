@@ -1,3 +1,5 @@
+<script lang="ts"></script>
+
 <header class="bar" data-tauri-drag-region>
   <div class="traffic-space" data-tauri-drag-region></div>
   <div class="proj" data-tauri-drag-region>Code Art</div>
