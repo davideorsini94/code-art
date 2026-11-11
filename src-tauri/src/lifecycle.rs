@@ -18,6 +18,8 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 const BTN_BACKGROUND: &str = "Lascia finire in sottofondo";
 const BTN_INTERRUPT: &str = "Interrompi";
 const BTN_CANCEL: &str = "Annulla";
+const BTN_BACKGROUND_DISCARD: &str = "Sottofondo, perdi le modifiche";
+const BTN_INTERRUPT_DISCARD: &str = "Interrompi e perdi le modifiche";
 const BTN_QUIT: &str = "Esci";
 const BTN_DISCARD: &str = "Chiudi senza salvare";
 const QUIT_MESSAGE: &str = "Ci sono conversazioni al lavoro. Uscire le interromperà.";
@@ -109,10 +111,27 @@ enum CloseChoice {
 /// etichetta sconosciuta) è "Annulla". Il primo pulsante, predefinito (Invio), è quello non distruttivo.
 fn close_choice(r: &MessageDialogResult) -> CloseChoice {
     match r {
-        MessageDialogResult::Custom(l) if l == BTN_BACKGROUND => CloseChoice::Background,
-        MessageDialogResult::Custom(l) if l == BTN_INTERRUPT => CloseChoice::Interrupt,
+        MessageDialogResult::Custom(l) if l == BTN_BACKGROUND || l == BTN_BACKGROUND_DISCARD => CloseChoice::Background,
+        MessageDialogResult::Custom(l) if l == BTN_INTERRUPT || l == BTN_INTERRUPT_DISCARD => CloseChoice::Interrupt,
         MessageDialogResult::Custom(l) if l == BTN_DISCARD => CloseChoice::Discard,
         _ => CloseChoice::Cancel,
+    }
+}
+
+/// Titolo e pulsanti della domanda di chiusura. Il primo pulsante è il predefinito (Invio) ed è sempre quello
+/// che non perde nulla di irrecuperabile: con file non salvati è "Annulla" (la finestra resta aperta), anche
+/// se una conversazione sta lavorando; la finestra si distrugge solo con un pulsante esplicito.
+fn close_dialog(working: bool, dirty: bool) -> (&'static str, MessageDialogButtons) {
+    match (working, dirty) {
+        (true, false) => (
+            "Conversazioni al lavoro",
+            MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()),
+        ),
+        (true, true) => (
+            "Conversazioni al lavoro",
+            MessageDialogButtons::YesNoCancelCustom(BTN_CANCEL.into(), BTN_BACKGROUND_DISCARD.into(), BTN_INTERRUPT_DISCARD.into()),
+        ),
+        _ => ("File non salvati", MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_DISCARD.into())),
     }
 }
 
@@ -497,12 +516,7 @@ pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
     lock(&life.closing).insert(project_id.to_string());
     let (win, handle, pid) = (window.clone(), app.clone(), project_id.to_string());
     let working = !plan.working.is_empty();
-    // il primo pulsante è il predefinito (Invio): sempre quello che non perde nulla di irrecuperabile
-    let (title, buttons) = if working {
-        ("Conversazioni al lavoro", MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()))
-    } else {
-        ("File non salvati", MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_DISCARD.into()))
-    };
+    let (title, buttons) = close_dialog(working, plan.dirty);
     app.dialog()
         .message(close_message(working, plan.dirty))
         .title(title)
@@ -623,6 +637,23 @@ mod tests {
         assert_eq!(quit_message(false, true), "Ci sono file con modifiche non salvate.");
         assert_eq!(quit_message(true, true), format!("{QUIT_MESSAGE}\n{DIRTY_MESSAGE}"));
         assert_eq!(close_choice(&MessageDialogResult::Custom(BTN_DISCARD.into())), CloseChoice::Discard);
+    }
+
+    #[test]
+    fn default_close_button_never_destroys_when_there_are_unsaved_files() {
+        use MessageDialogButtons as B;
+        let first = |b: B| match b {
+            B::YesNoCancelCustom(a, _, _) | B::OkCancelCustom(a, _) => a,
+            _ => unreachable!(),
+        };
+        // working + dirty: il predefinito è Annulla, e il testo dei pulsanti distruttivi dice che le modifiche si perdono
+        assert_eq!(first(close_dialog(true, true).1), BTN_CANCEL);
+        assert_eq!(first(close_dialog(false, true).1), BTN_CANCEL);
+        // working senza modifiche: il predefinito lascia finire in sottofondo (non perde nulla)
+        assert_eq!(first(close_dialog(true, false).1), BTN_BACKGROUND);
+        assert_eq!(close_choice(&MessageDialogResult::Custom(BTN_BACKGROUND_DISCARD.into())), CloseChoice::Background);
+        assert_eq!(close_choice(&MessageDialogResult::Custom(BTN_INTERRUPT_DISCARD.into())), CloseChoice::Interrupt);
+        assert_eq!(close_choice(&MessageDialogResult::Custom(BTN_CANCEL.into())), CloseChoice::Cancel);
     }
 
     #[test]
