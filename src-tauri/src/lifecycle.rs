@@ -19,7 +19,7 @@ const BTN_INTERRUPT: &str = "Interrompi";
 const BTN_CANCEL: &str = "Annulla";
 const BTN_QUIT: &str = "Esci";
 const QUIT_MESSAGE: &str = "Ci sono conversazioni al lavoro. Uscire le interromperà.";
-const CLOSE_MESSAGE: &str = "In questo progetto ci sono conversazioni al lavoro.";
+const CLOSE_MESSAGE: &str = "Ci sono conversazioni al lavoro o in attesa di una tua risposta.";
 /// Notifiche ricordate per il click (le più vecchie si scartano).
 const NOTIFICATIONS_KEPT: usize = 64;
 
@@ -50,22 +50,23 @@ pub fn should_notify(prev: ConvStatus, next: ConvStatus, window_focused: bool) -
 pub struct ClosePlan {
     /// Processi vivi senza turno in corso: si fermano comunque alla chiusura della finestra.
     pub stop: Vec<String>,
-    /// Processi vivi con un turno in corso (`working`).
+    /// Processi vivi che non vanno fermati in silenzio: turno in corso (`working`) o richiesta aperta
+    /// (permesso, domanda, piano) che andrebbe persa.
     pub working: Vec<String>,
     /// Serve la domanda "sottofondo / interrompi / annulla".
     pub ask: bool,
 }
 
-/// Piano di chiusura di una finestra a partire da `(sessionId, stato, processo vivo)` delle conversazioni
-/// del suo progetto. Le conversazioni senza processo non contano.
-pub fn plan_window_close(convs: &[(String, ConvStatus, bool)]) -> ClosePlan {
+/// Piano di chiusura di una finestra a partire da `(sessionId, stato, processo vivo, richiesta aperta)` delle
+/// conversazioni del suo progetto. Le conversazioni senza processo non contano.
+pub fn plan_window_close(convs: &[(String, ConvStatus, bool, bool)]) -> ClosePlan {
     let mut stop = Vec::new();
     let mut working = Vec::new();
-    for (id, status, running) in convs {
+    for (id, status, running, has_ask) in convs {
         if !running {
             continue;
         }
-        if *status == ConvStatus::Working { working.push(id.clone()) } else { stop.push(id.clone()) }
+        if *status == ConvStatus::Working || *has_ask { working.push(id.clone()) } else { stop.push(id.clone()) }
     }
     let ask = decide_close(working.len()) == CloseAction::Ask;
     ClosePlan { stop, working, ask }
@@ -101,8 +102,11 @@ pub struct Lifecycle {
     pending: Mutex<HashMap<String, String>>,
     /// id notifica -> (sessionId, projectId), per il click.
     notifications: Mutex<Vec<(i32, String, String)>>,
-    /// Sessioni che stiamo fermando noi: il passaggio a `waiting` non va notificato.
-    silenced: Mutex<HashSet<String>>,
+    /// Sessioni che stiamo fermando noi, con il numero di fermate in corso: il passaggio a `waiting` che ne
+    /// deriva non va notificato.
+    silenced: Mutex<HashMap<String, u32>>,
+    /// Progetti con la domanda di chiusura già aperta (un secondo clic non ne apre un'altra).
+    closing: Mutex<HashSet<String>>,
     next_id: AtomicI32,
     permission: Mutex<Option<bool>>,
     /// Serializza calcolo e invio del numero sul Dock.
@@ -146,18 +150,33 @@ impl Lifecycle {
     }
 
     fn silence(&self, ids: &[String]) {
-        lock(&self.silenced).extend(ids.iter().cloned());
+        let mut s = lock(&self.silenced);
+        for id in ids {
+            *s.entry(id.clone()).or_insert(0) += 1;
+        }
     }
 
     fn unsilence(&self, ids: &[String]) {
         let mut s = lock(&self.silenced);
         for id in ids {
-            s.remove(id);
+            if let Some(n) = s.get_mut(id) {
+                *n -= 1;
+                if *n == 0 {
+                    s.remove(id);
+                }
+            }
         }
     }
 
     fn is_silenced(&self, id: &str) -> bool {
-        lock(&self.silenced).contains(id)
+        lock(&self.silenced).contains_key(id)
+    }
+
+    /// Osserva un upsert e decide *subito* (sul thread che emette, prima di qualsiasi lavoro asincrono) se è
+    /// silenziato: l'esito viaggia con l'osservazione, quindi un `unsilence` successivo non lo cambia.
+    pub fn observe_upsert(&self, c: &Conversation) -> (Observed, bool) {
+        let silenced = self.is_silenced(&c.session_id);
+        (self.observe(c), silenced)
     }
 
     /// Permesso notifiche: richiesto una volta, al primo bisogno. Se negato, niente notifiche (il numero sul
@@ -186,7 +205,7 @@ impl EventSink for LifecycleSink {
         let conv = serde_json::from_value::<Conversation>(payload.clone());
         self.inner.emit(project_id, event, payload);
         let Ok(conv) = conv else { return };
-        let obs = self.life.observe(&conv);
+        let (obs, silenced) = self.life.observe_upsert(&conv);
         if !obs.changed {
             return;
         }
@@ -195,7 +214,9 @@ impl EventSink for LifecycleSink {
         std::thread::spawn(move || {
             update_badge(&app, &life, &store);
             if let Some(prev) = obs.prev {
-                maybe_notify(&app, &life, &store, &conv, prev);
+                if !silenced {
+                    maybe_notify(&app, &life, &store, &conv, prev);
+                }
             }
         });
     }
@@ -210,7 +231,7 @@ fn quitting(app: &AppHandle) -> bool {
 }
 
 fn maybe_notify(app: &AppHandle, life: &Lifecycle, store: &Store, c: &Conversation, prev: ConvStatus) {
-    if c.archived || quitting(app) || life.is_silenced(&c.session_id) {
+    if c.archived || quitting(app) {
         return;
     }
     if !should_notify(prev, status_of(&c.status), window_focused(app, &c.project_id)) {
@@ -263,16 +284,17 @@ pub fn focus_conversation(app: &AppHandle, life: &Lifecycle, session_id: &str, p
     }
 }
 
-/// Icona del Dock cliccata (`RunEvent::Reopen`) o app riattivata: se una sola conversazione notificata aspetta,
-/// si va a lei (ripiego quando il click sulla notifica non arriva); altrimenti, senza finestre, si riapre il
-/// progetto usato più di recente (o la finestra di benvenuto).
+/// Icona del Dock cliccata senza finestre visibili (`RunEvent::Reopen`): se una sola conversazione notificata
+/// aspetta, si va a lei (ripiego quando il click sulla notifica non arriva); altrimenti si riapre il progetto
+/// usato più di recente (o la finestra di benvenuto).
 pub fn on_reopen(app: &AppHandle, has_visible_windows: bool) {
+    // con una finestra già visibile l'app viene solo portata avanti dal sistema
+    if has_visible_windows {
+        return;
+    }
     let life = app.state::<Arc<Lifecycle>>();
     if let Some((session_id, project_id)) = life.single_pending() {
         return focus_conversation(app, &life, &session_id, &project_id);
-    }
-    if has_visible_windows {
-        return;
     }
     match app.state::<Store>().list_projects().ok().and_then(|l| l.into_iter().next()) {
         Some(p) => {
@@ -301,6 +323,8 @@ pub fn update_badge(app: &AppHandle, life: &Lifecycle, store: &Store) {
     let _order = lock(&life.badge);
     let label = badge_text(store.waiting_total().unwrap_or(0));
     let _ = app.run_on_main_thread(move || {
+        #[cfg(target_os = "macos")]
+        {
         use objc2::MainThreadMarker;
         use objc2_app_kit::NSApplication;
         use objc2_foundation::NSString;
@@ -309,6 +333,9 @@ pub fn update_badge(app: &AppHandle, life: &Lifecycle, store: &Store) {
             let text = label.as_deref().map(NSString::from_str);
             tile.setBadgeLabel(text.as_deref());
         }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = label;
     });
 }
 
@@ -336,54 +363,64 @@ fn stop_in_background(app: &AppHandle, ids: Vec<String>) {
 }
 
 fn project_plan(app: &AppHandle, project_id: &str) -> ClosePlan {
-    let live: HashSet<String> = app.state::<Engine>().running(project_id).into_iter().collect();
-    let rows: Vec<(String, ConvStatus, bool)> = app
+    let engine = app.state::<Engine>();
+    let live: HashSet<String> = engine.running(project_id).into_iter().collect();
+    let rows: Vec<(String, ConvStatus, bool, bool)> = app
         .state::<Store>()
         .list_conversations(project_id)
         .unwrap_or_default()
         .into_iter()
-        .map(|c| (c.session_id.clone(), status_of(&c.status), live.contains(&c.session_id)))
+        .map(|c| {
+            let running = live.contains(&c.session_id);
+            let has_ask = running && engine.has_open_ask(&c.session_id);
+            (c.session_id.clone(), status_of(&c.status), running, has_ask)
+        })
         .collect();
     plan_window_close(&rows)
 }
 
-/// `CloseRequested` di una finestra progetto. Senza lavoro in corso la finestra si chiude e i processi si
-/// fermano in sottofondo; altrimenti si chiede cosa fare. Durante l'uscita dall'app non si interviene.
+/// `CloseRequested` di una finestra progetto. Senza lavoro in corso né richieste aperte la finestra si chiude
+/// e i processi si fermano in sottofondo; altrimenti si chiede cosa fare (una sola domanda per progetto). Il
+/// piano si ricalcola alla risposta: nel frattempo un turno può essere finito. Durante l'uscita dall'app non
+/// si interviene.
 pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
     let Some(project_id) = window.label().strip_prefix(PROJECT_PREFIX) else { return };
     let app = window.app_handle();
     if quitting(app) {
         return;
     }
+    let life = app.state::<Arc<Lifecycle>>();
+    if lock(&life.closing).contains(project_id) {
+        return api.prevent_close(); // la domanda è già aperta
+    }
     let plan = project_plan(app, project_id);
     if !plan.ask {
         return stop_in_background(app, plan.stop);
     }
     api.prevent_close();
-    let (win, handle) = (window.clone(), app.clone());
+    lock(&life.closing).insert(project_id.to_string());
+    let (win, handle, pid) = (window.clone(), app.clone(), project_id.to_string());
     app.dialog()
         .message(CLOSE_MESSAGE)
         .title("Conversazioni al lavoro")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::YesNoCancelCustom(BTN_BACKGROUND.into(), BTN_INTERRUPT.into(), BTN_CANCEL.into()))
         .show_with_result(move |r| {
+            lock(&handle.state::<Arc<Lifecycle>>().closing).remove(&pid);
             let label = match &r {
                 MessageDialogResult::Custom(l) => l.as_str(),
                 MessageDialogResult::Yes => BTN_BACKGROUND,
                 MessageDialogResult::No => BTN_INTERRUPT,
                 _ => BTN_CANCEL,
             };
-            match label {
-                BTN_BACKGROUND => {
-                    let _ = win.destroy();
-                    stop_in_background(&handle, plan.stop);
-                }
-                BTN_INTERRUPT => {
-                    let _ = win.destroy();
-                    stop_in_background(&handle, [plan.stop, plan.working].concat());
-                }
-                _ => {}
+            if label != BTN_BACKGROUND && label != BTN_INTERRUPT {
+                return;
             }
+            // stato di adesso, non quello di quando la domanda è comparsa
+            let plan = project_plan(&handle, &pid);
+            let ids = if label == BTN_BACKGROUND { plan.stop } else { [plan.stop, plan.working].concat() };
+            let _ = win.destroy();
+            stop_in_background(&handle, ids);
         });
 }
 
@@ -391,10 +428,13 @@ pub fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
 
 fn working_total(app: &AppHandle) -> usize {
     let store = app.state::<Store>();
-    app.state::<Engine>()
+    let engine = app.state::<Engine>();
+    engine
         .live_ids()
         .iter()
-        .filter(|id| matches!(store.get_conversation(id), Ok(Some(c)) if status_of(&c.status) == ConvStatus::Working))
+        .filter(|id| {
+            engine.has_open_ask(id) || matches!(store.get_conversation(id), Ok(Some(c)) if status_of(&c.status) == ConvStatus::Working)
+        })
         .count()
 }
 
@@ -461,8 +501,8 @@ mod tests {
         assert!(!should_notify(Waiting, Waiting, false));
     }
 
-    fn row(id: &str, s: ConvStatus, running: bool) -> (String, ConvStatus, bool) {
-        (id.into(), s, running)
+    fn row(id: &str, s: ConvStatus, running: bool) -> (String, ConvStatus, bool, bool) {
+        (id.into(), s, running, false)
     }
 
     #[test]
@@ -477,6 +517,45 @@ mod tests {
         assert!(plan.ask);
         assert_eq!(plan.working, vec!["a".to_string()]);
         assert_eq!(plan.stop, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn close_plan_protects_open_requests() {
+        let plan = plan_window_close(&[
+            ("a".into(), Waiting, true, true),
+            ("b".into(), Waiting, true, false),
+            ("c".into(), Idle, false, true),
+        ]);
+        assert!(plan.ask);
+        assert_eq!(plan.working, vec!["a".to_string()]);
+        assert_eq!(plan.stop, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn silenced_upsert_stays_silenced_after_unsilence() {
+        let l = Lifecycle::default();
+        l.observe(&conv("a", "working", false));
+        let ids = vec!["a".to_string()];
+        l.silence(&ids);
+        let (obs, silenced) = l.observe_upsert(&conv("a", "waiting", false));
+        // il lavoro asincrono parte dopo che la fermata è finita
+        l.unsilence(&ids);
+        assert!(silenced, "l'esito è fissato al momento dell'osservazione");
+        assert_eq!(obs.prev, Some(Working));
+        let (_, later) = l.observe_upsert(&conv("a", "idle", false));
+        assert!(!later);
+    }
+
+    #[test]
+    fn overlapping_silences_need_two_unsilences() {
+        let l = Lifecycle::default();
+        let ids = vec!["a".to_string()];
+        l.silence(&ids);
+        l.silence(&ids);
+        l.unsilence(&ids);
+        assert!(l.is_silenced("a"));
+        l.unsilence(&ids);
+        assert!(!l.is_silenced("a"));
     }
 
     #[test]

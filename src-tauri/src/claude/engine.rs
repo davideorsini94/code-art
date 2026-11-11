@@ -233,6 +233,11 @@ impl Engine {
         Ok(asks.into_iter().map(|(_, ev)| ev.clone()).collect())
     }
 
+    /// La conversazione ha un processo vivo con almeno una richiesta aperta (permesso, domanda, piano).
+    pub fn has_open_ask(&self, session_id: &str) -> bool {
+        self.live(session_id).is_some_and(|c| !lock(&c.rt).pending.is_empty())
+    }
+
     /// Elemento "Turno interrotto — Riprendi" per una conversazione il cui turno era a metà all'avvio.
     fn interrupted_marker(&self, session_id: &str) -> Vec<ClaudeEvent> {
         if lock(&self.0.interrupted).contains(session_id) {
@@ -337,11 +342,11 @@ impl Engine {
         };
         let msg = json!({"type": "user", "session_id": "", "parent_tool_use_id": null,
                          "message": {"role": "user", "content": content}});
-        lock(&self.0.interrupted).remove(session_id);
         let conv = self.ensure_running(project_id, session_id)?;
         // lo stato passa a `working` prima della scrittura: un `result` velocissimo non deve arrivare prima
         self.apply(session_id, Some(&conv), StateInput::UserSent, true);
         if write_line(&conv, &msg).is_ok() {
+            lock(&self.0.interrupted).remove(session_id);
             return Ok(());
         }
         // processo appena uscito ma non ancora ripulito: lo si dà per morto e si riprende la sessione
@@ -355,7 +360,11 @@ impl Engine {
         }
         let conv = self.ensure_running(project_id, session_id)?;
         self.apply(session_id, Some(&conv), StateInput::UserSent, true);
-        write_line(&conv, &msg).inspect_err(|_| self.apply(session_id, Some(&conv), StateInput::ProcessExited, false))
+        write_line(&conv, &msg)
+            .inspect_err(|_| self.apply(session_id, Some(&conv), StateInput::ProcessExited, false))
+            .map(|()| {
+                lock(&self.0.interrupted).remove(session_id);
+            })
     }
 
     pub fn answer(&self, project_id: &str, session_id: &str, request_id: &str, choice: &str) -> Result<()> {
