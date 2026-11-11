@@ -227,6 +227,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
         crate::fs_tree::unwatch_project(app, id);
         crate::claude::sessions::unwatch_project(app, id);
+        app.state::<crate::search::Searches>().cancel_project(id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
     app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);

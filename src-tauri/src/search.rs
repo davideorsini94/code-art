@@ -18,6 +18,8 @@ pub const CHUNK: usize = 200;
 pub const MAX_HITS: usize = 10_000;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub const PREVIEW_CHARS: usize = 240;
+/// Corrispondenze per riga oltre le quali si passa alla riga dopo (file minificati).
+pub const MAX_MATCHES_PER_LINE: usize = 1000;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,6 +40,10 @@ pub struct SearchHit {
     pub col: u32,
     pub len: u32,
     pub preview: String,
+    /// Offset (UTF-16, da 0) della corrispondenza dentro `preview`.
+    pub preview_col: u32,
+    /// Lunghezza (UTF-16) della corrispondenza dentro `preview`, tagliata alla finestra.
+    pub preview_len: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -46,32 +52,38 @@ pub struct SearchSummary {
     pub files: u32,
     pub hits: u32,
     pub truncated: bool,
+    pub cancelled: bool,
     pub error: Option<String>,
 }
 
-struct Shared<F> {
+struct Shared<'a, F> {
     sink: F,
+    cancel: &'a AtomicBool,
     buf: Vec<SearchHit>,
     files: u32,
     hits: usize,
     truncated: bool,
 }
 
-impl<F: FnMut(Vec<SearchHit>)> Shared<F> {
-    /// Aggiunge le corrispondenze di un file e consegna i blocchi pieni; `false` = limite raggiunto.
+impl<F: FnMut(Vec<SearchHit>)> Shared<'_, F> {
+    /// Aggiunge le corrispondenze di un file e consegna i blocchi pieni; `false` = fermarsi (limite o annullamento).
+    /// Dopo l'annullamento non consegna più nulla.
     fn push(&mut self, hits: Vec<SearchHit>) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
         self.files += 1;
         let room = MAX_HITS - self.hits;
-        if hits.len() > room {
-            self.truncated = true;
-        }
         self.hits += hits.len().min(room);
         self.buf.extend(hits.into_iter().take(room));
-        while self.buf.len() >= CHUNK {
+        if self.hits >= MAX_HITS {
+            self.truncated = true;
+        }
+        while self.buf.len() >= CHUNK && !self.cancel.load(Ordering::Relaxed) {
             let rest = self.buf.split_off(CHUNK);
             (self.sink)(std::mem::replace(&mut self.buf, rest));
         }
-        !self.truncated && self.hits < MAX_HITS
+        !self.truncated && !self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -92,21 +104,32 @@ impl<M: Matcher> Sink for Collector<'_, M> {
             return Ok(false);
         }
         let line_no = m.line_number().unwrap_or(0) as u32;
-        let bytes = m.bytes();
-        let line = String::from_utf8_lossy(bytes);
+        let line = String::from_utf8_lossy(m.bytes());
         let line = line.trim_end_matches(['\n', '\r']);
+        let cancel = self.cancel;
         let mut found: Vec<(usize, usize)> = Vec::new();
         let _ = self.matcher.find_iter(line.as_bytes(), |mm| {
             if mm.end() > mm.start() {
                 found.push((mm.start(), mm.end()));
             }
-            found.len() < MAX_HITS
+            found.len() < MAX_MATCHES_PER_LINE && !cancel.load(Ordering::Relaxed)
         });
-        // con il testo sostituito da `from_utf8_lossy` gli scarti sono in byte della stringa lossy: ok, la
-        // corrispondenza è stata cercata proprio su quella stringa
+        // una sola passata: le corrispondenze sono ordinate e non si sovrappongono
+        let long = line.len() > PREVIEW_CHARS && line.chars().count() > PREVIEW_CHARS;
+        let (mut pos, mut utf16) = (0usize, 0u32);
         for (s, e) in found {
-            let (col, len) = (utf16_len(&line[..s]) + 1, utf16_len(&line[s..e]));
-            self.hits.push(SearchHit { path: self.path.to_string(), line: line_no, col, len, preview: preview(line, s, e) });
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            utf16 += utf16_len(&line[pos..s]);
+            pos = s;
+            let len = utf16_len(&line[s..e]);
+            let (preview, preview_col, preview_len) = if long {
+                window(line, s, e)
+            } else {
+                (line.to_string(), utf16, len)
+            };
+            self.hits.push(SearchHit { path: self.path.to_string(), line: line_no, col: utf16 + 1, len, preview, preview_col, preview_len });
             if self.hits.len() >= MAX_HITS {
                 return Ok(false);
             }
@@ -124,15 +147,15 @@ fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count() as u32
 }
 
-/// Riga intera se sta in `PREVIEW_CHARS` caratteri, altrimenti una finestra che contiene la corrispondenza.
-fn preview(line: &str, s: usize, e: usize) -> String {
-    if line.chars().count() <= PREVIEW_CHARS {
-        return line.to_string();
-    }
-    let before = line[..s].chars().count();
-    let mlen = line[s..e].chars().count().min(PREVIEW_CHARS);
-    let skip = before.saturating_sub((PREVIEW_CHARS - mlen) / 4).min(before);
-    line.chars().skip(skip).take(PREVIEW_CHARS).collect()
+/// Finestra di al più `PREVIEW_CHARS` caratteri che contiene l'inizio della corrispondenza `s..e` (byte di `line`):
+/// (testo, offset UTF-16 della corrispondenza nel testo, sua lunghezza UTF-16 tagliata alla finestra).
+/// Costo limitato dalla dimensione della finestra, non dalla lunghezza della riga.
+fn window(line: &str, s: usize, e: usize) -> (String, u32, u32) {
+    let mlen = line[s..e].chars().take(PREVIEW_CHARS).count();
+    let back = (PREVIEW_CHARS - mlen) / 4;
+    let start = line[..s].char_indices().rev().take(back).last().map_or(s, |(i, _)| i);
+    let end = line[start..].char_indices().nth(PREVIEW_CHARS).map_or(line.len(), |(i, _)| start + i);
+    (line[start..end].to_string(), utf16_len(&line[start..s]), utf16_len(&line[s..e.min(end)]))
 }
 
 fn build_matcher(q: &SearchQuery) -> Result<RegexMatcher, String> {
@@ -199,7 +222,7 @@ pub fn search(roots: &[PathBuf], q: &SearchQuery, cancel: &AtomicBool, sink: imp
             }
         });
     }
-    let shared = Mutex::new(Shared { sink, buf: Vec::new(), files: 0, hits: 0, truncated: false });
+    let shared = Mutex::new(Shared { sink, cancel, buf: Vec::new(), files: 0, hits: 0, truncated: false });
     wb.build_parallel().run(|| {
         let matcher = matcher.clone();
         let shared = &shared;
@@ -234,6 +257,7 @@ pub fn search(roots: &[PathBuf], q: &SearchQuery, cancel: &AtomicBool, sink: imp
     summary.files = sh.files;
     summary.hits = sh.hits as u32;
     summary.truncated = sh.truncated;
+    summary.cancelled = cancel.load(Ordering::Relaxed);
     summary
 }
 
@@ -248,6 +272,15 @@ const MAX_GLOB_CHARS: usize = 200;
 pub struct Searches {
     next: AtomicU64,
     active: Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>,
+}
+
+impl Searches {
+    /// Annulla e dimentica la ricerca del progetto (chiusura della finestra).
+    pub fn cancel_project(&self, project_id: &str) {
+        if let Some((_, flag)) = crate::lock(&self.active).remove(project_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -458,15 +491,15 @@ mod tests {
         let s = search(&[d.path().to_path_buf()], &q("needle"), &cancel, |c| n += c.len());
         assert_eq!(n, 0);
         assert!(s.error.is_none());
-        // annullata a metà: smette di consegnare
+        // annullata dopo il primo blocco: nessun altro blocco, riassunto annullato
         let cancel = AtomicBool::new(false);
-        let mut n = 0;
-        let s = search(&[d.path().to_path_buf()], &q("needle"), &cancel, |c| {
-            n += c.len();
+        let mut chunks = 0;
+        let s = search(&[d.path().to_path_buf()], &q("needle"), &cancel, |_| {
+            chunks += 1;
             cancel.store(true, Ordering::Relaxed);
         });
-        assert!(n < 50 * 100, "n = {n}");
-        assert!(s.hits as usize <= n + CHUNK * 8);
+        assert_eq!(chunks, 1);
+        assert!(s.cancelled);
     }
 
     #[test]
@@ -521,5 +554,63 @@ mod tests {
         std::os::unix::fs::symlink(out.join("s.txt"), proj.join("s.txt")).unwrap();
         let (hits, _) = run(&proj, &q("needle"));
         assert_eq!(names(&proj, &hits), vec!["ok.txt"]);
+    }
+
+    /// Sottostringa UTF-16 `[col, col+len)` di `text`.
+    fn utf16_slice(text: &str, col: u32, len: u32) -> String {
+        let u: Vec<u16> = text.encode_utf16().collect();
+        String::from_utf16(&u[col as usize..(col + len) as usize]).unwrap()
+    }
+
+    #[test]
+    fn preview_offsets_point_at_the_match_for_short_and_long_lines() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "short.txt", "è😀 needle 😀\n");
+        w(d.path(), "long.txt", format!("{}needle{}\n", "😀é".repeat(300), "è".repeat(500)));
+        w(d.path(), "start.txt", format!("needle{}\n", "x".repeat(500)));
+        let (hits, _) = run(d.path(), &q("needle"));
+        assert_eq!(hits.len(), 3);
+        for h in &hits {
+            assert!(h.preview.chars().count() <= PREVIEW_CHARS);
+            assert_eq!(utf16_slice(&h.preview, h.preview_col, h.preview_len), "needle", "{}", h.path);
+        }
+        let short = hits.iter().find(|h| h.path.ends_with("short.txt")).unwrap();
+        assert_eq!((short.preview_col, short.col), (4, 5));
+        let long = hits.iter().find(|h| h.path.ends_with("long.txt")).unwrap();
+        assert_eq!(long.col, 900 + 1); // 300 * (2 + 1) unità UTF-16
+        assert!(long.preview_col < 100);
+    }
+
+    #[test]
+    fn match_longer_than_window_is_clipped() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "a.txt", format!("{}\n", "é".repeat(1000)));
+        let (hits, _) = run(d.path(), &SearchQuery { text: "é+".into(), regex: true, ..Default::default() });
+        assert_eq!(hits[0].len, 1000);
+        assert_eq!(hits[0].preview_col, 0);
+        assert_eq!(hits[0].preview_len as usize, PREVIEW_CHARS);
+    }
+
+    #[test]
+    fn minified_line_is_fast_and_capped_per_line() {
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "min.js", "é;".repeat(600_000) + "\n"); // circa 2 MB su una riga
+        w(d.path(), "next.txt", "é\n");
+        let t = std::time::Instant::now();
+        let (hits, s) = run(d.path(), &q("é"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(hits.iter().filter(|h| h.path.ends_with("min.js")).count(), MAX_MATCHES_PER_LINE);
+        assert_eq!(hits.iter().filter(|h| h.path.ends_with("next.txt")).count(), 1);
+        assert!(!s.truncated);
+    }
+
+    #[test]
+    fn truncated_is_set_when_the_cap_is_hit_exactly() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            w(d.path(), &format!("f{i}.txt"), "a\n".repeat(1000));
+        }
+        let (hits, s) = run(d.path(), &q("a"));
+        assert_eq!((hits.len(), s.truncated), (MAX_HITS, true));
     }
 }
