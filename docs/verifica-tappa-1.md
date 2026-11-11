@@ -43,7 +43,7 @@ l'assenza del doppio disegno va confermata a vista.
 
 ## Suite
 
-`pnpm vitest run`, `pnpm typecheck` (0 errori), `cargo test` (155 + 5 test), `cargo build` senza warning: tutti verdi.
+`pnpm vitest run`, `pnpm typecheck` (0 errori), `cargo test` (155 + 5 test), `cargo build` senza warning: verdi. `pnpm vitest run`: 203 su 204 (l'unico fallimento è in `src/lib/fileicons.test.ts`, lavoro non committato di un altro task, non parte di questo pacchetto).
 
 ## Da verificare a vista
 
