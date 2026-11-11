@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Tetto per `Unknown.json` negli eventi (le righe utente riemesse possono contenere immagini base64).
@@ -21,14 +21,14 @@ const STDERR_TAIL: usize = 4096;
 const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 const IMAGES_MAX_PER_MESSAGE: usize = 10;
 const IMAGES_MAX_TOTAL_BYTES: u64 = 30 * 1024 * 1024;
-/// `stop`: attesa dopo la chiusura di stdin prima di uccidere il gruppo del processo.
+/// `stop`: attesa dopo la richiesta di chiusura prima di uccidere il gruppo del processo.
 const STOP_GRACE: Duration = Duration::from_secs(2);
+/// `stop`: attesa dopo l'uccisione del gruppo perché l'uscita sia gestita.
+const KILL_WAIT: Duration = Duration::from_secs(2);
+/// `ensure_running`: attesa massima perché un processo in chiusura sia del tutto terminato prima di sostituirlo.
+const REPLACE_WAIT: Duration = Duration::from_secs(5);
 /// Dopo l'uscita del processo, quanto aspettare ancora la fine dello stdout (un discendente può tenerlo aperto).
 const STDOUT_GRACE: Duration = Duration::from_millis(500);
-/// Un processo senza turno in corso né richieste aperte, fermo da tanto, viene chiuso (si riprende da solo al
-/// prossimo `conv_send`).
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const REAP_INTERVAL: Duration = Duration::from_secs(60);
 /// Dopo l'uscita di un nostro processo il file di sessione è stato scritto da noi: niente avviso "altrove".
 const OWN_WRITE_WINDOW: Duration = Duration::from_secs(60);
 pub const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"];
@@ -119,8 +119,10 @@ struct Conv {
 
 impl Conv {
     /// Processo terminato o stdin chiuso: non più utilizzabile, `ensure_running` lo sostituisce.
+    /// Guarda solo `rt`, mai il mutex di stdin (che uno scrittore bloccato può tenere a lungo).
     fn is_dead(&self) -> bool {
-        lock(&self.stdin).is_none() || lock(&self.rt).reaped
+        let rt = lock(&self.rt);
+        rt.closed || rt.reaped || rt.stopping
     }
 }
 
@@ -129,18 +131,16 @@ struct Runtime {
     /// Richieste aperte: request id → evento `Ask` (serve `tool_name`/`input` per rispondere).
     pending: HashMap<String, ClaudeEvent>,
     next_req: u64,
-    /// Ultima riga ricevuta o scritta (per la chiusura dei processi inattivi).
-    last_activity: Instant,
+    /// Stdin dato per chiuso (scrittura fallita o uscita): il processo non accetta più messaggi.
+    closed: bool,
+    /// `stop` in corso: chi vuole riprendere la sessione aspetta che il processo sia del tutto terminato.
+    stopping: bool,
     /// Il processo è uscito ed è stato raccolto (`wait`): il suo pid non va più usato.
     reaped: bool,
     /// Uscita gestita (stato salvato, eventi emessi): le righe stdout tardive vengono ignorate.
     finished: bool,
 }
 
-/// Decisione della chiusura per inattività: nessun turno in corso, nessuna richiesta aperta, fermo da `IDLE_TIMEOUT`.
-pub fn should_reap(status: ConvStatus, open_asks: usize, idle_for: Duration) -> bool {
-    status != ConvStatus::Working && open_asks == 0 && idle_for >= IDLE_TIMEOUT
-}
 
 impl Runtime {
     fn request_id(&mut self) -> String {
@@ -178,12 +178,6 @@ impl Engine {
             convs: Mutex::new(HashMap::new()),
             titles: OnceLock::new(),
             exits: Mutex::new(HashMap::new()),
-        });
-        let weak: Weak<Inner> = Arc::downgrade(&inner);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(REAP_INTERVAL);
-            let Some(inner) = weak.upgrade() else { break };
-            Engine(inner).reap_idle_at(Instant::now());
         });
         Engine(inner)
     }
@@ -312,7 +306,14 @@ impl Engine {
             return Ok(());
         }
         // processo appena uscito ma non ancora ripulito: lo si dà per morto e si riprende la sessione
-        *lock(&conv.stdin) = None;
+        // (non se lo si sta fermando di proposito)
+        {
+            let mut rt = lock(&conv.rt);
+            if rt.stopping {
+                return Err("la conversazione è stata fermata".into());
+            }
+            rt.closed = true;
+        }
         let conv = self.ensure_running(project_id, session_id)?;
         self.apply(session_id, Some(&conv), StateInput::UserSent, true);
         write_line(&conv, &msg).inspect_err(|_| self.apply(session_id, Some(&conv), StateInput::ProcessExited, false))
@@ -405,6 +406,9 @@ impl Engine {
         self.owned_conv(project_id, session_id)?;
         self.0.store.set_conversation_archived(session_id, archived)?;
         self.emit_upsert(session_id);
+        if archived {
+            self.stop(session_id);
+        }
         Ok(())
     }
 
@@ -425,13 +429,28 @@ impl Engine {
     /// Ferma il processo della conversazione: interrompe il turno se ce n'è uno, chiude stdin, aspetta fino a
     /// 2 s e poi uccide il gruppo del processo. Lo stato diventa `waiting` se un turno è stato tagliato,
     /// altrimenti non cambia. Senza processo non fa nulla.
+    ///
+    /// Sempre limitato nel tempo (`STOP_GRACE + KILL_WAIT`): interruzione e chiusura di stdin passano da un
+    /// thread a parte, perché il mutex di stdin può essere tenuto da uno scrittore bloccato su una pipe piena
+    /// (processo che non legge più). Ucciso il gruppo, quello scrittore riceve EPIPE e si sblocca.
     pub fn stop(&self, session_id: &str) {
         let Some(conv) = self.live(session_id) else { return };
-        if lock(&conv.rt).state.status == ConvStatus::Working {
-            let req_id = lock(&conv.rt).request_id();
-            let _ = write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": {"subtype": "interrupt"}}));
+        let working = {
+            let mut rt = lock(&conv.rt);
+            rt.stopping = true;
+            rt.state.status == ConvStatus::Working
+        };
+        {
+            let conv = conv.clone();
+            std::thread::spawn(move || {
+                if working {
+                    let req_id = lock(&conv.rt).request_id();
+                    let _ = write_line(&conv, &json!({"type": "control_request", "request_id": req_id, "request": {"subtype": "interrupt"}}));
+                }
+                *lock(&conv.stdin) = None;
+                lock(&conv.rt).closed = true;
+            });
         }
-        *lock(&conv.stdin) = None;
         if !wait_finished(&conv, STOP_GRACE) {
             {
                 let rt = lock(&conv.rt);
@@ -439,11 +458,11 @@ impl Engine {
                     super::locate::kill_group(conv.pid);
                 }
             }
-            wait_finished(&conv, STOP_GRACE);
+            wait_finished(&conv, KILL_WAIT);
         }
     }
 
-    /// Ferma tutti i processi (in parallelo): all'uscita dell'app.
+    /// Ferma tutti i processi in parallelo (all'uscita dell'app): limitato come un singolo `stop`.
     pub fn stop_all(&self) {
         let ids: Vec<String> = lock(&self.0.convs).keys().cloned().collect();
         std::thread::scope(|s| {
@@ -451,22 +470,6 @@ impl Engine {
                 s.spawn(move || self.stop(id));
             }
         });
-    }
-
-    /// Chiude i processi inattivi da almeno `IDLE_TIMEOUT` rispetto a `now`; restituisce le sessioni fermate.
-    fn reap_idle_at(&self, now: Instant) -> Vec<String> {
-        let idle: Vec<String> = lock(&self.0.convs)
-            .iter()
-            .filter(|(_, c)| {
-                let rt = lock(&c.rt);
-                should_reap(rt.state.status, rt.pending.len().max(rt.state.open_asks as usize), now.saturating_duration_since(rt.last_activity))
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &idle {
-            self.stop(id);
-        }
-        idle
     }
 
     // ---------- stato ----------
@@ -547,13 +550,25 @@ impl Engine {
         // prima del lock: la prima risoluzione aspetta l'ambiente della shell di login
         let claude = self.claude_path();
         self.owned_conv(project_id, session_id)?;
-        let mut convs = lock(&self.0.convs);
-        if let Some(c) = convs.get(session_id) {
+        let deadline = Instant::now() + REPLACE_WAIT;
+        let mut convs = loop {
+            let convs = lock(&self.0.convs);
+            let Some(c) = convs.get(session_id).cloned() else { break convs };
             if !c.is_dead() {
-                return Ok(c.clone());
+                return Ok(c);
             }
-            // processo uscito ma non ancora ripulito: viene sostituito (la sua pulizia non tocca il nuovo)
-        }
+            // processo in chiusura (fermato, uscito o con stdin rotto): prima di avviarne un altro sulla stessa
+            // sessione si aspetta che sia del tutto terminato (la sua pulizia lo toglie dalla mappa)
+            drop(convs);
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !wait_finished(&c, left) {
+                return Err("la conversazione si sta ancora chiudendo, riprova tra poco".into());
+            }
+            let mut convs = lock(&self.0.convs);
+            if convs.get(session_id).is_some_and(|x| Arc::ptr_eq(x, &c)) {
+                convs.remove(session_id); // terminato ma non più "corrente" per la sua pulizia: non serve oltre
+            }
+        };
         let claude = claude.ok_or("claude non trovato")?;
         let project = self.project(project_id)?;
         self.0.store.mark_conversation_owned(session_id)?;
@@ -610,7 +625,8 @@ impl Engine {
                 state: self.load_state(session_id),
                 pending: HashMap::new(),
                 next_req: 0,
-                last_activity: Instant::now(),
+                closed: false,
+                stopping: false,
                 reaped: false,
                 finished: false,
             }),
@@ -662,9 +678,18 @@ impl Engine {
         // uccidere il gruppo (discendenti rimasti orfani: server MCP, strumenti in background)
         wait_exit_no_reap(conv.pid);
         super::locate::kill_group(conv.pid);
-        let success = child.wait().is_ok_and(|s| s.success());
-        lock(&conv.rt).reaped = true;
-        *lock(&conv.stdin) = None;
+        // raccolta e `reaped` sotto lo stesso lock: `stop` non può uccidere un pid già raccolto
+        let success = {
+            let mut rt = lock(&conv.rt);
+            let ok = child.wait().is_ok_and(|s| s.success()); // immediato: il processo è già zombie
+            rt.reaped = true;
+            rt.closed = true;
+            ok
+        };
+        // chiusura di stdin senza aspettare uno scrittore bloccato (riceverà EPIPE)
+        if let Ok(mut stdin) = conv.stdin.try_lock() {
+            *stdin = None;
+        }
         // le ultime righe già scritte arrivano ancora; poi si va avanti anche se la pipe resta aperta
         let _ = stdout_done.recv_timeout(STDOUT_GRACE);
         // stato salvato sotto il lock della mappa: una ripresa concorrente lo rilegge aggiornato, e una
@@ -699,13 +724,14 @@ impl Engine {
             if let ClaudeEvent::Unknown { json, .. } = &mut ev {
                 truncate_utf8(json, UNKNOWN_JSON_CAP);
             }
-            if lock(&conv.rt).finished {
-                return;
-            }
-            let mut changed = self.persist_metadata(session_id, &ev);
+            let mut changed = false;
             let forward = {
                 let mut rt = lock(&conv.rt);
-                rt.last_activity = Instant::now();
+                // dentro la sezione critica: una riga tardiva non sovrascrive lo stato salvato all'uscita
+                if rt.finished {
+                    return;
+                }
+                changed |= self.persist_metadata(session_id, &ev);
                 let forward = match &ev {
                     ClaudeEvent::Ask { request_id, .. } => {
                         rt.pending.insert(request_id.clone(), ev.clone());
@@ -831,9 +857,8 @@ fn write_line(conv: &Conv, v: &Value) -> Result<()> {
     line.push('\n');
     let mut stdin = lock(&conv.stdin);
     let pipe = stdin.as_mut().ok_or("il processo della conversazione non è attivo")?;
+    // (il mutex resta tenuto per tutta la scrittura: le righe non si mescolano; `stop` non ne dipende)
     pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).map_err(|e| format!("scrittura verso claude fallita: {e}"))?;
-    drop(stdin);
-    lock(&conv.rt).last_activity = Instant::now();
     Ok(())
 }
 
@@ -1365,29 +1390,67 @@ mod tests {
     }
 
     #[test]
-    fn reap_decision_table() {
-        use ConvStatus::*;
-        let long = IDLE_TIMEOUT;
-        let short = IDLE_TIMEOUT - Duration::from_secs(1);
-        assert!(should_reap(Idle, 0, long));
-        assert!(should_reap(Waiting, 0, long + Duration::from_secs(60)));
-        assert!(!should_reap(Working, 0, long));
-        assert!(!should_reap(Waiting, 1, long));
-        assert!(!should_reap(Idle, 0, short));
-        assert_eq!(IDLE_TIMEOUT, Duration::from_secs(30 * 60));
+    fn stop_is_bounded_when_the_child_does_not_read_stdin() {
+        let env = setup(&[("FAKE_CLAUDE_NO_STDIN", "1")]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        let hang = env.out.join(format!("{sid}.hang"));
+        wait_until("processo fermo", || read(&hang).ends_with('\n'));
+        let child: i32 = read(&hang).trim().parse().unwrap();
+        // invio grande (ben oltre il buffer della pipe): lo scrittore resta bloccato tenendo il mutex di stdin
+        let img = env.images.join("grande.png");
+        std::fs::write(&img, vec![0u8; 4 * 1024 * 1024]).unwrap();
+        let sender = {
+            let (engine, sid, img) = (env.engine.clone(), sid.clone(), img.to_string_lossy().into_owned());
+            std::thread::spawn(move || engine.send("p1", &sid, "guarda", &[img]))
+        };
+        wait_until("turno avviato", || status(&env, &sid) == "working");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!sender.is_finished(), "la scrittura doveva restare bloccata");
+        let t = Instant::now();
+        env.engine.stop(&sid);
+        let took = t.elapsed();
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(status(&env, &sid), "waiting"); // turno tagliato
+        wait_until("gruppo ucciso", || !alive(child));
+        // lo scrittore bloccato riceve EPIPE e non riavvia la sessione fermata
+        assert!(sender.join().unwrap().is_err());
+        assert_eq!(spawns(&env, &sid), 1);
     }
 
     #[test]
-    fn idle_processes_are_reaped_and_resumed_by_send() {
-        let fx = fixture("simple-turn");
-        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+    fn send_during_stop_waits_for_the_old_process() {
+        let env = setup(&[("FAKE_CLAUDE_HANG", "1")]);
         let sid = env.engine.start("p1", StartOpts::default()).unwrap();
-        assert!(env.engine.reap_idle_at(Instant::now()).is_empty());
-        assert_eq!(env.engine.reap_idle_at(Instant::now() + IDLE_TIMEOUT + Duration::from_secs(1)), vec![sid.clone()]);
-        assert!(!env.engine.is_running(&sid));
-        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        env.engine.send("p1", &sid, "lavora", &[]).unwrap();
+        let hang = env.out.join(format!("{sid}.hang"));
+        wait_until("processo bloccato", || read(&hang).ends_with('\n'));
+        let first_child: i32 = read(&hang).trim().parse().unwrap();
+        let stopper = {
+            let (engine, sid) = (env.engine.clone(), sid.clone());
+            std::thread::spawn(move || engine.stop(&sid))
+        };
+        std::thread::sleep(Duration::from_millis(300)); // dentro l'attesa di `stop`
+        let t = Instant::now();
+        env.engine.send("p1", &sid, "dopo", &[]).unwrap();
+        // l'invio ha aspettato che il vecchio processo fosse ucciso e ripulito, poi ne ha avviato uno solo
+        assert!(t.elapsed() >= Duration::from_millis(1500), "{:?}", t.elapsed());
+        stopper.join().unwrap();
+        wait_until("discendente del primo processo morto", || !alive(first_child));
         wait_until("secondo avvio", || spawns(&env, &sid) == 2);
-        wait_until("fine turno", || status(&env, &sid) == "waiting");
+        wait_until("messaggio al nuovo processo", || stdin_lines(&env, &sid).iter().any(|l| l["message"]["content"] == "dopo"));
+        env.engine.stop(&sid);
+    }
+
+    #[test]
+    fn archiving_stops_the_process() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        env.engine.archive("p1", &sid, false).unwrap();
+        assert!(env.engine.is_running(&sid));
+        env.engine.archive("p1", &sid, true).unwrap();
+        assert!(!env.engine.is_running(&sid));
+        assert!(env.store.get_conversation(&sid).unwrap().unwrap().archived);
     }
 
     #[test]

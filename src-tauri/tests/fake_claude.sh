@@ -10,9 +10,10 @@
 #   FAKE_CLAUDE_STRAY       stderr|stdout: avvia un processo in background (sleep 5) che eredita quella pipe
 #   FAKE_CLAUDE_EXIT_AT_START  al primo avvio della sessione esce subito con questo codice
 #   FAKE_CLAUDE_HANG        dopo un messaggio utente resta bloccato (sleep 30 in background + wait), ignora stdin
+#   FAKE_CLAUDE_NO_STDIN    non legge mai stdin: resta fermo (sleep 30 in background + wait)
 #
 # Ogni avvio aggiunge una riga a <sessione>.spawns; prima di un'uscita volontaria scrive <sessione>.exited;
-# FAKE_CLAUDE_HANG scrive il pid del processo in background in <sessione>.hang.
+# FAKE_CLAUDE_HANG e FAKE_CLAUDE_NO_STDIN scrivono il pid del processo in background in <sessione>.hang.
 #
 # Una riga `control_request` della fixture sospende la ristampa finché su stdin non arriva una
 # `control_response` (come la CLI vera, che aspetta la decisione dell'host).
@@ -39,6 +40,12 @@ if [ -n "$FAKE_CLAUDE_EXIT_AT_START" ] && [ "$(grep -c . "$out/$sid.spawns")" -e
 fi
 pwd -P > "$out/$sid.cwd"
 : > "$out/$sid.stdin"
+if [ -n "$FAKE_CLAUDE_NO_STDIN" ]; then
+  sleep 30 < /dev/null &
+  echo $! > "$out/$sid.hang"
+  wait
+  exit 0
+fi
 
 wait_barrier() {
   [ -n "$FAKE_CLAUDE_BARRIER" ] || return 0
