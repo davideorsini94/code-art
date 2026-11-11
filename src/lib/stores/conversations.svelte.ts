@@ -15,6 +15,7 @@ class ConversationStore {
 
   private projectId: string | null = null
   private unlisten: UnlistenFn | null = null
+  private unlistenFocus: UnlistenFn | null = null
   private generation = 0
 
   list = $derived(sortConversations(this.all, this.showArchived))
@@ -38,6 +39,12 @@ class ConversationStore {
       })
       if (gen !== this.generation) return un()
       this.unlisten = un
+      // clic su una notifica: il backend porta in primo piano la finestra e chiede di aprire la conversazione
+      const unFocus = await listen<{ sessionId: string }>('conv:focus', (ev) => {
+        if (gen === this.generation) void this.select(ev.payload.sessionId)
+      })
+      if (gen !== this.generation) return unFocus()
+      this.unlistenFocus = unFocus
       this.all = await convList(projectId)
     } catch (e) {
       this.error = String(e)
@@ -51,6 +58,8 @@ class ConversationStore {
     this.generation++
     this.unlisten?.()
     this.unlisten = null
+    this.unlistenFocus?.()
+    this.unlistenFocus = null
   }
 
   /** Da ogni evento `init` (i comandi e il modello possono cambiare). */

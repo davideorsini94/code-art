@@ -263,9 +263,7 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 
 pub fn on_menu_event(app: &AppHandle, id: &str) {
     if id == "quit" {
-        mark_quitting(app);
-        app.state::<crate::claude::engine::Engine>().stop_all();
-        app.exit(0);
+        crate::lifecycle::request_quit(app);
     } else if id == "open_folder" {
         pick_and_open(app);
     } else if let Some(pid) = id.strip_prefix("recent:") {

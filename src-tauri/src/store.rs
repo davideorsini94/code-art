@@ -278,11 +278,25 @@ impl Store {
     }
 
     /// All'avvio dell'app nessun processo è vivo: gli stati `working` salvati diventano `waiting`.
-    pub fn reset_working_conversations(&self) -> Result<()> {
-        self.conn()
-            .execute("UPDATE conversations SET status = 'waiting' WHERE status = 'working'", [])
+    /// Restituisce le sessioni il cui turno è rimasto a metà.
+    pub fn reset_working_conversations(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let ids = {
+            let mut stmt = conn.prepare("SELECT session_id FROM conversations WHERE status = 'working'").map_err(err)?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(err)?
+        };
+        conn.execute("UPDATE conversations SET status = 'waiting' WHERE status = 'working'", []).map_err(err)?;
+        Ok(ids)
+    }
+
+    /// Conversazioni `waiting` non archiviate, di tutti i progetti (numero sul Dock).
+    pub fn waiting_total(&self) -> Result<usize> {
+        let n: i64 = self
+            .conn()
+            .query_row("SELECT COUNT(*) FROM conversations WHERE status = 'waiting' AND archived = 0", [], |r| r.get(0))
             .map_err(err)?;
-        Ok(())
+        Ok(n.max(0) as usize)
     }
 
     pub fn set_conversation_model(&self, session_id: &str, model: &str) -> Result<()> {

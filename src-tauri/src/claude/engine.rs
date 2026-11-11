@@ -7,7 +7,7 @@ use crate::store::{Project, Result, Store};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -36,6 +36,7 @@ const FALLBACK_PERMISSION_MODE: &str = "bypassPermissions";
 const DENY_MESSAGE: &str = "The user denied this action.";
 const PLAN_REJECT_MESSAGE: &str = "The user rejected the plan.";
 const EXIT_LABEL: &str = "Processo terminato";
+pub const INTERRUPTED_LABEL: &str = "Turno interrotto — Riprendi";
 
 /// Destinazione degli eventi (`conv:event`, `conv:upsert`); nei test un finto che li registra.
 pub trait EventSink: Send + Sync + 'static {
@@ -161,6 +162,10 @@ struct Inner {
     titles: OnceLock<super::titles::TitleQueue>,
     /// Ultima uscita di un nostro processo per sessione (solo in memoria).
     exits: Mutex<HashMap<String, Instant>>,
+    /// Sessioni con un turno rimasto a metà al riavvio dell'app; finché non si invia un nuovo messaggio la
+    /// conversazione mostra "Turno interrotto — Riprendi" (solo in memoria: dopo un'altra sessione dell'app il
+    /// turno non è più "appena interrotto").
+    interrupted: Mutex<HashSet<String>>,
 }
 
 /// Stato condiviso dell'app (non della finestra): i processi sopravvivono alla chiusura della finestra.
@@ -169,8 +174,7 @@ pub struct Engine(Arc<Inner>);
 
 impl Engine {
     pub fn new(launch: Arc<LaunchCell>, store: Store, sink: Arc<dyn EventSink>, sessions_root: PathBuf, image_dir: PathBuf) -> Engine {
-        // nessun processo è vivo alla creazione del motore (= avvio dell'app)
-        let _ = store.reset_working_conversations();
+        let interrupted = Self::recover(&store);
         let inner = Arc::new(Inner {
             launch,
             store,
@@ -180,8 +184,15 @@ impl Engine {
             convs: Mutex::new(HashMap::new()),
             titles: OnceLock::new(),
             exits: Mutex::new(HashMap::new()),
+            interrupted: Mutex::new(interrupted),
         });
         Engine(inner)
+    }
+
+    /// Avvio dell'app: nessun processo è vivo e nessun turno riparte da solo. Le conversazioni rimaste
+    /// `working` diventano `waiting`; restituisce i loro id (marcatore "Turno interrotto").
+    fn recover(store: &Store) -> HashSet<String> {
+        store.reset_working_conversations().unwrap_or_default().into_iter().collect()
     }
 
     /// Coda di titolazione (impostata una volta all'avvio dell'app): a fine turno decide se ritolare.
@@ -215,11 +226,25 @@ impl Engine {
     /// scheda dopo che la richiesta è già stata emessa.
     pub fn pending_asks(&self, project_id: &str, session_id: &str) -> Result<Vec<ClaudeEvent>> {
         self.owned_conv(project_id, session_id)?;
-        let Some(conv) = self.live(session_id) else { return Ok(vec![]) };
+        let Some(conv) = self.live(session_id) else { return Ok(self.interrupted_marker(session_id)) };
         let rt = lock(&conv.rt);
         let mut asks: Vec<&(u64, ClaudeEvent)> = rt.pending.values().collect();
         asks.sort_by_key(|(seq, _)| *seq);
         Ok(asks.into_iter().map(|(_, ev)| ev.clone()).collect())
+    }
+
+    /// Elemento "Turno interrotto — Riprendi" per una conversazione il cui turno era a metà all'avvio.
+    fn interrupted_marker(&self, session_id: &str) -> Vec<ClaudeEvent> {
+        if lock(&self.0.interrupted).contains(session_id) {
+            vec![ClaudeEvent::Unknown { label: INTERRUPTED_LABEL.into(), json: String::new() }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Sessioni con un processo vivo, di tutti i progetti.
+    pub fn live_ids(&self) -> Vec<String> {
+        lock(&self.0.convs).keys().cloned().collect()
     }
 
     pub fn running(&self, project_id: &str) -> Vec<String> {
@@ -312,6 +337,7 @@ impl Engine {
         };
         let msg = json!({"type": "user", "session_id": "", "parent_tool_use_id": null,
                          "message": {"role": "user", "content": content}});
+        lock(&self.0.interrupted).remove(session_id);
         let conv = self.ensure_running(project_id, session_id)?;
         // lo stato passa a `working` prima della scrittura: un `result` velocissimo non deve arrivare prima
         self.apply(session_id, Some(&conv), StateInput::UserSent, true);
@@ -1046,6 +1072,21 @@ mod tests {
 
     fn status(env: &Env, sid: &str) -> String {
         env.store.get_conversation(sid).unwrap().unwrap().status
+    }
+
+    #[test]
+    fn startup_downgrades_working_to_waiting() {
+        let env = setup(&[]);
+        let sid = "11111111-1111-4111-8111-111111111111";
+        env.store.insert_owned_conversation("p1", sid, "/Users/dev/x", None, "default").unwrap();
+        env.store.save_conversation_state(sid, "working", 1, 0, false).unwrap();
+        // riavvio dell'app: nuovo motore sullo stesso archivio
+        let engine = Engine::new(env.engine.0.launch.clone(), env.store.clone(), env.sink.clone(), env.sessions_root.clone(), env.images.clone());
+        assert_eq!(status(&env, sid), "waiting");
+        assert!(!engine.is_running(sid), "nessun turno riparte da solo");
+        let marker = engine.pending_asks("p1", sid).unwrap();
+        assert!(matches!(&marker[..], [ClaudeEvent::Unknown { label, .. }] if label == INTERRUPTED_LABEL), "{marker:?}");
+        assert_eq!(env.store.waiting_total().unwrap(), 1);
     }
 
     #[test]

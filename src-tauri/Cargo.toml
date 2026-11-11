@@ -32,6 +32,11 @@ base64 = "0.23.1"
 tauri-plugin-opener = "2.7.3"
 unicode-normalization = "0.1.26"
 libc = "0.2.191"
+tauri-plugin-notification = "2"
+# badge sul Dock anche senza finestre (la API di Tauri passa da una finestra)
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

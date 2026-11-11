@@ -1,15 +1,18 @@
 mod claude;
 mod fs_tree;
+mod lifecycle;
 mod projects;
 mod pty;
 mod store;
 
+use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
@@ -20,7 +23,14 @@ pub fn run() {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
             let store = store::Store::open(&dir.join("codeart.db"))?;
             let launch = claude::engine::app_launch();
-            let sink: std::sync::Arc<dyn claude::engine::EventSink> = std::sync::Arc::new(claude::engine::TauriSink(app.handle().clone()));
+            let life = Arc::new(lifecycle::Lifecycle::default());
+            // ogni cambio di stato passa da qui: numero sul Dock e notifiche
+            let sink: Arc<dyn claude::engine::EventSink> = Arc::new(lifecycle::LifecycleSink {
+                inner: Arc::new(claude::engine::TauriSink(app.handle().clone())),
+                app: app.handle().clone(),
+                life: life.clone(),
+                store: store.clone(),
+            });
             let engine = claude::engine::Engine::new(
                 launch.clone(),
                 store.clone(),
@@ -37,15 +47,21 @@ pub fn run() {
             engine.set_titles(titles.clone());
             app.manage(engine);
             app.manage(titles);
-            app.manage(store);
+            app.manage(store.clone());
+            app.manage(life.clone());
+            lifecycle::register_notification_clicks(app.handle(), life.clone());
+            lifecycle::update_badge(app.handle(), &life, &store);
             projects::rebuild_menu(app.handle())?;
             projects::restore_windows(app.handle())?;
             Ok(())
         })
         .on_menu_event(|app, event| projects::on_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| {
-            if let WindowEvent::Destroyed = event {
-                projects::on_window_destroyed(window.app_handle(), window.label());
+            match event {
+                WindowEvent::CloseRequested { api, .. } => lifecycle::on_close_requested(window, api),
+                WindowEvent::Focused(true) => lifecycle::on_window_focused(window.app_handle(), window.label()),
+                WindowEvent::Destroyed => projects::on_window_destroyed(window.app_handle(), window.label()),
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -93,9 +109,22 @@ pub fn run() {
 
     app.run(|app, event| {
         match event {
-            RunEvent::ExitRequested { .. } => projects::mark_quitting(app),
-            // i processi `claude` non sopravvivono all'app (la chiusura di una finestra invece non li ferma)
-            RunEvent::Exit => app.state::<claude::engine::Engine>().stop_all(),
+            // senza codice = chiusa l'ultima finestra: l'app resta viva (i processi in sottofondo e il Dock);
+            // con codice = uscita vera (`app.exit`)
+            RunEvent::ExitRequested { code, api, .. } => {
+                if code.is_none() {
+                    api.prevent_exit();
+                } else {
+                    projects::mark_quitting(app);
+                }
+            }
+            RunEvent::Reopen { has_visible_windows, .. } => lifecycle::on_reopen(app, has_visible_windows),
+            // i processi `claude` non sopravvivono all'app (la chiusura di una finestra invece non li ferma);
+            // l'uscita dal Dock o dal sistema arriva qui senza `ExitRequested`
+            RunEvent::Exit => {
+                projects::mark_quitting(app);
+                app.state::<claude::engine::Engine>().stop_all();
+            }
             _ => {}
         }
     });
