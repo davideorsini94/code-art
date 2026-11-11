@@ -1229,6 +1229,16 @@ mod tests {
     }
 
     #[test]
+    fn valid_model_accepts_the_builtin_aliases_and_ids_but_not_options_or_spaces() {
+        for ok in ["fable", "opus", "sonnet", "haiku", "claude-opus-4-5", "sonnet[1m]"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        for bad in ["", "-fable", "--model", "fa ble", "fable;ls", "fable\n"] {
+            assert!(!valid_model(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn start_uses_requested_model_and_mode_and_validates_them() {
         let env = setup(&[]);
         let opts = StartOpts { model: Some("sonnet".into()), permission_mode: Some("plan".into()) };

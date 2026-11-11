@@ -105,6 +105,27 @@ describe('Composer', () => {
     expect((screen.getByLabelText('Modello') as HTMLSelectElement).value).toBe('claude-opus-4')
   })
 
+  it('model picker lists fable, opus, sonnet, haiku in order with friendly labels', () => {
+    render(Composer, { conv: { ...base, sessionId: 'sf', model: 'sonnet' } })
+    const opts = [...(screen.getByLabelText('Modello') as HTMLSelectElement).options]
+    expect(opts.map((o) => o.value)).toEqual(['fable', 'opus', 'sonnet', 'haiku'])
+    expect(opts.map((o) => o.textContent)).toEqual(['Fable', 'Opus', 'Sonnet', 'Haiku'])
+  })
+
+  it('a model reported by the process that is not an alias is still listed and selected', async () => {
+    conversations.setInit('sg', [], 'claude-opus-4')
+    render(Composer, { conv: { ...base, sessionId: 'sg', model: null } })
+    const sel = screen.getByLabelText('Modello') as HTMLSelectElement
+    expect([...sel.options].map((o) => o.value)).toEqual(['fable', 'opus', 'sonnet', 'haiku', 'claude-opus-4'])
+    expect(sel.value).toBe('claude-opus-4')
+  })
+
+  it('choosing Fable sets the model to the fable alias', async () => {
+    render(Composer, { conv: { ...base, sessionId: 'sh', model: 'sonnet' } })
+    await fireEvent.change(screen.getByLabelText('Modello'), { target: { value: 'fable' } })
+    expect(ipc.convSetModel).toHaveBeenCalledWith('sh', 'fable')
+  })
+
   it('shows the context ring only when known', () => {
     render(Composer, { conv: base })
     expect(screen.queryByRole('img', { name: /Contesto usato/ })).toBeNull()

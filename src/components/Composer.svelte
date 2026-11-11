@@ -11,7 +11,7 @@
   import { convInterrupt, convSaveImage, convSend, convSetModel, convSetPermissionMode } from '../lib/ipc'
   import { errorText } from '../lib/errors'
   import { BUILTIN_COMMANDS, completeSlash, slashMatches } from '../lib/conv/slash'
-  import { displayedModel } from '../lib/conv/model'
+  import { displayedModel, modelLabel, modelOptions } from '../lib/conv/model'
   import { tooltip } from '../lib/tooltip'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
   import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, PATH_DRAG_TYPE, imageExt, mentionFor } from '../lib/conv/paths'
@@ -26,8 +26,6 @@
     ['default', 'Chiedi sempre'],
   ]
 
-  const ALIASES = ['opus', 'sonnet', 'haiku']
-
   type Thumb = { url: string; bytes: Uint8Array; ext: string; name: string; path?: string }
 
   const sessionId = $derived(conv.sessionId)
@@ -35,7 +33,7 @@
   const init = $derived(conversations.inits[sessionId])
   const commands = $derived(init?.slashCommands?.length ? init.slashCommands : BUILTIN_COMMANDS)
   const currentModel = $derived(displayedModel({ convModel: conv.model, initModel: init?.model ?? null, lastSetAt: modelSetAt[sessionId] ?? null, initAt: init?.at ?? null }))
-  const models = $derived([...new Set([...ALIASES, ...(currentModel ? [currentModel] : [])])])
+  const models = $derived(modelOptions(currentModel))
   const modes = $derived(MODES.some(([m]) => m === conv.permissionMode) ? MODES : [...MODES, [conv.permissionMode, conv.permissionMode] as [string, string]])
   const pct = $derived(conv.contextUsedPct == null ? null : Math.max(0, Math.min(100, Math.round(conv.contextUsedPct))))
 
@@ -285,9 +283,9 @@
     </label>
     <label class="chip">
       <span class="sr">Modello</span>
-      <select value={currentModel} use:tooltip={`Modello: ${currentModel || 'nessuno'}`} onchange={(e) => setModel(e.currentTarget)}>
+      <select value={currentModel} use:tooltip={`Modello: ${currentModel ? modelLabel(currentModel) : 'nessuno'}`} onchange={(e) => setModel(e.currentTarget)}>
         {#if !currentModel}<option value="" disabled>Modello</option>{/if}
-        {#each models as m (m)}<option value={m}>{m}</option>{/each}
+        {#each models as m (m)}<option value={m}>{modelLabel(m)}</option>{/each}
       </select>
     </label>
     <span class="grow"></span>
