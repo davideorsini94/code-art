@@ -6,12 +6,21 @@
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
   import ClaudeMissing from './components/ClaudeMissing.svelte'
+  import ConvList from './components/ConvList.svelte'
+  import { conversations } from './lib/stores/conversations.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
   import { onMount } from 'svelte'
   import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
-  onMount(() => void projectStore.load())
+  let claudeFound = $state(false)
+
+  onMount(() => {
+    void projectStore.load().then(() => {
+      if (projectStore.project) void conversations.start(projectStore.project.id)
+    })
+    return () => conversations.stop()
+  })
 
   const initial = loadLayout()
   let widths = $state(initial.widths)
@@ -102,7 +111,10 @@
       {#if !collapsed.has(col)}
         <section class="glass col" data-slot={col} aria-label={label}>
           {#if col === 'sidebar'}<FileTree />{/if}
-          {#if col === 'convlist'}<ClaudeMissing />{/if}
+          {#if col === 'convlist'}
+            <ClaudeMissing onresult={(f) => (claudeFound = f)} />
+            {#if claudeFound}<ConvList />{/if}
+          {/if}
         </section>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="handle" onpointerdown={(e) => startResize(e, col)}></div>

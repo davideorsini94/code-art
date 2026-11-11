@@ -2,6 +2,8 @@
   import { onMount } from 'svelte'
   import { claudeCheck } from '../lib/ipc'
 
+  let { onresult }: { onresult?: (found: boolean) => void } = $props()
+
   // Copre la colonna conversazioni finché `claude` non viene trovato nel PATH della shell di login.
   let missing = $state(false)
   let checking = $state(false)
@@ -20,6 +22,7 @@
     } catch {
       missing = true
     } finally {
+      onresult?.(!missing)
       checking = false
     }
   }

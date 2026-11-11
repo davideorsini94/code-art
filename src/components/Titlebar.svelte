@@ -1,5 +1,7 @@
 <script lang="ts">
   import { projectStore } from '../lib/stores/project.svelte'
+  import { conversations } from '../lib/stores/conversations.svelte'
+  import { activeLabel, waitingLabel } from '../lib/conv/order'
 
   let editing = $state(false)
   let draft = $state('')
@@ -45,7 +47,13 @@
   {#if projectStore.branch}
     <div class="branch" data-tauri-drag-region>⎇ {projectStore.branch}</div>
   {/if}
+  {#if conversations.active > 0}
+    <div class="active" data-tauri-drag-region>{activeLabel(conversations.active)}</div>
+  {/if}
   <div class="pal" data-tauri-drag-region>⌘K &nbsp; Cerca file, conversazioni, comandi…</div>
+  {#if conversations.waiting > 0}
+    <span class="chip"><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
+  {/if}
 </header>
 
 <style>
@@ -72,6 +80,12 @@
     outline: none;
   }
   .branch { font-size: 12px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; }
+  .active { font-size: 12px; color: var(--faint); white-space: nowrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--edge-soft); font-size: 12px; white-space: nowrap;
+  }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--wait); box-shadow: 0 0 10px var(--wait); }
   .pal {
     margin: 0 auto;
     width: 340px;
