@@ -671,12 +671,15 @@ pub fn sync_project_sessions_pruned(
 /// errore lascia la riga. Se un passaggio scartasse TUTTE le righe di un progetto con più di 3 righe è sospetto
 /// (cartella sparita, permessi, volume smontato): non si scarta nulla. Restituisce gli id tolti.
 fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning, listings: &mut Listings) -> Vec<String> {
+    let Ok(list) = store.list_conversations(&project.id) else { return vec![] };
+    // Righe con id che non è un UUID (scritte da versioni precedenti, es. `agent-<hex>`): `claude` non si avvia
+    // né si riprende con loro e non si possono cancellare dal disco, quindi si tolgono dall'elenco. Nessun file
+    // è toccato: niente da ripulire a mano.
+    let mut gone: Vec<String> = list.iter().filter(|c| !valid_session_id(&c.session_id)).map(|c| c.session_id.clone()).collect();
     if !root.is_dir() {
-        return vec![];
+        return gone.into_iter().filter(|id| store.delete_conversation(id).is_ok()).collect();
     }
     let project_dirs = session_dirs_for(root, &project.folders);
-    let Ok(list) = store.list_conversations(&project.id) else { return vec![] };
-    let mut gone = Vec::new();
     for c in &list {
         if c.turn_count == 0 || !valid_session_id(&c.session_id) || is_running(&c.session_id) {
             continue;
@@ -701,8 +704,9 @@ fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsR
             gone.push(c.session_id.clone());
         }
     }
-    if list.len() > 3 && gone.len() == list.len() {
-        return vec![];
+    let legacy = list.iter().filter(|c| !valid_session_id(&c.session_id)).count();
+    if list.len() > 3 && gone.len() - legacy == list.len() - legacy && gone.len() > legacy {
+        gone.truncate(legacy); // il passaggio sospetto non scarta nulla di più delle righe con id non valido
     }
     gone.into_iter().filter(|id| store.delete_conversation(id).is_ok()).collect()
 }
@@ -1487,6 +1491,17 @@ mod tests {
         }
         sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         assert_eq!(count(&s), 4, "tutte sparite insieme è sospetto");
+    }
+
+    #[test]
+    fn rows_with_non_uuid_ids_are_pruned() {
+        let (_d, root, _dir, s, p, ids) = pruning_setup(3);
+        s.upsert_synced_conversation("pr", "agent-a1b2c3", PR_FOLDER, "vecchia", 1, 1).unwrap();
+        assert_eq!(count(&s), 4);
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert!(s.get_conversation("agent-a1b2c3").unwrap().is_none());
+        assert_eq!(count(&s), 3);
+        assert!(ids.iter().all(|id| s.get_conversation(id).unwrap().is_some()));
     }
 
     #[test]
