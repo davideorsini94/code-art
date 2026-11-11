@@ -1,7 +1,13 @@
 <script lang="ts">
   import Titlebar from './components/Titlebar.svelte'
   import Rail from './components/Rail.svelte'
+  import MissingFolder from './components/MissingFolder.svelte'
+  import { projectStore } from './lib/stores/project.svelte'
+  import { projectPickAndOpen } from './lib/ipc'
+  import { onMount } from 'svelte'
   import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
+
+  onMount(() => void projectStore.load())
 
   const initial = loadLayout()
   let widths = $state(initial.widths)
@@ -46,6 +52,14 @@
 
 <div class="app">
   <Titlebar />
+  {#if projectStore.loaded && !projectStore.project}
+    <main class="welcome">
+      <div class="glass welcome-box">
+        <h1>Code Art</h1>
+        <button onclick={() => projectPickAndOpen()}>Apri cartella</button>
+      </div>
+    </main>
+  {:else}
   <main class="body" style:grid-template-columns={template}>
     <div class="slot rail"><Rail {collapsed} ontoggle={toggle} /></div>
     {#each cols as { col, label } (col)}
@@ -59,6 +73,8 @@
     {/each}
     <section class="glass col" data-slot="editor" aria-label="Editor"></section>
   </main>
+  {/if}
+  <MissingFolder />
 </div>
 
 <style>
@@ -66,6 +82,17 @@
   .body { flex: 1; min-height: 0; display: grid; padding: 10px; }
   .col { min-width: 0; overflow: hidden; padding: 12px; }
   .slot.rail { display: contents; }
+  .welcome { flex: 1; display: grid; place-items: center; }
+  .welcome-box { padding: 32px 48px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .welcome-box h1 { margin: 0; font-size: 22px; }
+  .welcome-box button {
+    padding: 8px 20px;
+    border-radius: 8px;
+    border: 1px solid var(--edge-soft);
+    background: var(--glass);
+    color: inherit;
+    cursor: pointer;
+  }
   .handle { cursor: col-resize; }
   .handle:hover { background: var(--edge-soft); border-radius: 3px; }
 </style>

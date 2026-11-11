@@ -11,18 +11,7 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "title": "Code Art",
-        "width": 1400,
-        "height": 860,
-        "minWidth": 900,
-        "minHeight": 560,
-        "transparent": true,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
