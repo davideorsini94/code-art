@@ -99,6 +99,10 @@ pub fn window_label(project_id: &str) -> String {
     format!("{PROJECT_PREFIX}{project_id}")
 }
 
+/// Il titolo nativo resta impostato (Mission Control, menu Finestra, Dock) ma non va disegnato
+/// nella barra: lo disegna già `Titlebar.svelte`.
+const HIDE_NATIVE_TITLE: bool = true;
+
 fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
@@ -106,7 +110,7 @@ fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<Webv
         .min_inner_size(900.0, 560.0)
         .transparent(true)
         .title_bar_style(TitleBarStyle::Overlay)
-        .hidden_title(false)
+        .hidden_title(HIDE_NATIVE_TITLE)
         .disable_drag_drop_handler() // serve per il drag & drop HTML5 dell'albero file
         .build()?;
     apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None)
@@ -386,6 +390,14 @@ pub fn settings_set(store: State<Store>, key: String, value: String) -> Result<(
 mod tests {
     use super::*;
     use crate::store::{Project, Store};
+
+    #[test]
+    fn native_title_hidden_in_title_bar() {
+        // senza questo il titolo appare doppio (nativo + Titlebar.svelte)
+        assert!(HIDE_NATIVE_TITLE);
+        let conf = include_str!("../tauri.conf.json");
+        assert!(!conf.contains("\"hiddenTitle\": false"));
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
