@@ -13,11 +13,35 @@
   import { projectStore } from '../lib/stores/project.svelte'
   import { convSend } from '../lib/ipc'
   import { errorText } from '../lib/errors'
+  import { conversations } from '../lib/stores/conversations.svelte'
+  import { UNTRUSTED_HINT } from '../lib/conv/labels'
+  import { untrack } from 'svelte'
 
   let { row, sessionId }: { row: Row; sessionId: string } = $props()
   const item = $derived(row.item)
 
   let open = $state(false)
+
+  // Testo del messaggio passato al markdown: durante lo streaming (conversazione `working`) marked + DOMPurify sul
+  // testo intero girano al massimo ogni RENDER_MS (l'ultimo testo arriva sempre); altrimenti subito.
+  const RENDER_MS = 100
+  let shown = $state(untrack(() => (item.kind === 'assistant' ? item.text : '')))
+  let shownAt = 0
+  $effect(() => {
+    if (item.kind !== 'assistant') return
+    const text = item.text
+    const working = conversations.all.find((c) => c.sessionId === sessionId)?.status === 'working'
+    if (text === untrack(() => shown)) return
+    const show = () => {
+      shownAt = Date.now()
+      shown = text
+    }
+    const wait = working ? RENDER_MS - (Date.now() - shownAt) : 0
+    if (wait <= 0) return show()
+    const timer = setTimeout(show, wait)
+    return () => clearTimeout(timer)
+  })
+  const imagesNote = $derived(item.kind === 'user' && item.images.length ? (item.images.length === 1 ? '1 immagine allegata' : `${item.images.length} immagini allegate`) : null)
 
   const action = $derived(item.kind === 'tool' ? diffAction(item.name, item.input, item.filePath) : null)
   const steps = $derived(row.children.filter((c) => c.kind === 'tool').length)
@@ -51,9 +75,9 @@
 </script>
 
 {#if item.kind === 'user'}
-  <div class="msg me"><span class="txt">{item.text}</span></div>
+  <div class="msg me"><span class="txt">{item.text}</span>{#if imagesNote}<span class="imgs">{imagesNote}</span>{/if}</div>
 {:else if item.kind === 'assistant'}
-  <div class="msg ai md" use:links>{@html renderMarkdown(item.text)}</div>
+  <div class="msg ai md" use:links>{@html renderMarkdown(shown)}</div>
 {:else if item.kind === 'thinking'}
   <div class="think">
     <button class="head" use:tooltip={open ? 'Nascondi il ragionamento' : 'Mostra il ragionamento di Claude'} aria-expanded={open} onclick={() => (open = !open)}>{open ? '▾' : '▸'} Ragionamento</button>
@@ -99,7 +123,7 @@
 {:else if item.kind === 'raw' && item.label === INTERRUPTED_LABEL}
   <div class="interrupted" role="status">
     <span>Il turno è stato interrotto.</span>
-    <button class="diff" use:tooltip={untrusted ? 'Cartella non fidata — sola lettura' : resuming ? 'Invio in corso…' : 'Chiedi a Claude di continuare il turno'} aria-disabled={untrusted || resuming} onclick={resume}>Riprendi</button>
+    <button class="diff" use:tooltip={untrusted ? UNTRUSTED_HINT : resuming ? 'Invio in corso…' : 'Chiedi a Claude di continuare il turno'} aria-disabled={untrusted || resuming} onclick={resume}>Riprendi</button>
     {#if resumeError}<span class="errtxt" role="alert">{resumeError}</span>{/if}
   </div>
 {:else if item.kind === 'raw' && item.label === ERROR_LABEL}
@@ -115,6 +139,7 @@
   .msg { padding: 9px 12px; border-radius: 13px; max-width: 92%; overflow-wrap: anywhere; }
   .me { background: rgba(143, 168, 255, 0.16); border: 1px solid rgba(143, 168, 255, 0.28); margin-left: auto; }
   .txt { white-space: pre-wrap; }
+  .imgs { display: block; margin-top: 4px; color: var(--faint); font-size: 11px; }
   .ai { background: var(--glass); border: 1px solid var(--edge-soft); }
   .tool, .sub, .think { font: 11.5px ui-monospace, 'SF Mono', monospace; color: var(--dim); border-radius: 9px; background: rgba(0, 0, 0, 0.25); padding: 2px 10px; }
   .sub { border: 1px solid var(--edge-soft); }

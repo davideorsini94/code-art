@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { tick } from 'svelte'
 
 const openUrl = vi.fn()
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: (u: string) => openUrl(u) }))
@@ -12,6 +13,8 @@ const addUser = vi.fn()
 vi.mock('../lib/stores/chat.svelte', () => ({ chat: { addUser: (...a: unknown[]) => addUser(...a) } }))
 const project = vi.hoisted(() => ({ untrusted: [] as string[] }))
 vi.mock('../lib/stores/project.svelte', () => ({ projectStore: project }))
+const convs = vi.hoisted(() => ({ all: [] as { sessionId: string; status: string }[] }))
+vi.mock('../lib/stores/conversations.svelte', () => ({ conversations: convs }))
 vi.mock('../lib/stores/editor.svelte', () => ({ editor: { openDiff: (...a: unknown[]) => openDiff(...a), open: (...a: unknown[]) => openFile(...a) } }))
 
 import ChatItem from './ChatItem.svelte'
@@ -25,6 +28,8 @@ const tool = (over: Partial<Extract<Item, { kind: 'tool' }>> = {}): Extract<Item
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.useRealTimers()
+  convs.all = []
 })
 
 describe('ChatItem', () => {
@@ -106,5 +111,34 @@ describe('ChatItem', () => {
     await fireEvent.click(screen.getByText('Riprendi'))
     expect(convSend).not.toHaveBeenCalled()
     project.untrusted = []
+  })
+
+  it('a user message with images says how many were attached', () => {
+    render(ChatItem, { row: row({ kind: 'user', id: 'u', text: 'guarda', images: ['/tmp/a.png', '/tmp/b.png'] }), sessionId: 's' })
+    expect(screen.getByText('2 immagini allegate')).toBeTruthy()
+    cleanup()
+    render(ChatItem, { row: row({ kind: 'user', id: 'u', text: 'guarda', images: ['/tmp/a.png'] }), sessionId: 's' })
+    expect(screen.getByText('1 immagine allegata')).toBeTruthy()
+    cleanup()
+    render(ChatItem, { row: row({ kind: 'user', id: 'u', text: 'guarda', images: [] }), sessionId: 's' })
+    expect(screen.queryByText(/allegat/)).toBeNull()
+  })
+
+  it('while the conversation is working the streaming text is re-rendered at most every ~100 ms', async () => {
+    vi.useFakeTimers()
+    convs.all = [{ sessionId: 's', status: 'working' }]
+    const a = (text: string) => row({ kind: 'assistant', id: 'a', text })
+    const { container, rerender } = render(ChatItem, { row: a('uno'), sessionId: 's' })
+    expect(container.textContent).toContain('uno')
+    await rerender({ row: a('uno due'), sessionId: 's' })
+    await rerender({ row: a('uno due tre'), sessionId: 's' })
+    expect(container.textContent).not.toContain('tre')
+    await vi.advanceTimersByTimeAsync(120)
+    await tick()
+    expect(container.textContent).toContain('uno due tre')
+    // a turno finito il testo si aggiorna subito
+    convs.all = [{ sessionId: 's', status: 'idle' }]
+    await rerender({ row: a('fine'), sessionId: 's' })
+    expect(container.textContent).toContain('fine')
   })
 })
