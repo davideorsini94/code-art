@@ -592,9 +592,13 @@ fn is_session_file(p: &Path) -> bool {
     p.extension().is_some_and(|e| e == "jsonl") && p.file_stem().is_some_and(|s| valid_session_id(&s.to_string_lossy()))
 }
 
-/// Un id di sessione finisce in un percorso: solo caratteri sicuri.
+/// Un id di sessione finisce in un percorso e negli argomenti di `claude` (`--resume <id>`): solo la forma UUID
+/// (8-4-4-4-12 cifre esadecimali), l'unica che la CLI scrive (fixture e `docs/claude-protocol.md`). Niente `-` in
+/// testa, niente separatori, lunghezza fissa.
 pub fn valid_session_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    let groups: Vec<&str> = id.split('-').collect();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(g, n)| g.len() == n && g.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 /// `is_running(session_id)`: la conversazione è pilotata da un processo del motore (vivo, o uscito da meno
@@ -1000,6 +1004,27 @@ pub async fn conv_search(app: AppHandle, window: WebviewWindow, query: String) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_ids_must_have_the_uuid_shape() {
+        for ok in ["11111111-1111-4111-8111-111111111111", "1623ed7a-357e-4bf5-b7fa-254bb1d445a0", "ABCDEF01-2345-6789-abcd-ef0123456789"] {
+            assert!(valid_session_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "s1",
+            "-1623ed7a-357e-4bf5-b7fa-254bb1d445a0",
+            "--resume",
+            "1623ed7a-357e-4bf5-b7fa-254bb1d445a",
+            "1623ed7a-357e-4bf5-b7fa-254bb1d445a00",
+            "1623ed7a_357e_4bf5_b7fa_254bb1d445a0",
+            "1623ed7a-357e-4bf5-b7fa-254bb1d445ag",
+            "../../../../etc/passwd",
+            "1623ed7a-357e-4bf5-b7fa-254bb1d445a0/x",
+        ] {
+            assert!(!valid_session_id(bad), "{bad}");
+        }
+    }
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
 
