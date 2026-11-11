@@ -39,7 +39,7 @@ tauri-plugin-notification = "2.8.1"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# niente panic = "abort": catch_unwind (worker dei titoli, gestore dell'uscita) deve poter fermare un panic
 strip = true
 
 # macOS recente: lo strip dei proc-macro (dylib) li rende non caricabili da rustc
