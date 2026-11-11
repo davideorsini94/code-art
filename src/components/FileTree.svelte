@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
+  import { PATH_DRAG_TYPE } from '../lib/conv/paths'
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
@@ -165,7 +166,10 @@
       aria-selected={editor.active === e.path}
       tabindex="0"
       draggable="true"
-      ondragstart={(ev) => ev.dataTransfer?.setData('text/plain', e.path)}
+      ondragstart={(ev) => {
+        ev.dataTransfer?.setData('text/plain', e.path)
+        ev.dataTransfer?.setData(PATH_DRAG_TYPE, e.path)
+      }}
       ondragover={(ev) => {
         if (e.isDir) {
           ev.preventDefault()

@@ -63,3 +63,5 @@ export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessi
 export const convPending = (sessionId: string) => invoke<ClaudeEvent[]>('conv_pending', { sessionId })
 export const convRename = (sessionId: string, title: string) => invoke<void>('conv_rename', { sessionId, title })
 export const convUnlockTitle = (sessionId: string) => invoke<void>('conv_unlock_title', { sessionId })
+/** Salva un'immagine incollata/trascinata nella cartella temporanea dell'app (validata dal motore); ritorna il percorso per `convSend`. */
+export const convSaveImage = (bytes: number[], ext: string) => invoke<string>('conv_save_image', { bytes, ext })

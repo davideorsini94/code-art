@@ -2,6 +2,7 @@
   import { onMount, tick, untrack } from 'svelte'
   import ChatItem from './ChatItem.svelte'
   import TodoStrip from './TodoStrip.svelte'
+  import Composer from './Composer.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { chat } from '../lib/stores/chat.svelte'
   import { convMarkViewed } from '../lib/ipc'
@@ -158,8 +159,9 @@
 
     <div class="bottom">
       {#if cs}<TodoStrip todos={cs.todos} />{/if}
-      <!-- SLOT COMPOSITORE (Task 11): il campo di risposta va qui, sotto la TodoStrip. -->
-      <div class="composer-slot" data-slot="composer"></div>
+      <div class="composer-slot" data-slot="composer">
+        {#key conv.sessionId}<Composer {conv} />{/key}
+      </div>
     </div>
   {/if}
 </div>

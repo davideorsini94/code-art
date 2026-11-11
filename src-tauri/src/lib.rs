@@ -83,6 +83,7 @@ pub fn run() {
             claude::commands::conv_archive,
             claude::commands::conv_running,
             claude::commands::conv_stop,
+            claude::commands::conv_save_image,
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,

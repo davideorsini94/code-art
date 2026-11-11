@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { convArchive, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
 import { activeCount, sortConversations, upsertConversation, waitingCount } from '../conv/order'
+import { clearDraft } from '../conv/draft'
 import type { Conversation } from '../types'
 
 class ConversationStore {
@@ -9,6 +10,8 @@ class ConversationStore {
   activeId = $state<string | null>(null)
   showArchived = $state(false)
   error = $state<string | null>(null)
+  /** Comandi slash e modello correnti per sessione, dall'ultimo `init` visto in questa esecuzione. */
+  inits = $state.raw<Record<string, { slashCommands: string[]; model: string }>>({})
 
   private projectId: string | null = null
   private unlisten: UnlistenFn | null = null
@@ -50,6 +53,11 @@ class ConversationStore {
     this.unlisten = null
   }
 
+  /** Da ogni evento `init` (i comandi e il modello possono cambiare). */
+  setInit(sessionId: string, slashCommands: string[], model: string) {
+    this.inits = { ...this.inits, [sessionId]: { slashCommands, model } }
+  }
+
   upsert(c: Conversation) {
     this.all = upsertConversation(this.all, c)
   }
@@ -87,7 +95,11 @@ class ConversationStore {
 
   rename = (id: string, title: string) => this.run(() => convRename(id, title))
   unlockTitle = (id: string) => this.run(() => convUnlockTitle(id))
-  archive = (id: string, archived: boolean) => this.run(() => convArchive(id, archived))
+  archive = (id: string, archived: boolean) =>
+    this.run(async () => {
+      await convArchive(id, archived)
+      if (archived) clearDraft(id)
+    })
 }
 
 export const conversations = new ConversationStore()

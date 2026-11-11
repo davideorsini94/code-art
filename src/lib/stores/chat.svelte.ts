@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { convAnswer, convHistory, convPending } from '../ipc'
 import { answerAsk, appendUser, initialState, reconcile, reduceAll, type ChatState } from '../conv/reduce'
+import { conversations } from './conversations.svelte'
 import type { ClaudeEvent, ConvEventPayload } from '../types'
 
 /** Quante conversazioni tengono lo stato in memoria (le ultime viste). */
@@ -113,6 +114,7 @@ class ChatStore {
   }
 
   private onEvent({ sessionId, event }: ConvEventPayload) {
+    if (event.kind === 'init') conversations.setInit(sessionId, event.slashCommands, event.model)
     const early = this.buffering.get(sessionId)
     if (early) return void early.push(event)
     if (!this.states[sessionId]) return

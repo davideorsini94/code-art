@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 const UNKNOWN_JSON_CAP: usize = 4096;
 /// Coda di stderr conservata per l'evento "Processo terminato".
 const STDERR_TAIL: usize = 4096;
-const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+pub(super) const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 const IMAGES_MAX_PER_MESSAGE: usize = 10;
 const IMAGES_MAX_TOTAL_BYTES: u64 = 30 * 1024 * 1024;
 /// `stop`: attesa dopo la richiesta di chiusura prima di uccidere il gruppo del processo.
