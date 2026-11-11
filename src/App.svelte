@@ -3,7 +3,8 @@
   import Rail from './components/Rail.svelte'
   import MissingFolder from './components/MissingFolder.svelte'
   import TrustBanner from './components/TrustBanner.svelte'
-  import FileTree from './components/FileTree.svelte'
+  import SidebarView from './components/SidebarView.svelte'
+  import { sidebar, type SidebarViewId } from './lib/stores/sidebar.svelte'
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
   import ClaudeMissing from './components/ClaudeMissing.svelte'
@@ -37,6 +38,7 @@
     void projectStore.load().then(() => {
       const p = projectStore.project
       if (!p) return
+      sidebar.bind(p.id)
       // una volta per finestra: gli eventi delle conversazioni arrivano anche a colonna chiusa
       void chat.start(p.id)
       void conversations.start(p.id)
@@ -64,7 +66,7 @@
   }
 
   const cols: { col: ResizableCol; label: string }[] = [
-    { col: 'sidebar', label: 'Progetto' },
+    { col: 'sidebar', label: 'Pannello laterale' },
     { col: 'convlist', label: 'Conversazioni' },
     { col: 'conv', label: 'Conversazione' },
   ]
@@ -89,6 +91,22 @@
     }
     window.addEventListener('keydown', onKey, true)
     hooks.toggleTerminal = () => (termVisible = !termVisible)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
+
+  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
+  onMount(() => {
+    const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git' }
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || !e.shiftKey || e.ctrlKey || e.altKey || !projectStore.project) return
+      const view = views[e.key.toLowerCase()]
+      if (!view) return
+      e.preventDefault()
+      e.stopPropagation()
+      sidebar.setView(view)
+      if (collapsed.has('sidebar')) toggle('sidebar')
+    }
+    window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   })
 
@@ -153,7 +171,7 @@
     {#each cols as { col, label } (col)}
       {#if !collapsed.has(col)}
         <section class="glass col" data-slot={col} aria-label={label}>
-          {#if col === 'sidebar'}<FileTree />{/if}
+          {#if col === 'sidebar'}<SidebarView />{/if}
           {#if col === 'conv'}<ConvPane />{/if}
           {#if col === 'convlist'}
             <ClaudeMissing onresult={(f) => (claudeFound = f)} />

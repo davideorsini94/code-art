@@ -154,6 +154,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_rename` | `sessionId`, `title` | del progetto; lunghezza e caratteri di controllo | finestra | — |
 | `conv_unlock_title` | `sessionId` | del progetto | finestra | — |
 | `editor_set_dirty` | `count` | finestra di progetto; ≤ 10 000; per finestra, dimenticato alla sua distruzione | finestra | — (la chiusura e l'uscita chiedono conferma) |
+| `tools_check` | — | — | globale | P (cerca `git`, `gh` e i language server nell'ambiente di login; non li esegue) |
 | `trust_check` | — | — | finestra | — |
 | `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
 

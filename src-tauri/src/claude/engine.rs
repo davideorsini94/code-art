@@ -1112,6 +1112,7 @@ impl EventSink for TauriSink {
 pub fn app_launch() -> Arc<LaunchCell> {
     let cell: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(|| {
         let env = super::locate::login_env();
+        crate::tools::set_env(env.clone());
         Launch { claude: super::locate::find_claude(&env), env }
     })));
     let warm = cell.clone();

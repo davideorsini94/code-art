@@ -5,6 +5,7 @@ mod lifecycle;
 mod projects;
 mod pty;
 pub mod store;
+mod tools;
 mod trasher;
 pub mod trust;
 
@@ -128,6 +129,7 @@ pub fn run() {
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,
+            tools::tools_check,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
