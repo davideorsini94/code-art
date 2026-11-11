@@ -63,6 +63,25 @@ CREATE TABLE IF NOT EXISTS trusted_folders (
 );
 ";
 
+/// Migrazioni dello schema, in ordine: la voce `i` porta il database alla versione `i + 1` (`PRAGMA user_version`).
+/// La versione 1 è lo schema della tappa 1; un database creato prima del versionamento (versione 0, tabelle già
+/// presenti) la riceve senza cambiamenti (`IF NOT EXISTS`). Uno schema nuovo si aggiunge in coda, mai modificando
+/// le voci esistenti.
+const MIGRATIONS: &[&str] = &[SCHEMA];
+
+/// Applica le migrazioni mancanti, ciascuna in una transazione insieme al nuovo `user_version`. Un database di una
+/// versione più recente (app tornata indietro) resta com'è.
+fn migrate(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
+    let current: usize = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).map_err(err)?.max(0) as usize;
+    for (i, sql) in migrations.iter().enumerate().skip(current) {
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute_batch(sql).map_err(err)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1)).map_err(err)?;
+        tx.commit().map_err(err)?;
+    }
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -109,8 +128,8 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(err)?;
         }
-        let conn = Connection::open(path).map_err(err)?;
-        conn.execute_batch(SCHEMA).map_err(err)?;
+        let mut conn = Connection::open(path).map_err(err)?;
+        migrate(&mut conn, MIGRATIONS)?;
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES ('default_permission_mode', 'bypassPermissions')",
             [],
@@ -421,6 +440,50 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_version(path: &Path) -> i64 {
+        Connection::open(path).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn schema_is_versioned_and_unversioned_databases_are_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        // database nuovo: versione 1
+        let fresh = dir.path().join("nuovo.db");
+        Store::open(&fresh).unwrap();
+        assert_eq!(user_version(&fresh), 1);
+        // database creato prima del versionamento: tabelle e dati restano, versione 1
+        let old = dir.path().join("vecchio.db");
+        {
+            let c = Connection::open(&old).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute("INSERT INTO settings(key, value) VALUES ('default_permission_mode', 'plan')", []).unwrap();
+            assert_eq!(user_version(&old), 0);
+        }
+        let s = Store::open(&old).unwrap();
+        assert_eq!(s.setting_get("default_permission_mode").unwrap().as_deref(), Some("plan"));
+        assert_eq!(user_version(&old), 1);
+    }
+
+    #[test]
+    fn migrations_apply_only_the_missing_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.db");
+        let mut c = Connection::open(&path).unwrap();
+        migrate(&mut c, &[SCHEMA]).unwrap();
+        // la seconda migrazione fallirebbe se la prima venisse rieseguita senza IF NOT EXISTS
+        let v2 = "CREATE TABLE extra (x INTEGER); INSERT INTO extra VALUES (1);";
+        migrate(&mut c, &[SCHEMA, v2]).unwrap();
+        migrate(&mut c, &[SCHEMA, v2]).unwrap();
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM extra", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "ogni passo una volta sola");
+        assert_eq!(user_version(&path), 2);
+        // un passo che fallisce non lascia mezza migrazione né sposta la versione
+        assert!(migrate(&mut c, &[SCHEMA, v2, "CREATE TABLE y (a); SELECT * FROM nessuna;"]).is_err());
+        assert_eq!(user_version(&path), 2);
+        let y: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'y'", [], |r| r.get(0)).unwrap();
+        assert_eq!(y, 0);
+    }
 
     #[test]
     fn default_permission_mode_seeded_and_settings_roundtrip() {
