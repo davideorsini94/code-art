@@ -101,8 +101,8 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   sono rifiutati finché dura, e proprietà, fiducia e file sono ricontrollati, così nessun processo può ricreare il
   file. Se la cartella `<id>/` non si sposta l'esito è `deletedWithWarning` (avviso all'utente); se la riga non si
   toglie dallo store (due tentativi) l'errore lo dice e la sincronizzazione successiva scarta le righe con turni il cui
-  file non esiste più e senza processo. Il Cestino usa `NSFileManager` (`claude/trasher.rs`), non Finder/AppleScript
-  (niente permesso di Automazione). Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
+  file non esiste più e senza processo. Il Cestino usa `NSFileManager` (`src-tauri/src/trasher.rs`, lo stesso di `fs_trash`),
+  non Finder/AppleScript (niente permesso di Automazione). Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
 - **Inventario dei comandi**: `every_command_is_registered_and_listed` verifica che ogni `#[tauri::command]`
   sia registrato in `lib.rs` ed elencato nella tabella qui sotto.
 
@@ -119,8 +119,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `project_pick_and_open` | — | il percorso viene dal selettore nativo; diventa fidato | globale | apre una finestra |
 | `project_pick_and_add_folder` | — | percorso dal selettore nativo (foglio della finestra); diventa fidato | finestra | allarga il confinamento F |
 | `project_pick_relocate` | `old` | deve essere una cartella del progetto; nuovo percorso dal selettore nativo, diventa fidato | finestra | sostituisce una radice F |
-| `project_missing_folders` | — | — | finestra | F (stat delle radici) |
-| `project_branch` | — | — | finestra | F (legge `.git/HEAD`) |
+| `project_missing_folders` | — | — | finestra | F (stat delle radici, fuori dal thread principale) |
+| `project_branch` | — | — | finestra | F (legge `.git/HEAD`, fuori dal thread principale) |
 | `settings_get` | `key` | whitelist | globale | — |
 | `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`) | globale | — |
 | `fs_list` | `path` | `ensure_inside` | finestra | F |
@@ -164,8 +164,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 
 ```
 default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
-connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none';
-form-action 'none'
+media-src 'self' blob:; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none';
+base-uri 'none'; form-action 'none'
 ```
 
 Rilassamenti e perché:
@@ -222,7 +222,8 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   Ambiente: `env_clear()` + ambiente della shell di login.
 - `claude` per i titoli (`titles.rs`): argomenti costanti, cartella temporanea vuota, prompt su stdin;
   mai per progetti non fidati.
-- `claude --version` (`locate.rs`): costante.
+- `claude --version` (`locate.rs`): costante. L'eseguibile si cerca nel `PATH` della shell di login, poi in
+  `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local` (solo file eseguibili).
 - Ambiente della shell di login (`locate.rs`): `$SHELL -l -i -c env`, comando costante; `$SHELL` solo se assoluto.
 - Terminale (`pty.rs`): `$SHELL -l` (solo se percorso assoluto esistente, altrimenti `/bin/zsh`), cwd confinato.
 
@@ -231,10 +232,12 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
 - L'ambiente della shell di login (contiene i segreti dell'utente) vive solo in `Launch.env` in memoria:
   il tipo non è serializzabile, non viene loggato né scritto su disco, e passa solo ai figli via `envs()`.
   `claude_check` restituisce solo `found`, `version`, `path`.
-- Log: un solo `eprintln!` (progetto non riapribile: nome e errore). Nessun contenuto di messaggi, file o
-  variabili d'ambiente nei log.
+- Log: tre `eprintln!`: progetto non riapribile (nome e errore) e due misure di avvio attive solo con
+  `CODEART_TIMING=1` (millisecondi ed etichetta della finestra). Nessun contenuto di messaggi, file o variabili
+  d'ambiente nei log.
 - SQLite (`codeart.db`): progetti (nomi, percorsi), impostazioni, metadati delle conversazioni (titolo,
-  riassunto, stato), cartelle fidate. Nessuna credenziale.
+  riassunto, stato), cartelle fidate. Nessuna credenziale. Schema versionato con `PRAGMA user_version`
+  (migrazioni in `store.rs`).
 - Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
 
 ## Dipendenze (2026-11-11)

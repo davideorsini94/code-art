@@ -15,7 +15,7 @@ Misure fatte da riga di comando su macOS (Apple Silicon), build release firmata 
 
 | Obiettivo | Misura | Esito |
 |---|---|---|
-| `Code Art.app` < 40 MB | 11 MB (`du -sh "…/Code Art.app"`); dmg 7,3 MB (`ls -l`) | OK (Monaco è caricato in modo pigro, nessuna riduzione necessaria) |
+| `Code Art.app` < 40 MB | 11 MB (`du -sh "…/Code Art.app"`); dmg 7,3 MB (`ls -l`). Tolto poi `panic = "abort"` dal profilo release (serve a `catch_unwind`): eseguibile 9,17 → 11,27 MB, app stimata ~13 MB | OK (Monaco è caricato in modo pigro, nessuna riduzione necessaria) |
 | Avvio a freddo → finestra ≤ 1 s | 339–608 ms (3 lanci; il primo, a freddo, 608 ms) | OK |
 | RAM app + WebKit < 250 MB | ~95 MB di `footprint` (app 28–34, WebContent 46, GPU 14, Networking 6) sulla finestra di benvenuto; RSS sommato ~200 MB | provvisorio (solo finestra di benvenuto) |
 
@@ -38,12 +38,13 @@ Nessun panic, nessun errore su stdout/stderr all'avvio dell'app compilata; il da
 ## Titolo doppio
 
 Corretto: `hidden_title(true)` su ogni finestra (il titolo nativo resta impostato per Mission Control, menu
-Finestra e Dock). Test `native_title_hidden_in_title_bar`. La cattura dello schermo non era autorizzata da CLI:
+Finestra e Dock). Test `native_title_hidden_but_still_set`. La cattura dello schermo non era autorizzata da CLI:
 l'assenza del doppio disegno va confermata a vista.
 
 ## Suite
 
-`pnpm vitest run`, `pnpm typecheck` (0 errori), `cargo test` (155 + 5 test), `cargo build` senza warning: verdi. `pnpm vitest run`: 203 su 204 (l'unico fallimento è in `src/lib/fileicons.test.ts`, lavoro non committato di un altro task, non parte di questo pacchetto).
+Dopo l'ondata di correzioni della revisione finale: `pnpm typecheck` (0 errori, 0 warning), `pnpm vitest run`
+(370 test in 38 file), `cargo test` (207 + 6 test), `cargo check` senza warning: tutto verde.
 
 ## Da verificare a vista
 
