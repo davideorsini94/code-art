@@ -43,6 +43,13 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   le altre mostrano "immagine non caricata". Documenti markdown oltre 400 KB: si aprono in "Modifica" e
   l'anteprima (render sincrono) si fa solo su richiesta; tra 100 e 400 KB l'aggiornamento dal vivo rallenta a
   600 ms. La conversazione chiama `renderMarkdown` senza risolutore: immagini sempre scartate.
+- **La WebView non lascia mai la pagina dell'app**: ogni finestra ha una guardia di navigazione
+  (`projects::allow_navigation`, `on_navigation`): ammesse solo l'origine dell'app (`tauri://localhost`,
+  `http(s)://tauri.localhost`) e, nelle build di sviluppo, l'URL del server di Vite; `window.open` è negato
+  (`on_new_window`). Un file o un link trascinati fuori dalle zone di rilascio non navigano: a livello di finestra
+  `dragover`/`drop` sono annullati (`src/lib/dropguard.ts`, anche nel benvenuto). Tutti i link esterni (markdown,
+  terminale, ⌘-clic in Monaco con `registerLinkOpener`) passano da `openExternal` (`src/lib/external.ts`): solo
+  http(s), nel browser di sistema. Test: `navigation_stays_on_the_app_origin`, `dropguard.test.ts`, `external.test.ts`.
 - **Confinamento dei file**: i comandi `fs_*` e `pty_spawn` accettano solo percorsi assoluti dentro le
   cartelle del progetto della finestra chiamante (`fs_tree::ensure_inside`: canonicalizzazione, `..`,
   link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`

@@ -1,5 +1,6 @@
 // Caricato con import() dinamico al primo file aperto: non finisce nel chunk iniziale.
 import * as monaco from 'monaco-editor'
+import { openExternal } from './external'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import JsonWorker from 'monaco-editor/language/json/json.worker.js?worker'
 import CssWorker from 'monaco-editor/language/css/css.worker.js?worker'
@@ -34,5 +35,9 @@ monaco.editor.defineTheme('codeart', {
     'scrollbarSlider.background': '#ffffff1a',
   },
 })
+
+// ⌘-clic su un link nel codice: mai `window.open`; solo http(s), nel browser di sistema. Il resto è ignorato
+// (ma dichiarato gestito, così Monaco non prova altre vie).
+monaco.editor.registerLinkOpener({ open: (uri) => openExternal(uri.toString(true)) })
 
 export { monaco }

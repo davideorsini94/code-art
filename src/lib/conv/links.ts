@@ -1,5 +1,4 @@
-import { openUrl } from '@tauri-apps/plugin-opener'
-import { isSafeLink } from '../safe-markdown'
+import { openExternal } from '../external'
 
 /** Click su un link dentro markdown sanificato: mai navigare la WebView; solo http(s), nel browser di sistema. */
 function openLink(e: MouseEvent) {
@@ -7,7 +6,7 @@ function openLink(e: MouseEvent) {
   if (!a) return
   e.preventDefault()
   const href = a.getAttribute('href')
-  if (href && isSafeLink(href)) void openUrl(href)
+  if (href) openExternal(href)
 }
 
 /** Azione Svelte: intercetta click e click centrale sui link del nodo. Da usare su ogni contenitore di `renderMarkdown`. */

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte'
   import { listenProject } from '../lib/events'
-  import { openUrl } from '@tauri-apps/plugin-opener'
+  import { openExternal } from '../lib/external'
   import { ptyKill, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
   import { projectStore } from '../lib/stores/project.svelte'
@@ -116,10 +116,8 @@
     const fit = new m.FitAddon()
     term.loadAddon(fit)
     term.loadAddon(
-      new m.WebLinksAddon((_e, uri) => {
-        // solo http(s), sempre nel browser di sistema: mai navigare la WebView
-        if (/^https?:\/\//i.test(uri)) void openUrl(uri).catch(() => {})
-      }),
+      // solo http(s), sempre nel browser di sistema: mai navigare la WebView
+      new m.WebLinksAddon((_e, uri) => void openExternal(uri)),
     )
     // ⌃` è del pannello, non della shell
     term.attachCustomKeyEventHandler((e) => !(e.ctrlKey && !e.metaKey && (e.key === '`' || e.code === 'Backquote')))

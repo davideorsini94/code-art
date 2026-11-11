@@ -16,11 +16,15 @@
   import { chat } from './lib/stores/chat.svelte'
   import { projectStore } from './lib/stores/project.svelte'
   import { projectPickAndOpen } from './lib/ipc'
+  import { guardWindowDrops } from './lib/dropguard'
   import { onMount } from 'svelte'
   import { tooltip } from './lib/tooltip'
   import { canCollapse, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
+
+  // file o link rilasciati fuori dalle zone di rilascio non devono far navigare la WebView (anche nel benvenuto)
+  onMount(() => guardWindowDrops())
 
   onMount(() => {
     void projectStore.load().then(() => {

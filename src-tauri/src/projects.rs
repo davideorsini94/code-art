@@ -112,10 +112,26 @@ pub fn emit_to_project<S: serde::Serialize + Clone>(app: &AppHandle, project_id:
     let _ = app.emit_to(window_label(project_id).as_str(), project_event(name, project_id).as_str(), payload);
 }
 
+/// La WebView resta sempre sulla pagina dell'app: si naviga solo verso la sua origine (`tauri://localhost`,
+/// `http(s)://tauri.localhost`) e, nelle build di sviluppo, verso l'URL del server di Vite. Tutto il resto (un file o
+/// un link trascinato fuori dalle zone di rilascio, un `location =` da una pagina compromessa) è bloccato; i link
+/// esterni passano solo dal browser di sistema (`opener`).
+pub fn allow_navigation(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    match (url.scheme(), url.host_str()) {
+        ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost")) => true,
+        _ => dev_url.is_some_and(|d| {
+            d.scheme() == url.scheme() && d.host_str() == url.host_str() && d.port_or_known_default() == url.port_or_known_default()
+        }),
+    }
+}
+
 /// Il titolo nativo resta impostato (Mission Control, menu Finestra, Dock) ma non va disegnato
 /// nella barra: lo disegna già `Titlebar.svelte`.
 fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<WebviewWindow> {
+    let dev_url = if cfg!(debug_assertions) { app.config().build.dev_url.clone() } else { None };
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .on_navigation(move |url| allow_navigation(url, dev_url.as_ref()))
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title(title)
         .inner_size(1400.0, 860.0)
         .min_inner_size(900.0, 560.0)
@@ -427,6 +443,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&dir.path().join("t.db")).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn navigation_stays_on_the_app_origin() {
+        let u = |s: &str| tauri::Url::parse(s).unwrap();
+        let dev = u("http://localhost:1420");
+        for ok in ["tauri://localhost/", "tauri://localhost/index.html", "http://tauri.localhost/", "https://tauri.localhost/x"] {
+            assert!(allow_navigation(&u(ok), None), "{ok}");
+        }
+        assert!(allow_navigation(&u("http://localhost:1420/src/main.ts"), Some(&dev)));
+        for bad in [
+            "file:///Users/dev/progetto/a.html",
+            "https://example.com/",
+            "http://localhost:1420/",
+            "tauri://evil/",
+            "http://tauri.localhost.example.com/",
+            "data:text/html,<script>1</script>",
+            "blob:tauri://localhost/123",
+            "about:blank",
+        ] {
+            assert!(!allow_navigation(&u(bad), None), "{bad}");
+        }
+        assert!(!allow_navigation(&u("http://localhost:1421/"), Some(&dev)));
+        assert!(!allow_navigation(&u("https://localhost:1420/"), Some(&dev)));
+        assert!(build_window_source().contains(".on_navigation("), "ogni finestra ha la guardia");
     }
 
     #[test]
