@@ -113,6 +113,14 @@ describe('ChatItem', () => {
     project.untrusted = []
   })
 
+  it('"Riprendi" of an old marker is disabled while a turn is running', async () => {
+    convs.all = [{ sessionId: 's', status: 'working' }]
+    render(ChatItem, { row: row({ kind: 'raw', id: 'i', label: 'Turno interrotto — Riprendi', json: '' }), sessionId: 's' })
+    expect(screen.getByText('Riprendi').getAttribute('aria-disabled')).toBe('true')
+    await fireEvent.click(screen.getByText('Riprendi'))
+    expect(convSend).not.toHaveBeenCalled()
+  })
+
   it('a user message with images says how many were attached', () => {
     render(ChatItem, { row: row({ kind: 'user', id: 'u', text: 'guarda', images: ['/tmp/a.png', '/tmp/b.png'] }), sessionId: 's' })
     expect(screen.getByText('2 immagini allegate')).toBeTruthy()

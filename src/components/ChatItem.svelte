@@ -57,8 +57,9 @@
   let resuming = $state(false)
   let resumeError = $state<string | null>(null)
   const untrusted = $derived(projectStore.untrusted.length > 0)
+  const busy = $derived(conversations.all.find((c) => c.sessionId === sessionId)?.status === 'working')
   async function resume() {
-    if (resuming || untrusted) return
+    if (resuming || untrusted || busy) return
     resuming = true
     resumeError = null
     try {
@@ -123,7 +124,7 @@
 {:else if item.kind === 'raw' && item.label === INTERRUPTED_LABEL}
   <div class="interrupted" role="status">
     <span>Il turno è stato interrotto.</span>
-    <button class="diff" use:tooltip={untrusted ? UNTRUSTED_HINT : resuming ? 'Invio in corso…' : 'Chiedi a Claude di continuare il turno'} aria-disabled={untrusted || resuming} onclick={resume}>Riprendi</button>
+    <button class="diff" use:tooltip={untrusted ? UNTRUSTED_HINT : resuming ? 'Invio in corso…' : 'Chiedi a Claude di continuare il turno'} aria-disabled={untrusted || resuming || busy} onclick={resume}>Riprendi</button>
     {#if resumeError}<span class="errtxt" role="alert">{resumeError}</span>{/if}
   </div>
 {:else if item.kind === 'raw' && item.label === ERROR_LABEL}
