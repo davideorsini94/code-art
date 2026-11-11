@@ -102,7 +102,6 @@
     background: var(--glass);
     border: 1px solid var(--edge-soft);
     text-align: center;
-    font-size: 12px;
     font: inherit;
     font-size: 12px;
     cursor: pointer;

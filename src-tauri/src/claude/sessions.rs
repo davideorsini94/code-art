@@ -108,7 +108,19 @@ fn cwd_in_project(cwd: &str, folders: &[String]) -> bool {
 /// Chiama `f(riga, troncata, terminata)` per ogni riga tenendo in memoria al massimo `cap` byte per riga
 /// (`terminata` = finisce con `\n`: l'ultima riga può essere ancora in scrittura).
 /// Restituisce i byte letti fino all'ultimo `\n` incluso.
-fn for_each_line<R: BufRead>(mut r: R, cap: usize, mut f: impl FnMut(&[u8], bool, bool)) -> io::Result<u64> {
+fn for_each_line<R: BufRead>(r: R, cap: usize, mut f: impl FnMut(&[u8], bool, bool)) -> io::Result<u64> {
+    for_each_line_until(r, cap, |l, t, e| {
+        f(l, t, e);
+        std::ops::ControlFlow::Continue(())
+    })
+}
+
+/// Come `for_each_line`, ma `f` può fermare la lettura restituendo `Break`.
+fn for_each_line_until<R: BufRead>(
+    mut r: R,
+    cap: usize,
+    mut f: impl FnMut(&[u8], bool, bool) -> std::ops::ControlFlow<()>,
+) -> io::Result<u64> {
     let mut buf: Vec<u8> = Vec::new();
     let mut consumed_terminated: u64 = 0;
     loop {
@@ -145,7 +157,9 @@ fn for_each_line<R: BufRead>(mut r: R, cap: usize, mut f: impl FnMut(&[u8], bool
         if terminated {
             consumed_terminated += line_bytes;
         }
-        f(&buf, truncated, terminated);
+        if f(&buf, truncated, terminated).is_break() {
+            return Ok(consumed_terminated);
+        }
     }
 }
 
@@ -700,12 +714,16 @@ fn search_file(file: &Path, needle: &[char], deadline: Instant) -> Option<String
     use std::io::Read;
     let reader = BufReader::with_capacity(64 * 1024, File::open(file).ok()?.take(SEARCH_FILE_BYTES));
     let mut found: Option<String> = None;
-    let _ = for_each_line(reader, ITEMS_LINE_CAP, |line, truncated, _| {
-        if found.is_some() || truncated || Instant::now() >= deadline {
-            return;
+    let _ = for_each_line_until(reader, ITEMS_LINE_CAP, |line, truncated, _| {
+        if Instant::now() >= deadline {
+            return std::ops::ControlFlow::Break(());
         }
-        let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
+        if truncated {
+            return std::ops::ControlFlow::Continue(());
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { return std::ops::ControlFlow::Continue(()) };
         found = message_texts(&v).iter().find_map(|t| snippet_of(t, needle));
+        if found.is_some() { std::ops::ControlFlow::Break(()) } else { std::ops::ControlFlow::Continue(()) }
     });
     found
 }
@@ -1242,10 +1260,33 @@ mod tests {
     }
 
     #[test]
-    fn search_stops_at_budget_and_caps_results() {
+    fn search_with_zero_budget_returns_nothing() {
         let (_d, s) = store();
         let p = project("/Users/dev/proj");
         sync_project_sessions(&fixtures_root(), &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
         assert!(search_in(&fixtures_root(), &s, &p, "cambia", Duration::ZERO).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_caps_results_at_30_one_per_session() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("projects");
+        let dir = root.join(encode_project_dir("/Users/dev/big"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_td, s) = store();
+        let p = Project { id: "pb".into(), name: "big".into(), folders: vec!["/Users/dev/big".into()] };
+        for n in 0..35u32 {
+            let id = format!("{n:08}-0000-4000-8000-000000000000");
+            let line = format!(
+                r#"{{"type":"user","uuid":"u{n}","isSidechain":false,"cwd":"/Users/dev/big","sessionId":"{id}","timestamp":"2026-11-11T09:00:01.000Z","message":{{"role":"user","content":"trova ago nel pagliaio, ago due"}}}}"#
+            );
+            write_lines(&dir.join(format!("{id}.jsonl")), &[&line, "\n"]);
+        }
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(s.list_conversations("pb").unwrap().len(), 35);
+        let hits = search_in(&root, &s, &p, "ago", SEARCH_BUDGET).unwrap();
+        assert_eq!(hits.len(), SEARCH_MAX_RESULTS);
+        let ids: std::collections::HashSet<_> = hits.iter().map(|h| &h.session_id).collect();
+        assert_eq!(ids.len(), 30);
     }
 }

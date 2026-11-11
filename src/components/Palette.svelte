@@ -17,12 +17,16 @@
   import { editor } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
 
-  type Item = { key: string; section: string; label: string; labelPos: number[]; detail?: string; detailPos?: number[]; badge?: string; run: () => void }
+  type Item = { key: string; section: string; label: string; labelPos: number[]; detail?: string; detailPos?: number[]; badge?: string; run: () => void | Promise<void> }
 
   const MODES_ID = 'settings.permissionMode'
   const TEXT_DELAY = 200
 
   let query = $state('')
+  /** La query usata per ordinare: aggiornata al massimo una volta per frame (50 000 percorsi). */
+  let rq = $state('')
+  let error = $state<string | null>(null)
+  let raf = 0
   let sel = $state(0)
   let files = $state<string[]>([])
   let filesError = $state<string | null>(null)
@@ -45,6 +49,8 @@
       if (open) {
         if (!wasOpen) returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
         query = ''
+        rq = ''
+        error = null
         sel = 0
         hits = { q: '', list: [] }
         searcher.cancel()
@@ -55,7 +61,8 @@
         searcher.cancel()
         const back = returnTo
         returnTo = null
-        if (back?.isConnected) back.focus()
+        const a = document.activeElement
+        if (back?.isConnected && (!a || a === document.body || input?.contains(a) || a === input)) back.focus()
       }
       wasOpen = open
     })
@@ -90,15 +97,23 @@
   })
 
   $effect(() => {
-    void query
-    sel = 0
+    const q = query
+    untrack(() => {
+      sel = 0
+      if (typeof requestAnimationFrame !== 'function') return void (rq = q)
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => (rq = q))
+    })
   })
 
   onMount(() => {
     hooks.openModes = () => {
       palette.mode = 'modes'
     }
-    return () => searcher.cancel()
+    return () => {
+      searcher.cancel()
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf)
+    }
   })
 
   function openFile(rel: string) {
@@ -116,7 +131,7 @@
         label,
         labelPos: fuzzyPositions(q, label),
         badge: mode === currentMode ? 'attuale' : undefined,
-        run: () => void settingsSet('default_permission_mode', mode).catch(() => {}),
+        run: () => settingsSet('default_permission_mode', mode),
       }
     })
   }
@@ -173,7 +188,7 @@
   }
 
   const items = $derived.by<Item[]>(() => {
-    const q = query.trim()
+    const q = rq.trim()
     switch (palette.mode) {
       case 'files':
         return fileItems(q, 50)
@@ -200,14 +215,26 @@
     void tick().then(() => listEl?.querySelector(`[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' }))
   })
 
-  function choose(item: Item | undefined) {
+  async function choose(item: Item | undefined) {
     if (!item) return
     if (item.key === `cmd:${MODES_ID}`) {
-      item.run() // resta aperta: mostra le quattro modalità
+      void item.run() // resta aperta: mostra le quattro modalità
       return
     }
+    if (item.key.startsWith('mode:')) {
+      // la palette resta aperta se la scrittura fallisce, con l'errore visibile
+      try {
+        await item.run()
+        palette.close()
+      } catch (e) {
+        error = `Impossibile salvare: ${String(e)}`
+      }
+      return
+    }
+    // prima chiude e riporta il focus, poi esegue: ciò che il comando mette a fuoco vince
     palette.close()
-    item.run()
+    await tick()
+    void item.run()
   }
 
   function onKey(e: KeyboardEvent) {
@@ -215,12 +242,24 @@
     if (e.key === 'Escape') {
       e.preventDefault()
       palette.close()
+    } else if (e.key === 'Tab') {
+      e.preventDefault() // il focus resta nel campo
+      input?.focus()
+    } else if (e.target !== input) {
+      return
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (items.length) sel = (sel + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      choose(items[sel])
+      void (async () => {
+        if (rq !== query) {
+          rq = query // Invio prima del prossimo frame: si ordina subito con il testo attuale
+          sel = 0
+          await tick()
+        }
+        await choose(items[sel])
+      })()
     }
   }
 </script>
@@ -232,7 +271,8 @@
 {#if palette.open}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="cover" onmousedown={(e) => e.target === e.currentTarget && palette.close()}>
-    <div class="panel glass-strong" role="dialog" aria-modal="true" aria-label="Ricerca">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="panel glass-strong" role="dialog" aria-modal="true" aria-label="Ricerca" tabindex="-1" onkeydown={onKey}>
       <input
         bind:this={input}
         bind:value={query}
@@ -246,8 +286,8 @@
         {placeholder}
         spellcheck="false"
         autocomplete="off"
-        onkeydown={onKey}
       />
+      {#if error}<div class="err" role="alert">{error}</div>{/if}
       <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
         {#each items as it, i (it.key)}
           {#if i === 0 || items[i - 1].section !== it.section}
@@ -264,7 +304,7 @@
             aria-selected={i === sel}
             onmousemove={() => (sel = i)}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => choose(it)}
+            onclick={() => void choose(it)}
           >
             <span class="label">{@render marked(it.label, it.labelPos)}</span>
             {#if it.badge}<span class="badge">{it.badge}</span>{/if}
@@ -292,5 +332,6 @@
   .detail { flex: 1 1 100%; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .badge { font-size: 11px; color: var(--faint); }
   mark { background: none; color: var(--accent); font-weight: 650; }
+  .err { padding: 8px 16px; font-size: 12px; color: var(--wait); }
   .empty { padding: 18px 12px; text-align: center; color: var(--faint); font-size: 13px; }
 </style>

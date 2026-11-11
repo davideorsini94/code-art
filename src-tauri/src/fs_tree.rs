@@ -165,7 +165,12 @@ pub fn all_files(folders: &[PathBuf]) -> Vec<String> {
         let walk = ignore::WalkBuilder::new(folder)
             .hidden(false)
             .follow_links(false)
-            .filter_entry(|e| e.file_name() != ".git")
+            .require_git(false)
+            .filter_entry(|e| {
+                let n = e.file_name();
+                let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+                !(is_dir && (n == ".git" || n == "node_modules" || n == "target"))
+            })
             .build();
         for entry in walk.flatten() {
             if out.len() >= ALL_FILES_MAX {
@@ -590,5 +595,19 @@ mod tests {
         std::fs::write(b.join("two.txt"), "").unwrap();
         assert_eq!(all_files(&[a.clone()]), vec!["one.txt"]);
         assert_eq!(all_files(&[a, b]), vec!["a/one.txt", "b/two.txt"]);
+    }
+
+    #[test]
+    fn fs_all_files_honours_gitignore_without_git_and_skips_heavy_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(r.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(r.join("x.log"), "").unwrap();
+        std::fs::write(r.join("a.txt"), "").unwrap();
+        for dir in ["node_modules/pkg", "target/debug", "sub/node_modules"] {
+            std::fs::create_dir_all(r.join(dir)).unwrap();
+            std::fs::write(r.join(dir).join("f"), "").unwrap();
+        }
+        assert_eq!(all_files(&[r.to_path_buf()]), vec![".gitignore", "a.txt"]);
     }
 }
