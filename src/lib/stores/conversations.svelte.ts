@@ -131,9 +131,9 @@ class ConversationStore {
    *  con `conv:removed`. */
   delete = (id: string) =>
     this.run(async () => {
-      this.notice = null
       const out = await convDelete(id)
-      if (out.kind === 'deletedWithWarning') this.notice = out.message
+      if (out.kind === 'busy') return // altra conferma già aperta: niente cambia, nemmeno un avviso esistente
+      this.notice = out.kind === 'deletedWithWarning' ? out.message : null
     })
   archive = (id: string, archived: boolean) =>
     this.run(async () => {

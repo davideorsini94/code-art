@@ -601,6 +601,18 @@ pub fn valid_session_id(id: &str) -> bool {
 /// di 60 s: le scritture recenti sul file sono nostre). Vedi `Engine::is_ours`.
 pub type IsRunning<'a> = &'a dyn Fn(&str) -> bool;
 
+/// Nomi dei file di una cartella; `None` se anche una sola voce non si è potuta leggere (mai "quasi tutto").
+fn list_names(dir: &Path) -> Option<HashSet<String>> {
+    let mut names = HashSet::new();
+    for entry in std::fs::read_dir(dir).ok()? {
+        names.insert(entry.ok()?.file_name().to_string_lossy().into_owned());
+    }
+    Some(names)
+}
+
+/// Elenchi riusciti in questo passaggio (cartella → nomi); le cartelle non leggibili non compaiono.
+type Listings = HashMap<PathBuf, HashSet<String>>;
+
 pub fn sync_project_sessions(
     root: &Path,
     store: &Store,
@@ -609,37 +621,73 @@ pub fn sync_project_sessions(
     now: i64,
     is_running: IsRunning,
 ) -> Result<Vec<Conversation>> {
+    let mut listings = Listings::new();
     for dir in session_dirs_for(root, &project.folders) {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for entry in rd.flatten() {
+        let mut names = Some(HashSet::new());
+        for entry in rd {
+            let Ok(entry) = entry else {
+                names = None; // elenco incompleto: non prova nulla
+                continue;
+            };
+            if let Some(n) = names.as_mut() {
+                n.insert(entry.file_name().to_string_lossy().into_owned());
+            }
             let p = entry.path();
             if is_session_file(&p) && p.is_file() {
                 let _ = sync_session_file(store, cache, project, &p); // un file illeggibile non blocca gli altri
             }
         }
+        if let Some(n) = names {
+            listings.insert(dir, n);
+        }
     }
-    prune_vanished(root, store, project, is_running);
+    prune_vanished(root, store, project, is_running, &mut listings);
     conversations_for(root, store, project, now, is_running)
 }
 
-/// Toglie dallo store le conversazioni il cui file di sessione non esiste più (eliminate altrove o dopo un
-/// fallimento di `conv_delete`). Prudenza: solo se la radice delle sessioni esiste, la conversazione non è pilotata
-/// dal motore e ha già dei turni (una appena avviata non ha ancora il file).
-fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning) {
+/// Toglie dallo store le conversazioni il cui file di sessione è PROVATO sparito (eliminate altrove o dopo un
+/// fallimento di `conv_delete`). Una riga si scarta solo se: non è pilotata dal motore e ha già dei turni; ogni
+/// cartella di sessione in cui potrebbe stare (quelle del progetto e quella del suo cwd) è stata elencata con
+/// successo (in questo passaggio) e non contiene il file; `try_exists` sul percorso atteso dà `Ok(false)`. Qualsiasi
+/// errore lascia la riga. Se un passaggio scartasse TUTTE le righe di un progetto con più di 3 righe è sospetto
+/// (cartella sparita, permessi, volume smontato): non si scarta nulla.
+fn prune_vanished(root: &Path, store: &Store, project: &Project, is_running: IsRunning, listings: &mut Listings) {
     if !root.is_dir() {
         return;
     }
-    let dirs = session_dirs_for(root, &project.folders);
+    let project_dirs = session_dirs_for(root, &project.folders);
     let Ok(list) = store.list_conversations(&project.id) else { return };
-    for c in list {
+    let mut gone = Vec::new();
+    for c in &list {
         if c.turn_count == 0 || !valid_session_id(&c.session_id) || is_running(&c.session_id) {
             continue;
         }
         let name = format!("{}.jsonl", c.session_id);
-        let own = session_dirs_for(root, std::slice::from_ref(&c.cwd));
-        if !dirs.iter().chain(own.iter()).any(|d| d.join(&name).exists()) {
-            let _ = store.delete_conversation(&c.session_id);
+        let mut dirs = project_dirs.clone();
+        for d in session_dirs_for(root, std::slice::from_ref(&c.cwd)) {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
         }
+        let proven = !dirs.is_empty()
+            && dirs.iter().all(|d| {
+                if !listings.contains_key(d) {
+                    if let Some(n) = list_names(d) {
+                        listings.insert(d.clone(), n);
+                    }
+                }
+                listings.get(d).is_some_and(|n| !n.contains(&name)) && matches!(d.join(&name).try_exists(), Ok(false))
+            });
+        if proven {
+            gone.push(c.session_id.clone());
+        }
+    }
+    if list.len() > 3 && gone.len() == list.len() {
+        return;
+    }
+    for id in gone {
+        let _ = store.delete_conversation(&id);
     }
 }
 
@@ -1315,5 +1363,81 @@ mod tests {
         assert_eq!(hits.len(), SEARCH_MAX_RESULTS);
         let ids: std::collections::HashSet<_> = hits.iter().map(|h| &h.session_id).collect();
         assert_eq!(ids.len(), 30);
+    }
+
+    // ---------- potatura delle righe con file sparito ----------
+
+    const PR_FOLDER: &str = "/Users/dev/pr";
+
+    /// `n` sessioni sul disco, già sincronizzate nello store; restituisce radice, cartella di sessione, store, progetto, ids.
+    fn pruning_setup(n: u32) -> (tempfile::TempDir, PathBuf, PathBuf, Store, Project, Vec<String>) {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("projects");
+        let dir = root.join(encode_project_dir(PR_FOLDER));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_td, s) = store();
+        std::mem::forget(_td); // lo store deve sopravvivere al helper (cartella temporanea del test, ripulita dal sistema)
+        let p = Project { id: "pr".into(), name: "pr".into(), folders: vec![PR_FOLDER.into()] };
+        let ids: Vec<String> = (0..n).map(|k| format!("{k:08}-0000-4000-8000-000000000000")).collect();
+        for id in &ids {
+            let line = format!(
+                r#"{{"type":"user","uuid":"u","isSidechain":false,"cwd":"{PR_FOLDER}","sessionId":"{id}","timestamp":"2026-11-11T09:00:01.000Z","message":{{"role":"user","content":"ciao"}}}}"#
+            );
+            write_lines(&dir.join(format!("{id}.jsonl")), &[&line, "\n"]);
+        }
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(s.list_conversations("pr").unwrap().len(), n as usize);
+        (d, root, dir, s, p, ids)
+    }
+
+    fn count(s: &Store) -> usize {
+        s.list_conversations("pr").unwrap().len()
+    }
+
+    #[test]
+    fn prune_drops_only_the_one_vanished_file() {
+        let (_d, root, dir, s, p, ids) = pruning_setup(4);
+        std::fs::remove_file(dir.join(format!("{}.jsonl", ids[1]))).unwrap();
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(count(&s), 3);
+        assert!(s.get_conversation(&ids[1]).unwrap().is_none());
+        // una conversazione pilotata dal motore resta anche senza file
+        std::fs::remove_file(dir.join(format!("{}.jsonl", ids[2]))).unwrap();
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|id| id == ids[2]).unwrap();
+        assert!(s.get_conversation(&ids[2]).unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_keeps_everything_when_the_session_dir_cannot_be_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o000, 0o100] {
+            let (_d, root, dir, s, p, ids) = pruning_setup(5);
+            std::fs::remove_file(dir.join(format!("{}.jsonl", ids[0]))).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            let r = sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); // ripristino prima delle asserzioni
+            r.unwrap();
+            assert_eq!(count(&s), 5, "modo {mode:o}: nessuna riga va persa se non si riesce a guardare");
+        }
+    }
+
+    #[test]
+    fn prune_refuses_to_drop_every_row_of_a_larger_project() {
+        let (_d, root, dir, s, p, ids) = pruning_setup(4);
+        for id in &ids {
+            std::fs::remove_file(dir.join(format!("{id}.jsonl"))).unwrap();
+        }
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(count(&s), 4, "tutte sparite insieme è sospetto");
+    }
+
+    #[test]
+    fn prune_may_drop_all_rows_of_a_small_project() {
+        let (_d, root, dir, s, p, ids) = pruning_setup(2);
+        for id in &ids {
+            std::fs::remove_file(dir.join(format!("{id}.jsonl"))).unwrap();
+        }
+        sync_project_sessions(&root, &s, &MetaCache::default(), &p, now_ms(), &|_| false).unwrap();
+        assert_eq!(count(&s), 0);
     }
 }

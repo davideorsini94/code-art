@@ -527,6 +527,8 @@ impl Engine {
         }
         if retry_once(|| self.0.store.delete_conversation(session_id)).is_err() {
             // il file è già nel Cestino: la voce sparirà alla prossima sincronizzazione (`prune_vanished`)
+            lock(&self.0.exits).remove(session_id);
+            lock(&self.0.interrupted).remove(session_id);
             return Err("La conversazione è nel Cestino, ma non si è potuta togliere dall'elenco: sparirà alla prossima sincronizzazione.".into());
         }
         lock(&self.0.exits).remove(session_id);
