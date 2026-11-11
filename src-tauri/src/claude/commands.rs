@@ -2,16 +2,9 @@
 //! thread principale e confinati al progetto della finestra chiamante.
 use super::engine::{ClaudeCheck, Engine, StartOpts};
 use super::protocol::ClaudeEvent;
+use crate::projects::window_project_id;
 use crate::store::Result;
 use tauri::{AppHandle, Manager, WebviewWindow};
-
-fn window_project_id(window: &WebviewWindow) -> Result<String> {
-    window
-        .label()
-        .strip_prefix(crate::projects::PROJECT_PREFIX)
-        .map(String::from)
-        .ok_or_else(|| "questa finestra non è un progetto".into())
-}
 
 /// Esegue `f` fuori dal thread principale con il motore e il progetto della finestra chiamante.
 async fn with_engine<T: Send + 'static>(

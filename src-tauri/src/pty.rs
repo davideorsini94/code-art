@@ -175,9 +175,8 @@ pub async fn pty_spawn(
     rows: u16,
 ) -> Result<SpawnInfo, String> {
     let roots = roots_of(&window, &store).map_err(|e| e.message)?;
-    // una shell esegue codice: solo nei progetti fidati (`roots_of` ha già verificato l'etichetta)
-    let project_id = window.label().strip_prefix(crate::projects::PROJECT_PREFIX).unwrap_or_default();
-    crate::trust::ensure_project_trusted(&store, project_id)?;
+    // una shell esegue codice: solo nei progetti fidati
+    crate::trust::ensure_project_trusted(&store, &crate::projects::window_project_id(&window)?)?;
     let cwd: PathBuf = ensure_inside(&roots, Path::new(&cwd)).map_err(|e| e.message)?;
     if !cwd.is_dir() {
         return Err("cartella inesistente".into());

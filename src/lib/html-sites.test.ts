@@ -10,7 +10,7 @@ function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const p = join(dir, name)
     if (statSync(p).isDirectory()) return sources(p)
-    return /\.(svelte|ts)$/.test(name) && !name.endsWith('.test.ts') ? [p] : []
+    return /\.(svelte|ts|js)$/.test(name) && !/\.test\.(ts|js)$/.test(name) ? [p] : []
   })
 }
 

@@ -3,6 +3,9 @@
 //! La conferma la mostra il core (dialogo nativo), non la WebView: una pagina compromessa non può
 //! dichiarare fidata una cartella da sola.
 use crate::store::{Project, Result, Store};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
@@ -10,6 +13,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, Me
 pub const UNTRUSTED: &str = "untrusted_folder";
 
 pub const PROMPT: &str = "Ti fidi di questa cartella? Claude potrà eseguire comandi al suo interno senza chiedere";
+/// Titolo fisso del dialogo: non il nome del progetto, che viene dal nome della cartella (non fidato).
+const TITLE: &str = "Cartella non fidata";
 const BTN_TRUST: &str = "Mi fido";
 const BTN_READ_ONLY: &str = "Apri in sola consultazione";
 
@@ -34,9 +39,34 @@ pub fn ensure_project_trusted(store: &Store, project_id: &str) -> Result<()> {
     }
 }
 
+/// Dopo un rifiuto, per quanto tempo anche il "Mi fido" del banner viene ignorato.
+pub const REFUSAL_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Se mostrare la domanda di fiducia. `refused_at`: ultimo rifiuto per quel progetto in questo avvio;
+/// `user_click`: richiesta dal "Mi fido" del banner (altrimenti è la domanda automatica all'apertura).
+/// Dopo un rifiuto la domanda automatica non torna più in questo avvio, e il banner la riapre solo dopo
+/// `REFUSAL_COOLDOWN`: una pagina compromessa non può sommergere l'utente di domande fino al "sì".
+pub fn may_prompt(refused_at: Option<Instant>, now: Instant, user_click: bool) -> bool {
+    match refused_at {
+        None => true,
+        Some(_) if !user_click => false,
+        Some(t) => now.saturating_duration_since(t) >= REFUSAL_COOLDOWN,
+    }
+}
+
+#[derive(Default)]
+struct PromptState {
+    refused_at: Option<Instant>,
+    open: bool,
+}
+
+/// Stato delle domande di fiducia per progetto, solo in memoria (dura un avvio dell'app).
+#[derive(Default)]
+pub struct TrustPrompts(Mutex<HashMap<String, PromptState>>);
+
 fn window_project(window: &WebviewWindow, store: &Store) -> Result<Project> {
-    let id = window.label().strip_prefix(crate::projects::PROJECT_PREFIX).ok_or("questa finestra non è un progetto")?;
-    store.get_project(id)?.ok_or_else(|| "progetto inesistente".into())
+    let id = crate::projects::window_project_id(window)?;
+    store.get_project(&id)?.ok_or_else(|| "progetto inesistente".into())
 }
 
 // ---------- comandi ----------
@@ -48,28 +78,43 @@ pub fn trust_check(window: WebviewWindow, store: State<Store>) -> Result<Vec<Str
 }
 
 /// Chiede con un dialogo nativo (foglio della finestra) se fidarsi delle cartelle non fidate del progetto
-/// della finestra chiamante. Vero se ora sono tutte fidate.
+/// della finestra chiamante. Vero se ora sono tutte fidate. `from_click`: richiesta dal banner (vedi `may_prompt`).
 #[tauri::command]
-pub async fn trust_accept(app: AppHandle, window: WebviewWindow) -> Result<bool> {
+pub async fn trust_accept(app: AppHandle, window: WebviewWindow, from_click: Option<bool>) -> Result<bool> {
     let store = app.state::<Store>().inner().clone();
     let project = window_project(&window, &store)?;
     let pending = untrusted_folders(&store, &project);
     if pending.is_empty() {
         return Ok(true);
     }
+    {
+        let prompts = app.state::<TrustPrompts>();
+        let mut map = prompts.0.lock().unwrap_or_else(|p| p.into_inner());
+        let st = map.entry(project.id.clone()).or_default();
+        if st.open || !may_prompt(st.refused_at, Instant::now(), from_click.unwrap_or(false)) {
+            return Ok(false);
+        }
+        st.open = true;
+    }
     let message = format!("{PROMPT}\n\n{}", pending.join("\n"));
     let dialog = app
         .dialog()
         .message(message)
-        .title(project.name.clone())
+        .title(TITLE)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(BTN_TRUST.into(), BTN_READ_ONLY.into()))
         .parent(&window);
-    let answer = tauri::async_runtime::spawn_blocking(move || dialog.blocking_show_with_result())
-        .await
-        .map_err(|e| e.to_string())?;
-    let trusted = matches!(&answer, MessageDialogResult::Ok | MessageDialogResult::Yes)
-        || matches!(&answer, MessageDialogResult::Custom(l) if l == BTN_TRUST);
+    let answer = tauri::async_runtime::spawn_blocking(move || dialog.blocking_show_with_result()).await;
+    let trusted = matches!(&answer, Ok(MessageDialogResult::Ok | MessageDialogResult::Yes))
+        || matches!(&answer, Ok(MessageDialogResult::Custom(l)) if l == BTN_TRUST);
+    {
+        let prompts = app.state::<TrustPrompts>();
+        let mut map = prompts.0.lock().unwrap_or_else(|p| p.into_inner());
+        let st = map.entry(project.id.clone()).or_default();
+        st.open = false;
+        st.refused_at = if trusted { None } else { Some(Instant::now()) };
+    }
+    answer.map_err(|e| e.to_string())?;
     if !trusted {
         return Ok(false);
     }
@@ -100,6 +145,19 @@ mod tests {
         assert!(!is_trusted(&s, "/Users/dev"));
         assert!(!is_trusted(&s, "/Users/dev/progetto/sotto"));
         mark_trusted(&s, "/Users/dev/progetto").unwrap(); // idempotente
+    }
+
+    #[test]
+    fn refusal_stops_automatic_prompts_and_cools_down_the_banner() {
+        let t0 = Instant::now();
+        assert!(may_prompt(None, t0, false));
+        assert!(may_prompt(None, t0, true));
+        // dopo un rifiuto: mai più la domanda automatica in questo avvio
+        assert!(!may_prompt(Some(t0), t0 + Duration::from_secs(3600), false));
+        // il banner: ignorato entro 10 s, poi di nuovo ammesso
+        assert!(!may_prompt(Some(t0), t0, true));
+        assert!(!may_prompt(Some(t0), t0 + Duration::from_millis(9_999), true));
+        assert!(may_prompt(Some(t0), t0 + REFUSAL_COOLDOWN, true));
     }
 
     #[test]

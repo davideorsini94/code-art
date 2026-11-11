@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
+  import { projectStore } from '../lib/stores/project.svelte'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -20,6 +21,8 @@
   const diffModels = new Map<number, [IModel, IModel]>()
 
   const active = $derived(editor.activeTab)
+  // cartella non fidata: editor in sola lettura, niente salvataggio (il core rifiuta comunque)
+  const readOnly = $derived(projectStore.untrusted.length > 0)
   const showCode = $derived(!!active && !active.diff && !active.error)
 
   onMount(() => editor.watch())
@@ -50,7 +53,7 @@
 
   $effect(() => {
     if (!monaco || !mainEl || !diffEl || main) return
-    main = monaco.editor.create(mainEl, options)
+    main = monaco.editor.create(mainEl, { ...options, readOnly })
     addSave(main, monaco)
     diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, renderSideBySide: true })
   })
@@ -58,12 +61,19 @@
   $effect(() => {
     if (!monaco || !splitEl) return
     if (editor.split && !second) {
-      second = monaco.editor.create(splitEl, { ...options, minimap: { enabled: false } })
+      second = monaco.editor.create(splitEl, { ...options, readOnly, minimap: { enabled: false } })
       addSave(second, monaco)
     } else if (!editor.split && second) {
       second.dispose()
       second = undefined
     }
+  })
+
+  $effect(() => {
+    const ro = readOnly
+    if (!monaco) return
+    main?.updateOptions({ readOnly: ro })
+    second?.updateOptions({ readOnly: ro })
   })
 
   function ensureModel(m: Monaco, t: Tab) {

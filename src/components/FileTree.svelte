@@ -8,6 +8,8 @@
   import type { DirEntry, FsChanged } from '../lib/types'
 
   let children = $state<Record<string, DirEntry[]>>({})
+  // cartella non fidata: sola lettura (il core rifiuta comunque ogni modifica)
+  const readOnly = $derived(projectStore.untrusted.length > 0)
   let expanded = $state<Record<string, boolean>>({})
   let menu = $state<{ x: number; y: number; entry: DirEntry } | null>(null)
   // inserimento in corso: nuovo file/cartella dentro `parent`, oppure rinomina di `path`
@@ -111,6 +113,7 @@
   function onDrop(ev: DragEvent, target: DirEntry) {
     ev.preventDefault()
     dropTarget = null
+    if (readOnly) return
     const from = ev.dataTransfer?.getData('text/plain')
     if (!from || !target.isDir || from === target.path || target.path.startsWith(from + '/')) return
     const to = `${target.path}/${nameOf(from)}`
@@ -171,7 +174,7 @@
         ev.dataTransfer?.setData(PATH_DRAG_TYPE, e.path)
       }}
       ondragover={(ev) => {
-        if (e.isDir) {
+        if (e.isDir && !readOnly) {
           ev.preventDefault()
           dropTarget = e.path
         }
@@ -212,11 +215,11 @@
 {#if menu}
   <div class="menu glass-strong" style:left="{menu.x}px" style:top="{menu.y}px" role="menu">
     {#if menu.entry.isDir}
-      <button role="menuitem" onclick={() => startNew('file', menu!.entry.path)}>Nuovo file</button>
-      <button role="menuitem" onclick={() => startNew('dir', menu!.entry.path)}>Nuova cartella</button>
+      <button role="menuitem" disabled={readOnly} onclick={() => startNew('file', menu!.entry.path)}>Nuovo file</button>
+      <button role="menuitem" disabled={readOnly} onclick={() => startNew('dir', menu!.entry.path)}>Nuova cartella</button>
     {/if}
-    <button role="menuitem" onclick={() => startRename(menu!.entry)}>Rinomina</button>
-    <button role="menuitem" onclick={() => void trash(menu!.entry)}>Sposta nel Cestino</button>
+    <button role="menuitem" disabled={readOnly} onclick={() => startRename(menu!.entry)}>Rinomina</button>
+    <button role="menuitem" disabled={readOnly} onclick={() => void trash(menu!.entry)}>Sposta nel Cestino</button>
   </div>
 {/if}
 
@@ -247,5 +250,6 @@
     text-align: left; background: none; border: 0; color: var(--txt); padding: 6px 10px;
     border-radius: 6px; font-size: 12.5px; cursor: default;
   }
-  .menu button:hover { background: var(--glass2); }
+  .menu button:hover:not(:disabled) { background: var(--glass2); }
+  .menu button:disabled { opacity: 0.4; cursor: default; }
 </style>

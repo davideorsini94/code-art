@@ -10,7 +10,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
 4. Il core Rust è il confine: valida ogni argomento e non si fida di percorsi o id arrivati dalla pagina.
 5. Il core avvia `claude` in bypass permissions dentro le cartelle del progetto: lì si esegue codice.
 6. Una cartella appena clonata può essere ostile (istruzioni per il modello, script, hook).
-7. Quindi Claude e terminale partono solo in cartelle fidate, scelte o confermate dall'utente con UI nativa.
+7. Quindi Claude, terminale e scritture su disco solo in cartelle fidate, scelte o confermate con UI nativa.
 8. L'ambiente della shell di login (con i segreti dell'utente) passa solo ai processi figli, mai alla pagina.
 9. Nessuna rete dalla WebView: niente script, stili, immagini o connessioni remote.
 10. Il repository è pubblico: nessun segreto, percorso personale o dato reale nei file tracciati.
@@ -18,6 +18,9 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
 ## Misure attive
 
 - **CSP restrittiva** (`src-tauri/tauri.conf.json`), verificata da `csp_has_no_unsafe_eval_or_remote_origin`.
+  Queste misure contro la compromissione della WebView (CSP, nessun contenuto remoto, markdown sanificato,
+  testo reso come testo) sono quelle che reggono il peso: in una finestra fidata una pagina compromessa può
+  eseguire qualunque cosa come l'utente (vedi "Rischi residui").
 - **Markdown sanificato**: `renderMarkdown` (`src/lib/safe-markdown.ts`, marked + DOMPurify con whitelist)
   è l'unica sorgente di `{@html}`; l'HTML grezzo è scartato, le immagini non si caricano, sopravvivono solo
   link `http(s)` con `rel="noopener noreferrer"`, intercettati (`src/lib/conv/links.ts`) e aperti nel browser
@@ -25,7 +28,8 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`.
 - **Confinamento dei file**: i comandi `fs_*` e `pty_spawn` accettano solo percorsi assoluti dentro le
   cartelle del progetto della finestra chiamante (`fs_tree::ensure_inside`: canonicalizzazione, `..`,
-  link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`.
+  link simbolici e link pendenti che escono → errore `forbidden`). Test: `fs_write_outside_project_is_rejected`
+  (passa dallo stesso passo etichetta → radici dei comandi, `fs_tree::mutable_path`).
 - **Cartelle nel progetto solo da UI nativa**: una cartella entra in un progetto solo dal selettore nativo
   aperto dal core (`project_pick_and_open`, `project_pick_and_add_folder`, `project_pick_relocate`), dai
   recenti/ripristino (store) o dal menu dell'app. Nessun comando accetta un percorso o un id di progetto
@@ -37,7 +41,22 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   già nello store prima di questa funzione non sono fidate (domanda all'apertura). Finché il progetto ha una
   cartella non fidata `conv_start`/`conv_resume`/`conv_send` (e ogni avvio di `claude` in
   `Engine::ensure_running`), `pty_spawn` e la titolazione automatica sono rifiutati con `untrusted_folder`;
-  albero ed editor funzionano. La finestra mostra "Cartella non fidata — Claude e terminale disattivati · Mi fido".
+  albero, lettura, ricerca ed editor (in sola lettura) funzionano. La finestra mostra "Cartella non fidata — sola
+  lettura; Claude e terminale disattivati · Mi fido". Il dialogo ha un titolo fisso ("Cartella non fidata", non il
+  nome del progetto) e mostra i percorsi come testo. Un rifiuto vale per il resto dell'avvio per quel progetto:
+  nessuna nuova domanda automatica all'apertura delle finestre, e il "Mi fido" del banner è ignorato per 10 s
+  dopo il rifiuto (`trust::may_prompt`, testato); una domanda alla volta per progetto.
+- **Sola consultazione = sola lettura reale**: in un progetto con anche una sola cartella non fidata ogni comando
+  che modifica il disco (`fs_write`, `fs_create`, `fs_rename`, `fs_trash`) è rifiutato con `untrusted_folder`
+  da un unico punto (`fs_tree::mutable_path` → `writable_roots_for_label`). Senza questo una pagina compromessa
+  potrebbe piantare file eseguiti altrove: hook in `.git/hooks` o `.claude/settings.json` di una cartella fidata
+  annidata, oppure `~/.zshrc` (letto da ogni terminale) se la cartella non fidata è la home. Nell'interfaccia
+  editor Monaco `readOnly`, salvataggio disattivato, voci di modifica dell'albero disabilitate.
+  Test: `untrusted_project_is_read_only`.
+- **Fiducia per percorso**: la fiducia è legata al percorso (normalizzato, senza `/` finale), non all'inode.
+  Se una cartella fidata viene cancellata o sostituita (anche da un link simbolico) con altro contenuto allo
+  stesso percorso, resta fidata; spostandola o rinominandola invece non lo è più nel nuovo percorso (la si
+  riposiziona col selettore, che la rende fidata). La fiducia non si eredita: né sottocartelle né genitori.
 - **Permessi Tauri al minimo**, per tipo di finestra (sotto); verificati da `capabilities_grant_no_shell_or_fs_plugin`.
 - **Processi senza shell**: sempre lista di argomenti (sotto).
 - **Impostazioni**: `settings_get`/`settings_set` accettano solo chiavi in whitelist (`default_permission_mode`)
@@ -63,11 +82,11 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `settings_get` | `key` | whitelist | globale | — |
 | `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`) | globale | — |
 | `fs_list` | `path` | `ensure_inside` | finestra | F |
-| `fs_create` | `path`, `isDir` | `ensure_inside`; non sovrascrive | finestra | F |
-| `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; destinazione inesistente | finestra | F |
-| `fs_trash` | `path` | `ensure_inside`; Cestino, non cancellazione | finestra | F |
+| `fs_create` | `path`, `isDir` | `ensure_inside`; progetto fidato; non sovrascrive | finestra | F |
+| `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente | finestra | F |
+| `fs_trash` | `path` | `ensure_inside`; progetto fidato; Cestino, non cancellazione | finestra | F |
 | `fs_read` | `path` | `ensure_inside`; ≤ 5 MB, solo UTF-8 | finestra | F |
-| `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; controllo di conflitto | finestra | F |
+| `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
@@ -93,13 +112,14 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_rename` | `sessionId`, `title` | del progetto; lunghezza e caratteri di controllo | finestra | — |
 | `conv_unlock_title` | `sessionId` | del progetto | finestra | — |
 | `trust_check` | — | — | finestra | — |
-| `trust_accept` | — | conferma nativa mostrata dal core | finestra | — |
+| `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
 
 ## CSP
 
 ```
 default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
-connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'
+connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none';
+form-action 'none'
 ```
 
 Rilassamenti e perché:
@@ -170,8 +190,15 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 
 ## Rischi residui
 
+- **Fidarsi di una cartella significa fidarsi della pagina in quella finestra.** In una finestra di progetto
+  fidato una WebView compromessa può avviare un terminale (`pty_spawn` + `pty_write`) ed eseguire qualunque
+  comando come l'utente, ovunque, leggendone l'output da `pty:data`; lo stesso tramite `claude` in bypass
+  permissions (`conv_start`/`conv_send`). Una finestra fidata compromessa equivale alla compromissione
+  dell'account. Il confine reale è: **le cartelle non fidate e la finestra di benvenuto non possono eseguire
+  codice né modificare il disco**. Per le finestre fidate il peso lo reggono le misure che impediscono la
+  compromissione della WebView: nessun contenuto remoto, CSP restrittiva, markdown sanificato, tutto il resto
+  reso come testo.
 - La CLI `claude` in bypass permissions, in una cartella fidata, può fare tutto ciò che può fare l'utente:
   è la scelta voluta, resa visibile (modalità in ambra, domanda di fiducia).
-- Una WebView compromessa in un progetto fidato può avviare conversazioni e scrivere nel terminale di quel
-  progetto: il confine protegge le altre cartelle e gli altri progetti, non il progetto stesso.
+- Fiducia per percorso, non per inode (vedi "Misure attive").
 - La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).

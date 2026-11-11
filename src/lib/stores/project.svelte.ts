@@ -39,10 +39,11 @@ class ProjectStore {
     if (this.project) this.untrusted = await trustCheck().catch(() => this.untrusted)
   }
 
-  /** "Mi fido": il core mostra la conferma nativa. */
-  async acceptTrust() {
+  /** Conferma nativa mostrata dal core: automatica all'apertura, oppure dal "Mi fido" del banner (`fromClick`).
+   *  Dopo un rifiuto il core non la ripropone in automatico e ignora il banner per 10 s. */
+  async acceptTrust(fromClick = false) {
     if (!this.project) return
-    await trustAccept().catch(() => false)
+    await trustAccept(fromClick).catch(() => false)
     await this.refreshTrust()
   }
 

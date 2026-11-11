@@ -4,9 +4,9 @@
 
 {#if projectStore.project && projectStore.untrusted.length > 0}
   <div class="trust" role="status">
-    <span>Cartella non fidata — Claude e terminale disattivati</span>
+    <span>Cartella non fidata — sola lettura; Claude e terminale disattivati</span>
     <span aria-hidden="true">·</span>
-    <button onclick={() => void projectStore.acceptTrust()}>Mi fido</button>
+    <button onclick={() => void projectStore.acceptTrust(true)}>Mi fido</button>
   </div>
 {/if}
 

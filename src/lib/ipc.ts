@@ -13,8 +13,9 @@ export const projectMissingFolders = () => invoke<string[]>('project_missing_fol
 export const projectBranch = () => invoke<string | null>('project_branch')
 /** Cartelle del progetto della finestra non ancora fidate (Claude e terminale disattivati finché ce n'è una). */
 export const trustCheck = () => invoke<string[]>('trust_check')
-/** Mostra la domanda nativa "Ti fidi di questa cartella?"; vero se ora il progetto è fidato. */
-export const trustAccept = () => invoke<boolean>('trust_accept')
+/** Mostra la domanda nativa "Ti fidi di questa cartella?"; vero se ora il progetto è fidato.
+ *  `fromClick`: richiesta dal "Mi fido" del banner (altrimenti automatica all'apertura). */
+export const trustAccept = (fromClick = false) => invoke<boolean>('trust_accept', { fromClick })
 export const settingsGet = (key: string) => invoke<string | null>('settings_get', { key })
 export const settingsSet = (key: string, value: string) => invoke<void>('settings_set', { key, value })
 

@@ -2,4 +2,4 @@
 export const UNTRUSTED = 'untrusted_folder'
 /** Testo leggibile di un errore di comando. */
 export const errorText = (e: unknown) =>
-  String(e) === UNTRUSTED ? 'Cartella non fidata: Claude e terminale sono disattivati' : String(e)
+  String(e) === UNTRUSTED ? 'Cartella non fidata: sola lettura, Claude e terminale disattivati' : String(e)

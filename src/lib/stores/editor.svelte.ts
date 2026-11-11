@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import { asFsError, fsRead, fsWrite } from '../ipc'
+import { projectStore } from './project.svelte'
 import type { FileContent, FsChanged } from '../types'
 
 export type DiskAction = 'reload' | 'prompt' | 'none'
@@ -104,7 +105,7 @@ class EditorStore {
   /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". */
   async save(path: string) {
     const t = this.find(path)
-    if (!t || t.diff || t.error) return
+    if (!t || t.diff || t.error || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
     try {

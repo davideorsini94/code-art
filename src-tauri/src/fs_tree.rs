@@ -15,7 +15,7 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FsError {
-    pub code: &'static str, // 'conflict' | 'too_large' | 'not_text' | 'io'
+    pub code: &'static str, // 'conflict' | 'too_large' | 'not_text' | 'io' | 'forbidden' | 'untrusted_folder'
     pub message: String,
 }
 
@@ -304,12 +304,10 @@ pub fn ensure_inside(roots: &[PathBuf], path: &Path) -> Result<PathBuf, FsError>
     if inside { Ok(resolved) } else { Err(forbidden()) }
 }
 
-/// Cartelle del progetto della finestra chiamante (dall'etichetta, mai da un argomento).
-pub(crate) fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<PathBuf>, FsError> {
-    let id = window
-        .label()
-        .strip_prefix(crate::projects::PROJECT_PREFIX)
-        .ok_or_else(|| FsError::new("forbidden", "Percorso fuori dal progetto"))?;
+/// Cartelle del progetto della finestra con etichetta `label` (le finestre non di progetto non ne hanno).
+/// È il passo etichetta → radici di ogni comando su file.
+pub fn roots_for_label(store: &Store, label: &str) -> Result<Vec<PathBuf>, FsError> {
+    let id = crate::projects::project_id_of_label(label).ok_or_else(|| FsError::new("forbidden", "Percorso fuori dal progetto"))?;
     let project = store
         .get_project(id)
         .map_err(|e| FsError::new("io", e))?
@@ -317,8 +315,38 @@ pub(crate) fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<Path
     Ok(project.folders.iter().map(PathBuf::from).collect())
 }
 
+/// Come `roots_for_label`, per i comandi che cambiano il disco: un progetto con anche una sola cartella non
+/// fidata è in sola lettura (errore `untrusted_folder`). Scrivere lì potrebbe piantare file eseguiti altrove
+/// (hook di `.git` o di `.claude` in una cartella fidata annidata, `~/.zshrc` letto dai terminali).
+pub fn writable_roots_for_label(store: &Store, label: &str) -> Result<Vec<PathBuf>, FsError> {
+    let roots = roots_for_label(store, label)?;
+    let id = crate::projects::project_id_of_label(label).unwrap_or_default();
+    crate::trust::ensure_project_trusted(store, id)
+        .map_err(|_| FsError::new(crate::trust::UNTRUSTED, "Cartella non fidata: sola lettura"))?;
+    Ok(roots)
+}
+
+/// Cartelle del progetto della finestra chiamante (dall'etichetta, mai da un argomento).
+pub(crate) fn roots_of(window: &WebviewWindow, store: &Store) -> Result<Vec<PathBuf>, FsError> {
+    roots_for_label(store, window.label())
+}
+
+/// Percorso da leggere per la finestra `label`: dentro il suo progetto.
+pub fn readable_path(store: &Store, label: &str, path: &str) -> Result<PathBuf, FsError> {
+    ensure_inside(&roots_for_label(store, label)?, Path::new(path))
+}
+
+/// Percorso da modificare per la finestra `label`: dentro il suo progetto, e progetto fidato.
+pub fn mutable_path(store: &Store, label: &str, path: &str) -> Result<PathBuf, FsError> {
+    ensure_inside(&writable_roots_for_label(store, label)?, Path::new(path))
+}
+
 fn checked(window: &WebviewWindow, store: &Store, path: &str) -> Result<PathBuf, FsError> {
-    ensure_inside(&roots_of(window, store)?, Path::new(path))
+    readable_path(store, window.label(), path)
+}
+
+fn checked_mut(window: &WebviewWindow, store: &Store, path: &str) -> Result<PathBuf, FsError> {
+    mutable_path(store, window.label(), path)
 }
 
 // ---------- comandi ----------
@@ -330,18 +358,18 @@ pub async fn fs_list(window: WebviewWindow, store: State<'_, Store>, path: Strin
 
 #[tauri::command]
 pub async fn fs_create(window: WebviewWindow, store: State<'_, Store>, path: String, is_dir: bool) -> Result<(), FsError> {
-    create(&checked(&window, &store, &path)?, is_dir)
+    create(&checked_mut(&window, &store, &path)?, is_dir)
 }
 
 #[tauri::command]
 pub async fn fs_rename(window: WebviewWindow, store: State<'_, Store>, from: String, to: String) -> Result<(), FsError> {
-    let (from, to) = (checked(&window, &store, &from)?, checked(&window, &store, &to)?);
+    let (from, to) = (checked_mut(&window, &store, &from)?, checked_mut(&window, &store, &to)?);
     rename(&from, &to)
 }
 
 #[tauri::command]
 pub async fn fs_trash(window: WebviewWindow, store: State<'_, Store>, path: String) -> Result<(), FsError> {
-    trash_path(&checked(&window, &store, &path)?)
+    trash_path(&checked_mut(&window, &store, &path)?)
 }
 
 #[tauri::command]
@@ -357,7 +385,7 @@ pub async fn fs_write(
     text: String,
     expected_mtime_ms: Option<i64>,
 ) -> Result<i64, FsError> {
-    write(&checked(&window, &store, &path)?, &text, expected_mtime_ms)
+    write(&checked_mut(&window, &store, &path)?, &text, expected_mtime_ms)
 }
 
 /// Elenco piatto dei file del progetto della finestra chiamante (per l'apertura rapida).

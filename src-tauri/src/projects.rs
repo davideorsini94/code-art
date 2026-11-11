@@ -221,9 +221,14 @@ async fn pick_folder_for(app: &AppHandle, window: &WebviewWindow, title: &str) -
     Ok(Some(path))
 }
 
-/// Progetto della finestra chiamante (dall'etichetta, mai da un argomento).
-fn window_project_id(window: &WebviewWindow) -> Result<String> {
-    window.label().strip_prefix(PROJECT_PREFIX).map(String::from).ok_or_else(|| "questa finestra non è un progetto".into())
+/// Id del progetto di una finestra a partire dalla sua etichetta (`proj-<id>`); `None` per le altre finestre.
+pub fn project_id_of_label(label: &str) -> Option<&str> {
+    label.strip_prefix(PROJECT_PREFIX).filter(|id| !id.is_empty())
+}
+
+/// Progetto della finestra chiamante (dall'etichetta, mai da un argomento). Unico punto usato dai comandi.
+pub(crate) fn window_project_id(window: &WebviewWindow) -> Result<String> {
+    project_id_of_label(window.label()).map(String::from).ok_or_else(|| "questa finestra non è un progetto".into())
 }
 
 // ---------- menu ----------

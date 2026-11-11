@@ -1,11 +1,11 @@
 mod claude;
-/// Pubblico per i test di integrazione (`tests/security.rs`): il confinamento dei percorsi.
+/// Pubblici per i test di integrazione (`tests/security.rs`): confinamento dei percorsi, store, fiducia.
 pub mod fs_tree;
 mod lifecycle;
 mod projects;
 mod pty;
-mod store;
-mod trust;
+pub mod store;
+pub mod trust;
 
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -18,6 +18,7 @@ pub fn run() {
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
+        .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
         .plugin(tauri_plugin_opener::init())
