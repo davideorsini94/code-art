@@ -54,6 +54,11 @@ struct FsChanged {
     paths: Vec<String>,
 }
 
+#[derive(Serialize, Clone)]
+struct GitChanged {
+    repo: String,
+}
+
 // ---------- logica pura ----------
 
 pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
@@ -230,7 +235,17 @@ pub fn all_files(folders: &[PathBuf]) -> Vec<String> {
 
 // ---------- watcher ----------
 
-/// Percorsi che non vanno notificati: dentro `.git` (tranne `.git/HEAD`, serve al branch), `node_modules`, `target`.
+/// Dentro `.git` contano solo `HEAD`, `index` e `refs/**` (stato git visibile all'utente); i `.lock` sono transitori.
+fn is_git_state(rest: &[std::borrow::Cow<'_, str>]) -> bool {
+    match rest {
+        [f] => f == "HEAD" || f == "index",
+        [first, .., last] => first == "refs" && !last.ends_with(".lock"),
+        _ => false,
+    }
+}
+
+/// Percorsi che non vanno notificati: dentro `.git` (tranne `HEAD`, `index` e `refs/**`, che servono a branch e
+/// stato git), `node_modules`, `target`.
 /// Contano solo i componenti sotto la radice del progetto (una radice dentro `target/` non zittisce tutto).
 /// Fuori da ogni radice: si notifica.
 pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
@@ -242,7 +257,7 @@ pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
         return true;
     }
     match comps.iter().position(|c| c == ".git") {
-        Some(i) => !(comps.len() == i + 2 && comps[i + 1] == "HEAD"),
+        Some(i) => !is_git_state(&comps[i + 1..]),
         None => false,
     }
 }
@@ -254,6 +269,7 @@ pub struct Watchers(Mutex<HashMap<String, RecommendedWatcher>>);
 /// (Ri)avvia il watcher del progetto su tutte le sue cartelle; emette `fs:changed:<id progetto>` alla finestra del progetto.
 pub fn watch_project(app: &AppHandle, project: &Project) {
     let (tx, rx) = channel::<PathBuf>();
+    let (gtx, grx) = channel::<PathBuf>();
     // radici come date e canonicalizzate: gli eventi possono arrivare con l'uno o l'altro percorso
     let roots: Vec<PathBuf> = project
         .folders
@@ -264,6 +280,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
             for p in ev.paths.into_iter().filter(|p| !is_noise(&roots, p)) {
+                let _ = gtx.send(p.clone());
                 let _ = tx.send(p);
             }
         }
@@ -273,6 +290,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     for f in &project.folders {
         let _ = watcher.watch(Path::new(f), RecursiveMode::Recursive);
     }
+    watch_git(app, project, grx);
     let (handle, project_id) = (app.clone(), project.id.clone());
     std::thread::spawn(move || {
         // il thread termina quando il watcher (e quindi `tx`) viene distrutto
@@ -299,6 +317,43 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     if let Ok(mut map) = app.state::<Watchers>().0.lock() {
         map.insert(project.id.clone(), watcher);
     }
+}
+
+/// Debounce di `git:changed`.
+const GIT_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Raggruppa i percorsi cambiati per cartella del progetto che è radice di repository (`<cartella>/.git`).
+/// `folders`: (percorso come dato o canonico, cartella del progetto).
+fn changed_repos(folders: &[(PathBuf, String)], paths: &[PathBuf]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (root, folder) in folders {
+        if !out.contains(folder) && paths.iter().any(|p| p.starts_with(root)) && root.join(".git").exists() {
+            out.push(folder.clone());
+        }
+    }
+    out
+}
+
+/// Emette `git:changed {repo}` (debounce 300 ms) quando cambia un percorso non rumoroso di un repository.
+fn watch_git(app: &AppHandle, project: &Project, rx: std::sync::mpsc::Receiver<PathBuf>) {
+    let folders: Vec<(PathBuf, String)> = project
+        .folders
+        .iter()
+        .flat_map(|f| [Some(PathBuf::from(f)), Path::new(f).canonicalize().ok()].into_iter().flatten().map(|p| (p, f.clone())))
+        .collect();
+    let (handle, project_id) = (app.clone(), project.id.clone());
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut paths = vec![first];
+            let deadline = std::time::Instant::now() + GIT_DEBOUNCE;
+            while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                paths.push(p);
+            }
+            for repo in changed_repos(&folders, &paths) {
+                crate::projects::emit_to_project(&handle, &project_id, "git:changed", GitChanged { repo });
+            }
+        }
+    });
 }
 
 pub fn unwatch_project(app: &AppHandle, project_id: &str) {
@@ -607,12 +662,31 @@ mod tests {
         let roots = vec![PathBuf::from("/p")];
         let n = |p: &str| is_noise(&roots, Path::new(p));
         assert!(n("/p/.git/index.lock"));
-        assert!(n("/p/.git/refs/heads/x"));
+        assert!(!n("/p/.git/refs/heads/x"));
+        assert!(n("/p/.git/refs/heads/x.lock"));
         assert!(!n("/p/.git/HEAD"));
+        assert!(!n("/p/.git/index"));
+        assert!(n("/p/.git/objects/ab/cdef"));
+        assert!(n("/p/.git/config"));
+        assert!(n("/p/.git/logs/HEAD"));
         assert!(n("/p/node_modules/a/b.js"));
         assert!(n("/p/target/debug/x"));
         assert!(!n("/p/src/main.rs"));
         assert!(!n("/p/.gitignore"));
+    }
+
+    #[test]
+    fn changed_repos_picks_folders_with_a_git_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::create_dir_all(a.join(".git")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let folders = vec![(a.clone(), "A".to_string()), (a.clone(), "A".to_string()), (b.clone(), "B".to_string())];
+        let hit = |paths: &[PathBuf]| changed_repos(&folders, paths);
+        assert_eq!(hit(&[a.join("src/x.rs"), a.join(".git/index")]), vec!["A".to_string()]);
+        // cartella senza `.git`: nessun evento
+        assert!(hit(&[b.join("x.rs")]).is_empty());
+        assert!(hit(&[d.path().join("altro")]).is_empty());
     }
 
     #[test]

@@ -157,6 +157,11 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `search_start` | `query` (testo ≤ 1000 caratteri, regex, maiuscole, parola intera, ≤ 50 filtri `include`/`exclude` ≤ 200 caratteri) | progetto e cartelle dalla finestra chiamante; solo lettura, funziona anche in cartelle non fidate; nessun link simbolico seguito; salta `.gitignore`, rumore, binari e file > 2 MB; ≤ 10 000 risultati; una ricerca attiva per finestra (la nuova annulla la precedente) | finestra | — (legge file del progetto, nessun processo; eventi `search:hits`/`search:done` solo alla finestra del progetto) |
 | `search_cancel` | `id` | progetto dalla finestra chiamante; annulla solo la ricerca attiva di quella finestra | finestra | — |
 | `search_replace` | `query` (come `search_start`), `replacement` (≤ 5000 caratteri), `paths` (≤ 10 000) | progetto dalla finestra chiamante; **solo progetto fidato**; ogni percorso passa da `mutable_path` (confinato, link simbolici risolti); le corrispondenze si ricalcolano sul disco (i risultati della pagina non contano); conferma NATIVA del core («Annulla» predefinito, un dialogo per finestra); salta file non UTF-8, binari, > 2 MB o cambiati dopo la lettura (controllo dell'mtime nella scrittura) | finestra | — (scrive file del progetto, nessun processo) |
+| `git_repos` | — | progetto dalla finestra chiamante; **solo progetto fidato** (git esegue hook e `core.fsmonitor`); cartelle del progetto con `.git` | finestra | F (lettura; `.git` esiste) |
+| `git_status` | `repo` | **solo progetto fidato**; `repo` deve coincidere (percorso canonico) con una radice di `git_repos`; ≤ 5000 voci | finestra | P (`git status`, `git rev-parse`; argomenti come lista, `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, timeout 15 s) |
+| `git_diff` | `repo`, `path`, `staged` | come `git_status`; `path` relativo, senza `..`/`.`/radice/NUL, usato solo come `rev:percorso` (mai come opzione); il lato su disco passa da `ensure_inside` (link simbolici risolti); file > 2 MB o binari non restituiti | finestra | P (`git show`, timeout 15 s) |
+| `git_branches` | `repo` | come `git_status` | finestra | P (`git for-each-ref`) |
+| `git_log` | `repo`, `limit` | come `git_status`; `limit` limitato a 1–200 | finestra | P (`git log`) |
 | `tools_check` | — | — | globale | P (cerca `git`, `gh` e i language server nell'ambiente di login; non li esegue) |
 | `trust_check` | — | — | finestra | — |
 | `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
@@ -187,14 +192,14 @@ Rilassamenti e perché:
 ## Permessi Tauri (capabilities)
 
 `src-tauri/capabilities/project.json` (finestre `proj-*`):
-- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `pty:*`).
+- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `git:changed`, `pty:*`).
   Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
 
 **Come arrivano gli eventi di un progetto.** In Tauri 2 `emit_to(etichetta)` filtra solo gli ascoltatori
 registrati *per quella finestra*: un ascoltatore globale (`listen` senza finestra) di qualunque finestra li riceve
 tutti. Per questo:
 - ogni evento di progetto porta l'id del progetto nel **nome**: `conv:event:<id>`, `conv:upsert:<id>`,
-  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
+  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `git:changed:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
   costruisce il nome (`projects::project_event` / `emit_to_project` nel core, `src/lib/events.ts` nell'interfaccia,
   che lo ricava dal proprio progetto); il core lo emette con `emit_to` verso la sola finestra del progetto;
 - l'interfaccia ascolta solo con `getCurrentWebviewWindow().listen` (finestra corrente), mai con il `listen`

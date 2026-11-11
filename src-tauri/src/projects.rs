@@ -395,7 +395,7 @@ pub async fn project_pick_relocate(app: AppHandle, window: WebviewWindow, old: S
 }
 
 /// Lavoro sul disco fuori dal thread principale (i comandi sincroni di Tauri girano lì).
-async fn off_main<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+pub(crate) async fn off_main<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 

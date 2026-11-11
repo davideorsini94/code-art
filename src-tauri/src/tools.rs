@@ -57,15 +57,11 @@ fn find_tool_in(env: &HashMap<String, String>, name: &str, system_dirs: &[&str])
         .find(|p| is_executable(p))
 }
 
-// usata dai moduli git/gh/lsp dei task successivi
-#[allow(dead_code)]
 /// Cerca `name` nel `PATH` dell'ambiente di login, poi in Homebrew, `~/.cargo/bin` e `~/go/bin`.
 pub fn find_tool(env: &HashMap<String, String>, name: &str) -> Option<PathBuf> {
     find_tool_in(env, name, SYSTEM_DIRS)
 }
 
-// usata dai moduli git/gh/lsp dei task successivi
-#[allow(dead_code)]
 /// Comando per `name` con l'ambiente di login (la sessione propria la crea `run_tool`).
 pub fn tool_command(name: &str) -> Result<Command, String> {
     let env = env();
@@ -75,7 +71,6 @@ pub fn tool_command(name: &str) -> Result<Command, String> {
     Ok(cmd)
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ToolOutput {
     pub status: i32,
@@ -104,8 +99,6 @@ fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap
     });
 }
 
-// usata dai moduli git/gh/lsp dei task successivi
-#[allow(dead_code)]
 /// Esegue `cmd` (stdin chiuso o alimentato da `input`); allo scadere di `timeout` uccide il gruppo e
 /// restituisce "tempo scaduto". Non resta mai bloccata su pipe tenute aperte da discendenti.
 pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<ToolOutput, String> {
