@@ -19,13 +19,24 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
             let store = store::Store::open(&dir.join("codeart.db"))?;
-            app.manage(claude::engine::Engine::new(
-                claude::engine::app_launch(),
+            let launch = claude::engine::app_launch();
+            let sink: std::sync::Arc<dyn claude::engine::EventSink> = std::sync::Arc::new(claude::engine::TauriSink(app.handle().clone()));
+            let engine = claude::engine::Engine::new(
+                launch.clone(),
                 store.clone(),
-                std::sync::Arc::new(claude::engine::TauriSink(app.handle().clone())),
+                sink.clone(),
                 claude::sessions::default_root(),
                 claude::engine::image_dir(),
-            ));
+            );
+            let titles = claude::titles::TitleQueue::new(
+                store.clone(),
+                sink,
+                claude::sessions::default_root(),
+                std::sync::Arc::new(claude::titles::ClaudeRunner { launch }),
+            );
+            engine.set_titles(titles.clone());
+            app.manage(engine);
+            app.manage(titles);
             app.manage(store);
             projects::rebuild_menu(app.handle())?;
             projects::restore_windows(app.handle())?;
@@ -71,6 +82,8 @@ pub fn run() {
             claude::engine::conv_mark_viewed,
             claude::engine::conv_archive,
             claude::engine::conv_running,
+            claude::titles::conv_rename,
+            claude::titles::conv_unlock_title,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

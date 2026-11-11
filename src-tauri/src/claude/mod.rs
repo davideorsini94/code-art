@@ -6,6 +6,7 @@ pub mod locate;
 pub mod protocol;
 pub mod sessions;
 pub mod state;
+pub mod titles;
 
 /// Stato di una conversazione mostrato nell'interfaccia.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

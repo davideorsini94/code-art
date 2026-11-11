@@ -313,6 +313,50 @@ impl Store {
         Ok(())
     }
 
+    pub fn title_turn(&self, session_id: &str) -> Result<Option<i64>> {
+        let v: Option<Option<i64>> = self
+            .conn()
+            .query_row("SELECT title_turn FROM conversations WHERE session_id = ?1", [session_id], |r| r.get(0))
+            .optional()
+            .map_err(err)?;
+        Ok(v.flatten())
+    }
+
+    /// `title_turn` di ogni conversazione del progetto (`None` = mai titolata).
+    pub fn title_turns(&self, project_id: &str) -> Result<std::collections::HashMap<String, Option<i64>>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT session_id, title_turn FROM conversations WHERE project_id = ?1").map_err(err)?;
+        let rows = stmt.query_map([project_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))).map_err(err)?;
+        rows.map(|r| r.map_err(err)).collect()
+    }
+
+    /// Salva titolo e riassunto generati, solo se nel frattempo la conversazione non è stata bloccata
+    /// (titolo scelto dall'utente) né archiviata. Restituisce true se la riga è stata aggiornata.
+    pub fn apply_title_result(&self, c: &Conversation, title_turn: i64) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE conversations SET title = ?2, prev_title = ?3, title_changed_at = ?4, summary = ?5, title_turn = ?6
+                 WHERE session_id = ?1 AND title_locked = 0 AND archived = 0",
+                params![c.session_id, c.title, c.prev_title, c.title_changed_at, c.summary, title_turn],
+            )
+            .map_err(err)?;
+        Ok(n > 0)
+    }
+
+    /// Titolo scelto dall'utente: blocca la titolazione automatica.
+    pub fn rename_conversation(&self, session_id: &str, title: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET title = ?2, title_locked = 1 WHERE session_id = ?1", params![session_id, title])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn unlock_conversation_title(&self, session_id: &str) -> Result<()> {
+        self.conn().execute("UPDATE conversations SET title_locked = 0 WHERE session_id = ?1", [session_id]).map_err(err)?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn exec_for_test(&self, sql: &str, arg: &str) {
         self.conn().execute(sql, [arg]).unwrap();

@@ -702,8 +702,15 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
                 if !p.is_file() {
                     continue;
                 }
+                let before = p
+                    .file_stem()
+                    .and_then(|s| store.get_conversation(&s.to_string_lossy()).ok().flatten())
+                    .map(|c| c.turn_count);
                 if let Ok(Some(meta)) = sync_session_file(&store, &handle.state::<MetaCache>(), &project, &p) {
                     if let Ok(Some(mut conv)) = store.get_conversation(&meta.session_id) {
+                        if let Some(q) = handle.try_state::<super::titles::TitleQueue>() {
+                            q.after_file_sync(&conv, before);
+                        }
                         let running = handle.try_state::<Engine>().is_some_and(|e| e.is_running(&conv.session_id));
                         fill_elsewhere(&mut conv, &dirs, now_ms(), running);
                         let _ = handle.emit_to(label.as_str(), "conv:upsert", conv);
@@ -743,7 +750,15 @@ pub async fn conv_list(app: AppHandle, window: WebviewWindow, project_id: String
     tauri::async_runtime::spawn_blocking(move || {
         let engine = app.state::<Engine>();
         let running = |id: &str| engine.is_running(id);
-        sync_project_sessions(&default_root(), &app.state::<Store>(), &app.state::<MetaCache>(), &project, now_ms(), &running)
+        super::titles::sync_and_enqueue(
+            &app.state::<super::titles::TitleQueue>(),
+            &default_root(),
+            &app.state::<Store>(),
+            &app.state::<MetaCache>(),
+            &project,
+            now_ms(),
+            &running,
+        )
     })
     .await
     .map_err(err)?
@@ -753,7 +768,10 @@ pub async fn conv_list(app: AppHandle, window: WebviewWindow, project_id: String
 pub async fn conv_history(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<Vec<ChatItem>> {
     let project = window_project(&window, &app.state::<Store>())?;
     tauri::async_runtime::spawn_blocking(move || {
-        history_in(&default_root(), &app.state::<Store>(), &project, &session_id)
+        let items = history_in(&default_root(), &app.state::<Store>(), &project, &session_id)?;
+        // la scheda aperta di una sessione mai titolata (oltre le 20 importate) la mette in coda
+        app.state::<super::titles::TitleQueue>().enqueue_if_due(&session_id);
+        Ok(items)
     })
     .await
     .map_err(err)?

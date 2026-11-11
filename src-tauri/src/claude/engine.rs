@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 
 /// Tetto per `Unknown.json` negli eventi (le righe utente riemesse possono contenere immagini base64).
 const UNKNOWN_JSON_CAP: usize = 4096;
@@ -121,6 +121,7 @@ struct Inner {
     sessions_root: PathBuf,
     image_dir: PathBuf,
     convs: Mutex<HashMap<String, Arc<Conv>>>,
+    titles: OnceLock<super::titles::TitleQueue>,
 }
 
 /// Stato condiviso dell'app (non della finestra): i processi sopravvivono alla chiusura della finestra.
@@ -131,7 +132,12 @@ impl Engine {
     pub fn new(launch: Arc<LaunchCell>, store: Store, sink: Arc<dyn EventSink>, sessions_root: PathBuf, image_dir: PathBuf) -> Engine {
         // nessun processo è vivo alla creazione del motore (= avvio dell'app)
         let _ = store.reset_working_conversations();
-        Engine(Arc::new(Inner { launch, store, sink, sessions_root, image_dir, convs: Mutex::new(HashMap::new()) }))
+        Engine(Arc::new(Inner { launch, store, sink, sessions_root, image_dir, convs: Mutex::new(HashMap::new()), titles: OnceLock::new() }))
+    }
+
+    /// Coda di titolazione (impostata una volta all'avvio dell'app): a fine turno decide se ritolare.
+    pub fn set_titles(&self, q: super::titles::TitleQueue) {
+        let _ = self.0.titles.set(q);
     }
 
     fn claude_path(&self) -> Option<PathBuf> {
@@ -547,6 +553,9 @@ impl Engine {
             if changed {
                 self.emit_upsert(session_id);
             }
+            if matches!(ev, ClaudeEvent::TurnEnd { .. }) {
+                self.0.titles.get().inspect(|q| q.enqueue_if_due(session_id));
+            }
         }
     }
 
@@ -934,6 +943,34 @@ mod tests {
         env.engine.mark_viewed("p1", &sid).unwrap();
         assert_eq!(status(&env, &sid), "idle");
         assert!(env.engine.mark_viewed("p2", &sid).is_err());
+    }
+
+    #[test]
+    fn turn_end_hands_the_conversation_to_the_title_queue() {
+        struct Spy;
+        impl super::super::titles::TitleRunner for Spy {
+            fn run(&self, _prompt: &str) -> Option<String> {
+                Some(r#"{"title":"Saluto iniziale","summary":"Si e' salutato."}"#.into())
+            }
+        }
+        let fx = fixture("simple-turn");
+        let env = setup(&[("FAKE_CLAUDE_FIXTURE", &fx)]);
+        env.engine.set_titles(super::super::titles::TitleQueue::new(
+            env.store.clone(),
+            env.sink.clone(),
+            env.sessions_root.clone(),
+            Arc::new(Spy),
+        ));
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        // il finto `claude` non scrive il file di sessione: ne serve uno con il testo da riassumere
+        let cwd = env.store.get_conversation(&sid).unwrap().unwrap().cwd;
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = json!({"type":"user","uuid":"u1","isSidechain":false,"cwd":cwd,"sessionId":sid,"timestamp":"2026-11-11T09:00:01.000Z","promptSource":"sdk","message":{"role":"user","content":"ciao"}});
+        std::fs::write(dir.join(format!("{sid}.jsonl")), format!("{line}\n")).unwrap();
+        env.engine.send("p1", &sid, "ciao", &[]).unwrap();
+        wait_until("titolo generato", || env.store.get_conversation(&sid).unwrap().unwrap().title == "Saluto iniziale");
+        assert_eq!(env.store.title_turn(&sid).unwrap(), Some(1));
     }
 
     #[test]
