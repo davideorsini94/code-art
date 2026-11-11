@@ -1,44 +1,44 @@
 # Code Art
 
-Un IDE personale per Mac, leggero e veloce, costruito attorno alle conversazioni con [Claude Code](https://claude.com/claude-code).
+A lightweight, fast personal IDE for Mac, built around your conversations with [Claude Code](https://claude.com/claude-code).
 
-> **Stato: in costruzione.** È in corso la tappa 1 (ramo [`tappa-1`](../../tree/tappa-1)). Non c'è ancora una versione installabile.
+> **Status: under construction.** Stage 1 is in progress on the [`tappa-1`](../../tree/tappa-1) branch. There is no installable build yet.
 
-## Perché
+## Why
 
-Chi sviluppa ogni giorno con Claude Code dentro un editor tradizionale finisce con le conversazioni sparse fra i tab dei file, tutte con titoli poco parlanti. Code Art ribalta la prospettiva:
+If you develop with Claude Code every day inside a traditional editor, your conversations end up scattered among file tabs, all with titles that tell you nothing. Code Art flips the perspective:
 
-- **Una finestra per progetto**, e il titolo della finestra è il nome del progetto: in Mission Control si capisce subito cosa è cosa.
-- **Le conversazioni al centro**, in una colonna dedicata con schede leggibili invece di una fila di tab.
-- **Titoli vivi**: ogni conversazione prende il nome del suo argomento principale e lo aggiorna da sola quando l'argomento cambia.
-- **Stato a colpo d'occhio**: *al lavoro*, *aspetta te*, *inattiva*, con notifica e badge nel Dock quando Claude ha bisogno di una risposta.
-- **Le sessioni Claude Code esistenti** compaiono subito: il motore è la CLI `claude` già installata, con i suoi plugin, skill, agenti e server MCP.
+- **One window per project**, and the window title is the project name, so Mission Control tells you at a glance which is which.
+- **Conversations at the center**, in a dedicated column of readable cards instead of a row of tabs.
+- **Living titles**: each conversation is named after its main topic and renames itself when the topic changes.
+- **Status at a glance**: *working*, *waiting for you*, *idle*, with a notification and a Dock badge when Claude needs an answer.
+- **Your existing Claude Code sessions** show up right away: the engine is the `claude` CLI you already have installed, with its plugins, skills, agents and MCP servers.
 
-Il tutto in un tema scuro in stile "liquid glass", con editor, terminale, albero dei file e ricerca nella stessa finestra.
+All of it in a dark "liquid glass" theme, with editor, terminal, file tree and search in the same window.
 
-## Tappe
+## Roadmap
 
-| Tappa | Contenuto | Stato |
+| Stage | Scope | Status |
 |---|---|---|
-| 1. Il cuore | Finestre per progetto, albero file, editor, terminale, conversazioni Claude con titoli vivi e stati, tema liquid glass | in corso |
-| 2. Strumenti da dev | Git e GitHub (commit, branch, merge, pull request, creazione repo), ricerca nel progetto, completamento del codice | da fare |
-| 3. SSH | Server salvati, cartelle remote nell'albero, trascinamento file tra Mac e server, terminale remoto | da fare |
-| 4. Database | PostgreSQL, MongoDB, Oracle: query, griglia dei risultati modificabile | da fare |
+| 1. The core | Per-project windows, file tree, editor, terminal, Claude conversations with living titles and statuses, liquid glass theme | in progress |
+| 2. Developer tools | Git and GitHub (commit, branch, merge, pull requests, repo creation), project-wide search, code completion | planned |
+| 3. SSH | Saved servers, remote folders in the tree, drag and drop between Mac and server, remote terminal | planned |
+| 4. Databases | PostgreSQL, MongoDB, Oracle: queries, editable result grid | planned |
 
-Il design completo è in [`docs/superpowers/specs`](docs/superpowers/specs/2026-11-11-code-art-ide-design.md), il piano della tappa 1 in [`docs/superpowers/plans`](docs/superpowers/plans/2026-11-11-code-art-tappa-1-il-cuore.md).
+The full design is in [`docs/superpowers/specs`](docs/superpowers/specs/2026-11-11-code-art-ide-design.md) and the stage 1 plan in [`docs/superpowers/plans`](docs/superpowers/plans/2026-11-11-code-art-tappa-1-il-cuore.md) (both in Italian).
 
-## Tecnologia
+## Tech stack
 
-- [Tauri 2](https://tauri.app) — guscio nativo in Rust con la WebView di sistema, senza Chromium incorporato
-- [Svelte 5](https://svelte.dev) + TypeScript + Vite per l'interfaccia
-- [Monaco](https://microsoft.github.io/monaco-editor/) per l'editor, [xterm.js](https://xtermjs.org) per il terminale
-- SQLite per i dati dell'app; i file di Claude Code in `~/.claude` vengono solo letti, mai modificati
+- [Tauri 2](https://tauri.app): a native Rust shell using the system WebView, with no bundled Chromium
+- [Svelte 5](https://svelte.dev) + TypeScript + Vite for the interface
+- [Monaco](https://microsoft.github.io/monaco-editor/) for the editor, [xterm.js](https://xtermjs.org) for the terminal
+- SQLite for app data; Claude Code's files in `~/.claude` are only ever read, never modified
 
-## Sviluppo
+## Development
 
-Requisiti: macOS, [Rust](https://rustup.rs), Node 22+, [pnpm](https://pnpm.io), e la CLI `claude` installata e autenticata.
+Requirements: macOS, [Rust](https://rustup.rs), Node 22+, [pnpm](https://pnpm.io), and the `claude` CLI installed and signed in.
 
-Il codice è sul ramo `tappa-1`:
+The code lives on the `tappa-1` branch:
 
 ```bash
 git clone https://github.com/davideorsini94/code-art.git
@@ -48,7 +48,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Test e controlli:
+Tests and checks:
 
 ```bash
 pnpm vitest run
@@ -56,6 +56,6 @@ pnpm typecheck
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-## Fuori dagli obiettivi
+## Non-goals
 
-Compatibilità con le estensioni di VS Code, Windows e Linux, sviluppo remoto con agente sul server, debugger grafico, tema chiaro.
+VS Code extension compatibility, Windows and Linux, remote development with a server-side agent, a graphical debugger, a light theme.
