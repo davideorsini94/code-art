@@ -10,7 +10,7 @@
   const GAP = 8
   const ROW = CARD + GAP
   const MENU_W = 170
-  const MENU_H = 112
+  const MENU_H = 140
 
   let now = $state(Date.now())
   let renamingId = $state<string | null>(null)
@@ -105,6 +105,7 @@
     <button role="menuitem" onclick={() => { void conversations.archive(menu!.id, !menu!.archived); menu = null }}>
       {menu.archived ? 'Ripristina' : 'Archivia'}
     </button>
+    <button role="menuitem" onclick={() => { void conversations.delete(menu!.id); menu = null }}>Elimina…</button>
   </div>
 {/if}
 

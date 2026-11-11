@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod commands;
+pub mod delete;
 pub mod engine;
 pub mod locate;
 pub mod protocol;

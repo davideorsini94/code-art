@@ -123,6 +123,14 @@ impl Lifecycle {
         Observed { changed: old.is_none_or(|(s, a)| s != st || a != c.archived), prev: old.map(|(s, _)| s) }
     }
 
+    /// Conversazione eliminata: nessuna notifica o stato da ricordare.
+    pub fn forget(&self, session_id: &str) {
+        lock(&self.seen).remove(session_id);
+        lock(&self.pending).remove(session_id);
+        lock(&self.notifications).retain(|(_, s, _)| s != session_id);
+        lock(&self.silenced).remove(session_id);
+    }
+
     fn remember_notification(&self, session_id: &str, project_id: &str) -> i32 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let mut list = lock(&self.notifications);
@@ -199,6 +207,16 @@ pub struct LifecycleSink {
 
 impl EventSink for LifecycleSink {
     fn emit(&self, project_id: &str, event: &str, payload: Value) {
+        if event == "conv:removed" {
+            // conversazione eliminata: via dalla memoria delle notifiche e numero del Dock ricalcolato
+            if let Some(id) = payload["sessionId"].as_str() {
+                self.life.forget(id);
+            }
+            self.inner.emit(project_id, event, payload);
+            let (app, life, store) = (self.app.clone(), self.life.clone(), self.store.clone());
+            std::thread::spawn(move || update_badge(&app, &life, &store));
+            return;
+        }
         if event != "conv:upsert" {
             return self.inner.emit(project_id, event, payload);
         }

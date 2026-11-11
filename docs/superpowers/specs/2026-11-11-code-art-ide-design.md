@@ -154,7 +154,11 @@ Agent SDK (Node è già sulla macchina). Il resto del design non cambia.
 All'apertura di un progetto l'app legge le sessioni già presenti in
 `~/.claude/projects/<cartella-codificata>/*.jsonl` e le mostra come
 conversazioni riprendibili. L'app **non modifica mai** quei file: titoli e
-stati vivono nel suo SQLite, legati all'id di sessione.
+stati vivono nel suo SQLite, legati all'id di sessione. **Unica eccezione,
+richiesta dal proprietario dopo la prova** ("devo poter eliminare anche le
+conversazioni di Claude"): «Elimina conversazione» sposta nel Cestino di macOS
+il file di sessione e l'eventuale cartella `<id>/` accanto, mai cancellazione
+definitiva, solo dopo una conferma nativa mostrata dal core (vedi §11 bis).
 
 **Convivenza con VS Code e terminale** [scelta mia]: l'app sorveglia quelle
 cartelle di sessioni, quindi una conversazione creata o proseguita altrove
@@ -324,6 +328,14 @@ potenzialmente compromessa: il core Rust non si fida di ciò che gli chiede.
   dentro le cartelle del progetto della finestra che lo chiama (dopo
   risoluzione di `..` e link simbolici). I permessi Tauri sono il minimo
   necessario, per finestra.
+- **Eccezione alla sola lettura di `~/.claude` (richiesta del proprietario).**
+  `conv_delete` sposta nel Cestino il file di sessione (e la cartella `<id>/`
+  accanto) di una conversazione del progetto della finestra, solo se il
+  progetto è fidato: il file si trova unendo le cartelle di sessione note del
+  progetto con `<id>.jsonl` (mai un percorso dalla pagina), si rifiutano link
+  simbolici e percorsi fuori dalla radice delle sessioni, e la conferma è un
+  dialogo nativo aperto dal core (titolo fisso, «Annulla» predefinito) che la
+  WebView non può aggirare. È l'unico punto in cui l'app scrive in `~/.claude`.
 - **Processi senza shell.** `claude`, `git`, `gh` e simili sono avviati con
   lista di argomenti, mai componendo una riga di comando da testo.
 - **Segreti solo nel Portachiavi macOS.** Password SSH e DB non finiscono mai

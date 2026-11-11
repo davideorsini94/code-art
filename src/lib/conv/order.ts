@@ -38,3 +38,16 @@ export function windowRange(count: number, scrollTop: number, viewport: number, 
 
 export const waitingLabel = (n: number): string => `${n} ${n === 1 ? 'ti aspetta' : 'ti aspettano'}`
 export const activeLabel = (n: number): string => (n === 1 ? '1 conversazione attiva' : `${n} conversazioni attive`)
+
+/** Senza la conversazione eliminata; restituisce una nuova lista. */
+export const removeConversation = (list: Conversation[], sessionId: string): Conversation[] => list.filter((c) => c.sessionId !== sessionId)
+
+/** Conversazione da selezionare dopo una rimozione: se quella rimossa non era l'attiva resta l'attiva; altrimenti
+ *  la scheda successiva della colonna visibile (`visible`, nell'ordine mostrato), poi la precedente, poi nessuna. */
+export function nextActiveAfterRemoval(visible: Conversation[], activeId: string | null, removedId: string): string | null {
+  if (activeId !== removedId) return activeId
+  const i = visible.findIndex((c) => c.sessionId === removedId)
+  const rest = visible.filter((c) => c.sessionId !== removedId)
+  if (rest.length === 0) return null
+  return rest[Math.min(Math.max(i, 0), rest.length - 1)].sessionId
+}

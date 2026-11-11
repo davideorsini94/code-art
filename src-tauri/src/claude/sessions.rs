@@ -395,6 +395,11 @@ pub struct MetaCache {
 }
 
 impl MetaCache {
+    /// Dimentica un file (conversazione eliminata): se ricomparisse sarebbe riletto per intero.
+    pub fn forget(&self, file: &Path) {
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).remove(file);
+    }
+
     pub fn read(&self, file: &Path) -> Result<SessionMeta> {
         let md = std::fs::metadata(file).map_err(err)?;
         let (size, mtime) = (md.len(), mtime_ms(&md));

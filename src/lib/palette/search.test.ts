@@ -47,6 +47,7 @@ describe('commands', () => {
         'Rinomina progetto',
         'Mostra/nascondi terminale',
         'Archivia conversazione',
+        'Elimina conversazione',
         'Cambia modalità permessi predefinita',
       ]),
     )

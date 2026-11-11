@@ -29,6 +29,7 @@ class ChatStore {
   private queue = new Map<string, ClaudeEvent[]>()
   private scheduled = false
   private unlisten: UnlistenFn | null = null
+  private unlistenRemoved: UnlistenFn | null = null
   private generation = 0
 
   get(sessionId: string | null): ChatState | undefined {
@@ -41,12 +42,29 @@ class ChatStore {
     const un = await listen<ConvEventPayload>('conv:event', (ev) => this.onEvent(ev.payload))
     if (gen !== this.generation) return un()
     this.unlisten = un
+    const unRemoved = await listen<{ sessionId: string }>('conv:removed', (ev) => this.drop(ev.payload.sessionId))
+    if (gen !== this.generation) return unRemoved()
+    this.unlistenRemoved = unRemoved
   }
 
   stop() {
     this.generation++
     this.unlisten?.()
     this.unlisten = null
+    this.unlistenRemoved?.()
+    this.unlistenRemoved = null
+  }
+
+  /** Conversazione eliminata: via lo stato in cache, gli eventi in attesa e gli errori. */
+  drop(sessionId: string) {
+    this.order = this.order.filter((s) => s !== sessionId)
+    this.queue.delete(sessionId)
+    this.buffering.delete(sessionId)
+    if (sessionId in this.states) {
+      const { [sessionId]: _drop, ...rest } = this.states
+      this.states = rest
+    }
+    this.setError(sessionId, null)
   }
 
   errorFor(sessionId: string | null): string | null {

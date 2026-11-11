@@ -275,6 +275,16 @@ impl TitleQueue {
         }
     }
 
+    /// Conversazione eliminata: toglie dalla coda il lavoro in attesa (uno già in corso trova la riga sparita).
+    pub fn forget(&self, session_id: &str) {
+        let mut st = lock(&self.0.state);
+        if let Some(pos) = st.pending.iter().position(|s| s == session_id) {
+            st.pending.remove(pos);
+            st.known.remove(session_id);
+        }
+        st.failed.remove(session_id);
+    }
+
     fn worker(&self) {
         loop {
             let sid = {

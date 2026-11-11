@@ -62,6 +62,8 @@ export const convSetPermissionMode = (sessionId: string, mode: string) =>
   invoke<void>('conv_set_permission_mode', { sessionId, mode })
 export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_viewed', { sessionId })
 export const convArchive = (sessionId: string, archived: boolean) => invoke<void>('conv_archive', { sessionId, archived })
+/** Elimina la conversazione (file di sessione nel Cestino) dopo una conferma NATIVA mostrata dal core. */
+export const convDelete = (sessionId: string) => invoke<'deleted' | 'cancelled'>('conv_delete', { sessionId })
 export const convRunning = (projectId: string) => invoke<string[]>('conv_running', { projectId })
 /** Ferma il processo della conversazione (interrompe un turno in corso); si riprende al prossimo invio. */
 export const convStop = (sessionId: string) => invoke<void>('conv_stop', { sessionId })

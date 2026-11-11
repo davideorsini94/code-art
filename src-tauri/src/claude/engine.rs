@@ -465,6 +465,46 @@ impl Engine {
         Ok(())
     }
 
+    /// `conv_delete`: elimina la conversazione (richiesta del proprietario, eccezione voluta alla sola lettura di
+    /// `~/.claude`). Ordine: appartenenza, progetto fidato, individuazione dei file, conferma (`confirm`, il
+    /// dialogo nativo; riceve il titolo), poi processo fermato, titolazione tolta dalla coda, file nel Cestino
+    /// (`trasher`), riga dello store e cache dei metadati dimenticate, evento `conv:removed`.
+    /// Se il file non si può spostare non cambia nient'altro (a parte il processo, già fermato).
+    pub fn delete_conversation(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        cache: &sessions::MetaCache,
+        confirm: &dyn Fn(&str) -> bool,
+        trasher: &dyn super::delete::Trasher,
+    ) -> Result<super::delete::DeleteOutcome> {
+        use super::delete::{locate, trash_files, DeleteOutcome};
+        let conv = self.owned_conv(project_id, session_id)?;
+        crate::trust::ensure_project_trusted(&self.0.store, project_id)?;
+        let project = self.project(project_id)?;
+        let files = locate(&self.0.sessions_root, &project.folders, session_id)?;
+        if !confirm(&conv.title) {
+            return Ok(DeleteOutcome::Cancelled);
+        }
+        self.stop(session_id);
+        if let Some(q) = self.0.titles.get() {
+            q.forget(session_id);
+        }
+        if let Some(f) = &files {
+            let real = f.file.canonicalize().ok(); // il watcher usa il percorso canonico: da calcolare prima
+            trash_files(trasher, f)?;
+            cache.forget(&f.file);
+            if let Some(real) = real {
+                cache.forget(&real);
+            }
+        }
+        self.0.store.delete_conversation(session_id)?;
+        lock(&self.0.exits).remove(session_id);
+        lock(&self.0.interrupted).remove(session_id);
+        self.0.sink.emit(project_id, "conv:removed", json!({"sessionId": session_id}));
+        Ok(DeleteOutcome::Deleted)
+    }
+
     /// Messaggio di controllo a processo vivo (§8); senza processo il valore salvato vale alla ripresa.
     fn control(&self, session_id: &str, request: Value) -> Result<()> {
         let Some(conv) = self.live(session_id) else { return Ok(()) };
@@ -1562,6 +1602,166 @@ mod tests {
         env.engine.archive("p1", &sid, true).unwrap();
         assert!(!env.engine.is_running(&sid));
         assert!(env.store.get_conversation(&sid).unwrap().unwrap().archived);
+    }
+
+    // ---------- eliminazione ----------
+
+    use crate::claude::delete::{DeleteOutcome, Trasher};
+    use crate::claude::sessions::MetaCache;
+
+    /// Finto Cestino: registra i percorsi e li toglie dal disco temporaneo (mai il vero Cestino).
+    #[derive(Default)]
+    struct FakeTrash(Mutex<Vec<PathBuf>>);
+    impl Trasher for FakeTrash {
+        fn trash(&self, path: &Path) -> Result<()> {
+            self.0.lock().unwrap().push(path.to_path_buf());
+            if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
+        }
+    }
+    impl FakeTrash {
+        fn taken(&self) -> Vec<PathBuf> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    const DEL_SID: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// Sessione importata dal disco: file `.jsonl` nella cartella delle sessioni di `folder`, riga sincronizzata.
+    fn disk_session(env: &Env, folder: usize, sid: &str, project: &str) -> PathBuf {
+        let cwd = env.folders[folder].to_string_lossy().into_owned();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"u\",\"isSidechain\":false,\"cwd\":{cwd:?},\"sessionId\":\"{sid}\",\"timestamp\":\"2026-11-11T09:00:00.000Z\",\"promptSource\":\"sdk\",\"message\":{{\"role\":\"user\",\"content\":\"ciao\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        env.store.upsert_synced_conversation(project, sid, &cwd, "Titolo", 1, 1).unwrap();
+        file
+    }
+
+    fn removed(env: &Env, sid: &str) -> usize {
+        env.sink.0.lock().unwrap().iter().filter(|(_, e, p)| e == "conv:removed" && p["sessionId"] == sid).count()
+    }
+
+    #[test]
+    fn delete_trashes_file_and_sibling_dir_drops_row_and_emits() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let sibling = file.parent().unwrap().join(DEL_SID);
+        std::fs::create_dir_all(sibling.join("subagents")).unwrap();
+        let (cache, trash) = (MetaCache::default(), FakeTrash::default());
+        cache.read(&file).unwrap();
+        let asked = Mutex::new(Vec::new());
+        let out = env
+            .engine
+            .delete_conversation("p1", DEL_SID, &cache, &|t| { asked.lock().unwrap().push(t.to_string()); true }, &trash)
+            .unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert_eq!(*asked.lock().unwrap(), vec!["Titolo".to_string()]);
+        assert_eq!(trash.taken(), vec![file.clone(), sibling.clone()]);
+        assert!(!file.exists() && !sibling.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
+        assert_eq!(removed(&env, DEL_SID), 1);
+        let before = cache.full_reads.load(std::sync::atomic::Ordering::Relaxed);
+        std::fs::write(&file, "{}\n").unwrap();
+        cache.read(&file).unwrap();
+        assert_eq!(cache.full_reads.load(std::sync::atomic::Ordering::Relaxed), before + 1, "la cache non ricorda più il file");
+    }
+
+    #[test]
+    fn delete_cancelled_changes_nothing() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let trash = FakeTrash::default();
+        let out = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| false, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Cancelled);
+        assert!(trash.taken().is_empty() && file.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn delete_of_another_projects_session_is_refused_without_asking() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 1, DEL_SID, "p2");
+        let trash = FakeTrash::default();
+        let asked = Mutex::new(false);
+        let err = env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| { *asked.lock().unwrap() = true; true }, &trash);
+        assert!(err.is_err());
+        assert!(!*asked.lock().unwrap() && trash.taken().is_empty() && file.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_in_untrusted_project_is_refused() {
+        let env = setup(&[]);
+        let cwd = env.folders[0].parent().unwrap().join("estranea");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let folder = cwd.to_string_lossy().into_owned();
+        env.store.upsert_project(&Project { id: "p3".into(), name: "x".into(), folders: vec![folder.clone()] }).unwrap();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&folder));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{DEL_SID}.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        env.store.upsert_synced_conversation("p3", DEL_SID, &folder, "T", 1, 1).unwrap();
+        let trash = FakeTrash::default();
+        let err = env.engine.delete_conversation("p3", DEL_SID, &MetaCache::default(), &|_| true, &trash).unwrap_err();
+        assert_eq!(err, crate::trust::UNTRUSTED);
+        assert!(trash.taken().is_empty() && file.exists());
+    }
+
+    #[test]
+    fn delete_refuses_symlinked_file_and_invalid_ids() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let real = file.with_extension("orig");
+        std::fs::rename(&file, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        let trash = FakeTrash::default();
+        assert!(env.engine.delete_conversation("p1", DEL_SID, &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(env.engine.delete_conversation("p1", "../x", &MetaCache::default(), &|_| true, &trash).is_err());
+        assert!(trash.taken().is_empty() && real.exists());
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_some());
+        assert_eq!(removed(&env, DEL_SID), 0);
+    }
+
+    #[test]
+    fn delete_stops_a_running_conversation_first() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        assert!(env.engine.is_running(&sid));
+        let cwd = env.folders[0].to_string_lossy().into_owned();
+        let dir = env.sessions_root.join(sessions::encode_project_dir(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        let trash = FakeTrash::default();
+        let out = env.engine.delete_conversation("p1", &sid, &MetaCache::default(), &|_| true, &trash).unwrap();
+        assert_eq!(out, DeleteOutcome::Deleted);
+        assert!(!env.engine.is_running(&sid));
+        assert_eq!(trash.taken(), vec![file]);
+        assert!(env.store.get_conversation(&sid).unwrap().is_none());
+        assert_eq!(removed(&env, &sid), 1);
+    }
+
+    #[test]
+    fn deleted_conversation_is_not_reimported_by_a_later_sync() {
+        let env = setup(&[]);
+        let file = disk_session(&env, 0, DEL_SID, "p1");
+        let cache = MetaCache::default();
+        let project = env.store.get_project("p1").unwrap().unwrap();
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &cache, &project, 0, &|_| false).unwrap();
+        assert_eq!(list.len(), 1);
+        env.engine.delete_conversation("p1", DEL_SID, &cache, &|_| true, &FakeTrash::default()).unwrap();
+        assert!(!file.exists());
+        let list = sessions::sync_project_sessions(&env.sessions_root, &env.store, &cache, &project, 0, &|_| false).unwrap();
+        assert!(list.is_empty());
+        // il watcher, vedendo sparire il file, lo salta (`is_file`): niente errore, niente riga
+        assert!(env.store.get_conversation(DEL_SID).unwrap().is_none());
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub fn run() {
         .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
+        .manage(claude::delete::DeletePrompts::default())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             let dir = app.path().home_dir()?.join("Library/Application Support/CodeArt");
@@ -114,6 +115,7 @@ pub fn run() {
             claude::commands::conv_archive,
             claude::commands::conv_running,
             claude::commands::conv_stop,
+            claude::commands::conv_delete,
             claude::commands::conv_save_image,
             claude::commands::conv_pending,
             claude::titles::conv_rename,

@@ -166,5 +166,13 @@ export const commands: Command[] = [
       if (id) void conversations.archive(id, true)
     },
   },
+  {
+    id: 'conv.delete',
+    title: 'Elimina conversazione',
+    run: () => {
+      const id = conversations.activeId
+      if (id) void conversations.delete(id) // la conferma è il dialogo nativo del core
+    },
+  },
   { id: 'settings.permissionMode', title: 'Cambia modalità permessi predefinita', run: () => hooks.openModes() },
 ]

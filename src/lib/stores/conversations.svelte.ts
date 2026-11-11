@@ -1,7 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { convArchive, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
+import { convArchive, convDelete, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
 import { errorText } from '../errors'
-import { activeCount, sortConversations, upsertConversation, waitingCount } from '../conv/order'
+import { activeCount, nextActiveAfterRemoval, removeConversation, sortConversations, upsertConversation, waitingCount } from '../conv/order'
 import { clearDraft } from '../conv/draft'
 import type { Conversation } from '../types'
 
@@ -17,6 +17,7 @@ class ConversationStore {
   private projectId: string | null = null
   private unlisten: UnlistenFn | null = null
   private unlistenFocus: UnlistenFn | null = null
+  private unlistenRemoved: UnlistenFn | null = null
   private generation = 0
 
   list = $derived(sortConversations(this.all, this.showArchived))
@@ -31,6 +32,7 @@ class ConversationStore {
     const gen = ++this.generation
     let loading = true
     const early: Conversation[] = []
+    const removedEarly: string[] = []
     this.error = null
     try {
       const un = await listen<Conversation>('conv:upsert', (ev) => {
@@ -46,6 +48,13 @@ class ConversationStore {
       })
       if (gen !== this.generation) return unFocus()
       this.unlistenFocus = unFocus
+      const unRemoved = await listen<{ sessionId: string }>('conv:removed', (ev) => {
+        if (gen !== this.generation) return
+        if (loading) removedEarly.push(ev.payload.sessionId)
+        else this.remove(ev.payload.sessionId)
+      })
+      if (gen !== this.generation) return unRemoved()
+      this.unlistenRemoved = unRemoved
       this.all = await convList(projectId)
     } catch (e) {
       this.error = errorText(e)
@@ -53,6 +62,7 @@ class ConversationStore {
     if (gen !== this.generation) return
     loading = false
     for (const c of early) this.upsert(c)
+    for (const id of removedEarly) this.remove(id)
   }
 
   stop() {
@@ -61,6 +71,8 @@ class ConversationStore {
     this.unlisten = null
     this.unlistenFocus?.()
     this.unlistenFocus = null
+    this.unlistenRemoved?.()
+    this.unlistenRemoved = null
   }
 
   /** Da ogni evento `init` (i comandi e il modello possono cambiare). */
@@ -70,6 +82,14 @@ class ConversationStore {
 
   upsert(c: Conversation) {
     this.all = upsertConversation(this.all, c)
+  }
+
+  /** `conv:removed`: via dalla lista (anche le archiviate), bozza cancellata; se era l'attiva si passa alla
+   *  scheda successiva o a nessuna. */
+  remove(sessionId: string) {
+    this.activeId = nextActiveAfterRemoval(this.list, this.activeId, sessionId)
+    this.all = removeConversation(this.all, sessionId)
+    clearDraft(sessionId)
   }
 
   async select(id: string) {
@@ -105,6 +125,9 @@ class ConversationStore {
 
   rename = (id: string, title: string) => this.run(() => convRename(id, title))
   unlockTitle = (id: string) => this.run(() => convUnlockTitle(id))
+  /** La conferma è la finestra nativa aperta dal core: qui nessun "sei sicuro?". La rimozione dalla lista arriva
+   *  con `conv:removed`. */
+  delete = (id: string) => this.run(() => convDelete(id))
   archive = (id: string, archived: boolean) =>
     this.run(async () => {
       await convArchive(id, archived)

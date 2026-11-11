@@ -61,6 +61,19 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
 - **Processi senza shell**: sempre lista di argomenti (sotto).
 - **Impostazioni**: `settings_get`/`settings_set` accettano solo chiavi in whitelist (`default_permission_mode`)
   con valore validato.
+- **Eliminazione delle conversazioni (unica eccezione alla sola lettura di `~/.claude`)**: richiesta del
+  proprietario dopo la prova. `conv_delete` (`src-tauri/src/claude/delete.rs`, `Engine::delete_conversation`)
+  sposta nel Cestino di macOS (mai cancellazione definitiva, recuperabile) il file di sessione e l'eventuale
+  cartella `<id>/` accanto. Misure: conversazione del progetto della finestra chiamante e progetto fidato
+  (`untrusted_folder` altrimenti); `sessionId` validato con `valid_session_id`; il file si individua solo unendo
+  le cartelle di sessione note del progetto (`session_dirs_for`) con `<id>.jsonl`, mai da un percorso della
+  pagina; rifiutato se è un link simbolico o se, canonicalizzato, esce dalla radice delle sessioni (la cartella
+  `<id>/` si sposta solo se è una vera cartella dentro la radice); conferma NATIVA aperta dal core ("Eliminare la
+  conversazione?", titolo della conversazione come testo semplice, "Sposta nel Cestino" / "Annulla" con "Annulla"
+  predefinito), che la WebView non può aggirare né rispondere; un solo dialogo alla volta per finestra. Poi:
+  processo fermato, titolazione tolta dalla coda, riga dello store e cache dei metadati rimosse, evento
+  `conv:removed` (Dock ricalcolato). Il watcher vede sparire il file e lo ignora; una sincronizzazione successiva
+  non lo reimporta. Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
 - **Inventario dei comandi**: `every_command_is_registered_and_listed` verifica che ogni `#[tauri::command]`
   sia registrato in `lib.rs` ed elencato nella tabella qui sotto.
 
@@ -108,6 +121,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_running` | `projectId` | coincide con la finestra | finestra | — |
 | `conv_stop` | `sessionId` | del progetto | finestra | P (termina il gruppo di processi) |
 | `conv_save_image` | corpo binario, header `ext` | finestra di progetto; estensione in whitelist, byte iniziali coerenti, ≤ 20 MB; nome casuale, cartella 0700, file 0600 | finestra | F (cartella temporanea dell'app) |
+| `conv_delete` | `sessionId` | UUID; del progetto; fidato; file trovato solo dalle cartelle di sessione del progetto, no link simbolici né fuori radice; conferma nativa del core | finestra | F (sposta nel Cestino il file di sessione in `~/.claude`: unica scrittura lì), P (ferma il processo) |
 | `conv_pending` | `sessionId` | del progetto | finestra | — |
 | `conv_rename` | `sessionId`, `title` | del progetto; lunghezza e caratteri di controllo | finestra | — |
 | `conv_unlock_title` | `sessionId` | del progetto | finestra | — |
@@ -137,7 +151,7 @@ Rilassamenti e perché:
 ## Permessi Tauri (capabilities)
 
 `src-tauri/capabilities/project.json` (finestre `proj-*`):
-- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*`, `fs:changed`, `pty:*`).
+- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `pty:*`).
   Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
 - `core:window:allow-start-dragging`, `core:window:allow-internal-toggle-maximize` — barra del titolo
   (`data-tauri-drag-region`, doppio clic).

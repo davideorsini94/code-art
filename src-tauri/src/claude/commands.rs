@@ -1,6 +1,8 @@
 //! Comandi Tauri del motore delle conversazioni: involucri sottili attorno a `Engine`, eseguiti fuori dal
 //! thread principale e confinati al progetto della finestra chiamante.
+use super::delete::{dialog_message, DeleteOutcome, DeletePrompts, SystemTrasher, BTN_CANCEL, BTN_TRASH, DIALOG_TITLE};
 use super::engine::{ClaudeCheck, Engine, StartOpts};
+use super::sessions::MetaCache;
 use super::protocol::ClaudeEvent;
 use crate::projects::window_project_id;
 use crate::store::Result;
@@ -94,6 +96,36 @@ pub async fn conv_pending(app: AppHandle, window: WebviewWindow, session_id: Str
 #[tauri::command]
 pub async fn conv_stop(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<()> {
     with_engine(app, window, move |e, pid| e.stop_owned(pid, &session_id)).await
+}
+
+/// Elimina la conversazione: la sposta nel Cestino (insieme alla cartella dei sotto-agenti) dopo una conferma
+/// NATIVA mostrata dal core, che la WebView non può aggirare né rispondere. "Annulla" è il pulsante predefinito
+/// (Invio): è il primo, dunque quello di default di NSAlert. Un solo dialogo alla volta per finestra.
+#[tauri::command]
+pub async fn conv_delete(app: AppHandle, window: WebviewWindow, session_id: String) -> Result<DeleteOutcome> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    let _guard = app
+        .state::<DeletePrompts>()
+        .acquire(window.label())
+        .ok_or_else(|| "una conferma di eliminazione è già aperta".to_string())?;
+    let handle = app.clone();
+    let win = window.clone();
+    let confirm = move |title: &str| {
+        let answer = handle
+            .dialog()
+            .message(dialog_message(title))
+            .title(DIALOG_TITLE)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_TRASH.into()))
+            .parent(&win)
+            .blocking_show_with_result();
+        matches!(answer, MessageDialogResult::Custom(l) if l == BTN_TRASH)
+    };
+    let cache = app.clone();
+    with_engine(app, window, move |e, pid| {
+        e.delete_conversation(pid, &session_id, &cache.state::<MetaCache>(), &confirm, &SystemTrasher)
+    })
+    .await
 }
 
 /// Controlla che i primi byte siano davvero quelli del formato dichiarato.
