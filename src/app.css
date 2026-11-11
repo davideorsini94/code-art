@@ -1,0 +1,24 @@
+@import './styles/glass.css';
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #app { height: 100%; }
+
+body {
+  font: 13px/1.45 -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  color: var(--txt);
+  overflow: hidden;
+  /* la vibrancy nativa traspare; l'aurora è un velo attenuato sopra di essa */
+  background:
+    radial-gradient(60% 70% at 12% 8%, rgba(59, 42, 140, 0.55) 0%, transparent 60%),
+    radial-gradient(50% 60% at 88% 18%, rgba(15, 107, 107, 0.5) 0%, transparent 62%),
+    radial-gradient(55% 60% at 70% 100%, rgba(122, 45, 92, 0.5) 0%, transparent 60%),
+    radial-gradient(40% 50% at 25% 95%, rgba(27, 63, 143, 0.5) 0%, transparent 60%),
+    rgba(10, 11, 18, 0.55);
+}
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.work { background: var(--work); box-shadow: 0 0 10px var(--work); animation: pulse 1.6s ease-in-out infinite; }
+.dot.wait { background: var(--wait); box-shadow: 0 0 10px var(--wait); }
+.dot.done { background: var(--done); }
+@keyframes pulse { 50% { opacity: 0.35; } }
