@@ -93,3 +93,27 @@ export const searchCancel = (id: number) => invoke<void>('search_cancel', { id }
 /** Sostituisce nei file indicati dopo una conferma NATIVA del core; solo progetto fidato. Le corrispondenze si ricalcolano sul disco. */
 export const searchReplace = (query: SearchQuery, replacement: string, paths: string[]) =>
   invoke<ReplaceOutcome>('search_replace', { query, replacement, paths })
+
+// ---- git ----
+import type { GitBranch, GitDiffText, GitRemoteOp, GitRepoStatus, MergeOutcome } from './types'
+/** Cartelle del progetto che sono radici di repository (solo progetto fidato). */
+export const gitRepos = () => invoke<string[]>('git_repos')
+export const gitStatus = (repo: string) => invoke<GitRepoStatus>('git_status', { repo })
+export const gitDiff = (repo: string, path: string, origPath: string | null, staged: boolean) =>
+  invoke<GitDiffText>('git_diff', { repo, path, origPath, staged })
+export const gitBranches = (repo: string) => invoke<GitBranch[]>('git_branches', { repo })
+export const gitStage = (repo: string, paths: string[]) => invoke<void>('git_stage', { repo, paths })
+export const gitUnstage = (repo: string, paths: string[]) => invoke<void>('git_unstage', { repo, paths })
+/** Scarta le modifiche non in stage (i file non tracciati vanno nel Cestino) dopo una conferma NATIVA; `false` = annullato. */
+export const gitDiscard = (repo: string, paths: string[]) => invoke<boolean>('git_discard', { repo, paths })
+/** Ritorna l'hash breve del nuovo commit. */
+export const gitCommit = (repo: string, message: string, amend: boolean) => invoke<string>('git_commit', { repo, message, amend })
+export const gitCheckout = (repo: string, branch: string) => invoke<void>('git_checkout', { repo, branch })
+export const gitCreateBranch = (repo: string, name: string, from: string | null, checkout: boolean) =>
+  invoke<void>('git_create_branch', { repo, name, from, checkout })
+export const gitMerge = (repo: string, branch: string) => invoke<MergeOutcome>('git_merge', { repo, branch })
+export const gitMergeAbort = (repo: string) => invoke<void>('git_merge_abort', { repo })
+export const gitInit = (folder: string) => invoke<void>('git_init', { folder })
+/** Avvia fetch/pull/push: ritorna l'id; avanzamento su `git:progress`, fine su `git:op_done`. */
+export const gitRemoteOp = (repo: string, op: GitRemoteOp) => invoke<number>('git_remote_op', { repo, op })
+export const gitCancel = (id: number) => invoke<void>('git_cancel', { id })

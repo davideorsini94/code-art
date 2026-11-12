@@ -1,6 +1,10 @@
 import { projectPickAndAddFolder, projectPickAndOpen } from '../ipc'
 import { conversations } from '../stores/conversations.svelte'
 import { projectStore } from '../stores/project.svelte'
+import { git } from '../stores/git.svelte'
+import { sidebar } from '../stores/sidebar.svelte'
+import type { GitRemoteOp } from '../types'
+import type { PickerMode } from '../stores/git.svelte'
 
 // ---------- ricerca fuzzy ----------
 
@@ -130,6 +134,14 @@ export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openMo
 
 export { PERMISSION_MODES } from '../conv/labels'
 
+/** Comando Git sul primo repository del progetto (collega lo store se serve). */
+const onRepo = (run: (repo: string) => void) => () =>
+  void git.ensure().then(() => {
+    if (git.primary) run(git.primary)
+  })
+const remoteCmd = (op: GitRemoteOp, title: string): Command => ({ id: `git.${op}`, title, run: onRepo((r) => void git.remote(r, op)) })
+const branchCmd = (mode: PickerMode, id: string, title: string): Command => ({ id: `git.${id}`, title, run: onRepo(() => git.openPicker(mode)) })
+
 export type Command = { id: string; title: string; run(): void }
 
 export const commands: Command[] = [
@@ -165,5 +177,19 @@ export const commands: Command[] = [
       if (id) void conversations.delete(id) // la conferma è il dialogo nativo del core
     },
   },
+  {
+    id: 'git.commit',
+    title: 'Commit',
+    run: onRepo(() => {
+      sidebar.setView('git')
+      git.focusTick++
+    }),
+  },
+  remoteCmd('fetch', 'Fetch'),
+  remoteCmd('pull', 'Pull'),
+  remoteCmd('push', 'Push'),
+  branchCmd('switch', 'switchBranch', 'Cambia branch'),
+  branchCmd('create', 'createBranch', 'Crea branch'),
+  branchCmd('merge', 'mergeBranch', 'Unisci branch…'),
   { id: 'settings.permissionMode', title: 'Cambia modalità permessi predefinita', run: () => hooks.openModes() },
 ]

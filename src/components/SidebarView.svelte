@@ -9,9 +9,7 @@
 {:else if sidebar.view === 'search'}
   <SearchPanel />
 {:else}
-  <p class="placeholder">Git arriva a breve.</p>
+  {#await import('./git/GitPanel.svelte') then m}
+    <m.default />
+  {/await}
 {/if}
-
-<style>
-  .placeholder { margin: 8px; font-size: 12px; color: var(--dim); }
-</style>

@@ -7,6 +7,20 @@ vi.mock('../lib/ipc', () => ({ projectRename: vi.fn(async () => Promise.reject('
 
 import Titlebar from './Titlebar.svelte'
 import { projectStore } from '../lib/stores/project.svelte'
+import { resetTooltipForTests } from '../lib/tooltip'
+
+
+/** Testo del tooltip di un elemento (passa il ritardo di comparsa con timer finti). */
+function tipText(el: Element) {
+  vi.useFakeTimers()
+  el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))
+  vi.advanceTimersByTime(600)
+  const text = document.getElementById('codeart-tooltip')?.textContent ?? null
+  el.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }))
+  vi.useRealTimers()
+  resetTooltipForTests()
+  return text
+}
 
 afterEach(() => {
   cleanup()
@@ -32,5 +46,14 @@ describe('Titlebar', () => {
     await fireEvent.keyDown(input, { key: 'Enter' })
     expect((await screen.findByRole('alert')).textContent).toContain('il nome non può essere vuoto')
     expect(screen.getByText('demo')).toBeTruthy()
+  })
+
+  it('the branch is a button with the "Cambia branch" tooltip', () => {
+    projectStore.project = { id: 'p', name: 'demo', folders: ['/Users/dev/demo'] }
+    projectStore.branch = 'main'
+    render(Titlebar)
+    const b = screen.getByRole('button', { name: /main/ })
+    expect(tipText(b)).toBe('Cambia branch')
+    projectStore.branch = null
   })
 })

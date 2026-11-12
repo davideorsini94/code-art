@@ -74,3 +74,33 @@ export type SearchQuery = { text: string; regex: boolean; caseSensitive: boolean
 export type SearchHit = { path: string; line: number; col: number; len: number; preview: string; previewCol: number; previewLen: number }
 export type SearchSummary = { files: number; hits: number; truncated: boolean; cancelled: boolean; error: string | null }
 export type ReplaceOutcome = { files: number; replacements: number; skipped: string[]; cancelled: boolean }
+
+// ---- git (specchio di src-tauri/src/git/) ----
+/** Voce di `git_status`: lettere di stato nell'indice (`staged`) e nella cartella di lavoro (`unstaged`). */
+export type GitStatusEntry = {
+  path: string
+  origPath: string | null
+  staged: string | null
+  unstaged: string | null
+  conflict: boolean
+  untracked: boolean
+}
+export type GitRepoStatus = {
+  root: string
+  branch: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  detached: boolean
+  merging: boolean
+  entries: GitStatusEntry[]
+  truncated: boolean
+}
+export type GitDiffText = { before: string; after: string; binary: boolean }
+export type GitBranch = { name: string; remote: boolean; current: boolean; upstream: string | null }
+export type MergeOutcome = { kind: 'fast_forward' | 'merged' | 'conflicts' | 'up_to_date'; conflicts: string[] }
+export type GitRemoteOp = 'fetch' | 'pull' | 'push'
+/** Payload degli eventi `git:changed`, `git:progress` e `git:op_done`. */
+export type GitChangedEvent = { repo: string }
+export type GitProgressEvent = { id: number; line: string }
+export type GitOpDoneEvent = { id: number; ok: boolean; message: string }
