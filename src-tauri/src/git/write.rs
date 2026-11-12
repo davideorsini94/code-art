@@ -98,10 +98,8 @@ fn check_paths(dir: &Path, paths: &[String]) -> Result<()> {
             return Err("percorso non valido".into());
         }
         let parent = base.join(p).parent().map(Path::to_path_buf).unwrap_or_else(|| base.clone());
-        if let Ok(real) = parent.canonicalize() {
-            if !real.starts_with(&base) {
-                return Err("percorso fuori dal repository".into());
-            }
+        if parent.canonicalize().is_ok_and(|real| !real.starts_with(&base)) {
+            return Err("percorso fuori dal repository".into());
         }
     }
     Ok(())

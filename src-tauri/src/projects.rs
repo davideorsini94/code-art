@@ -228,6 +228,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
         crate::fs_tree::unwatch_project(app, id);
         crate::claude::sessions::unwatch_project(app, id);
         app.state::<crate::search::Searches>().cancel_project(id);
+        app.state::<std::sync::Arc<crate::git::remote::RemoteOps>>().cancel_project(id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
     app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);
@@ -418,7 +419,7 @@ pub async fn project_branch(app: AppHandle, window: WebviewWindow) -> Result<Opt
 
 /// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
 const WEB_SETTINGS: &[(&str, fn(&str) -> bool)] =
-    &[("default_permission_mode", crate::claude::engine::valid_permission_mode)];
+    &[("default_permission_mode", crate::claude::engine::valid_permission_mode), (crate::git::remote::PULL_MODE_KEY, crate::git::remote::valid_pull_mode)];
 
 fn web_setting(key: &str) -> Result<fn(&str) -> bool> {
     WEB_SETTINGS.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).ok_or_else(|| format!("impostazione sconosciuta: {key}"))
@@ -621,6 +622,8 @@ mod tests {
         assert!(check_web_setting("default_permission_mode", "plan").is_ok());
         assert!(check_web_setting("default_permission_mode", "tutto").is_err());
         assert!(check_web_setting("claude_path", "/tmp/x").is_err());
+        assert!(check_web_setting("git_pull_mode", "rebase").is_ok());
+        assert!(check_web_setting("git_pull_mode", "--force").is_err());
     }
 
     #[test]

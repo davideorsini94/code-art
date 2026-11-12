@@ -37,6 +37,7 @@ pub fn run() {
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
         .manage(search::Searches::default())
+        .manage(Arc::new(git::remote::RemoteOps::default()))
         .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
@@ -152,6 +153,8 @@ pub fn run() {
             git::write::git_merge,
             git::write::git_merge_abort,
             git::write::git_init,
+            git::remote::git_remote_op,
+            git::remote::git_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

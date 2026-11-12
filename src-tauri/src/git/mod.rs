@@ -1,6 +1,7 @@
 //! Git in lettura: repository del progetto, stato, diff, branch e cronologia. Tutto passa dal processo `git`
 //! (che esegue hook e `core.fsmonitor` del repository), quindi solo in progetti fidati.
 pub mod cmd;
+pub mod remote;
 pub mod status;
 #[cfg(test)]
 mod testutil;

@@ -83,7 +83,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   riposiziona col selettore, che la rende fidata). La fiducia non si eredita: né sottocartelle né genitori.
 - **Permessi Tauri al minimo**, per tipo di finestra (sotto); verificati da `capabilities_grant_no_shell_or_fs_plugin`.
 - **Processi senza shell**: sempre lista di argomenti (sotto).
-- **Impostazioni**: `settings_get`/`settings_set` accettano solo chiavi in whitelist (`default_permission_mode`)
+- **Impostazioni**: `settings_get`/`settings_set` accettano solo chiavi in whitelist (`default_permission_mode`, `git_pull_mode`)
   con valore validato.
 - **Eliminazione delle conversazioni (unica eccezione alla sola lettura di `~/.claude`)**: richiesta del
   proprietario dopo la prova. `conv_delete` (`src-tauri/src/claude/delete.rs`, `Engine::delete_conversation`)
@@ -110,7 +110,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
 
 Ambito: **finestra** = progetto ricavato dall'etichetta della finestra chiamante (`proj-<id>`), mai da un
 argomento; le chiamate dalla finestra di benvenuto falliscono. **globale** = non legato a un progetto.
-Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete proprie; `claude` sì, per suo conto).
+Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete proprie; `claude` sì, per suo conto, e `git` per fetch/pull/push avviati dall'utente).
 
 | Comando | Dalla WebView | Validazione | Ambito | Effetti |
 |---|---|---|---|---|
@@ -122,7 +122,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `project_missing_folders` | — | — | finestra | F (stat delle radici, fuori dal thread principale) |
 | `project_branch` | — | — | finestra | F (legge `.git/HEAD`, fuori dal thread principale) |
 | `settings_get` | `key` | whitelist | globale | — |
-| `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`) | globale | — |
+| `settings_set` | `key`, `value` | whitelist + validatore (`valid_permission_mode`, `valid_pull_mode`: `ff-only` \| `rebase` \| `merge`) | globale | — |
 | `fs_list` | `path` | `ensure_inside` | finestra | F |
 | `fs_create` | `path`, `isDir` | `ensure_inside`; progetto fidato; non sovrascrive | finestra | F |
 | `fs_rename` | `from`, `to` | `ensure_inside` su entrambi; progetto fidato; destinazione inesistente; `from` mai una cartella del progetto (`movable_path`) | finestra | F |
@@ -172,6 +172,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `git_merge` | `repo`, `branch` | come `git_checkout`; `--no-edit`, nessun editor (`GIT_EDITOR=true`) | finestra | P (`git merge`) |
 | `git_merge_abort` | `repo` | **solo progetto fidato**; `repo` coincide (percorso canonico) con una radice di `git_repos`; una sola scrittura alla volta per repository ("Un'altra operazione git è in corso") | finestra | P (`git merge --abort`) |
 | `git_init` | `folder` | **solo progetto fidato**; `folder` coincide (percorso canonico) con una cartella del progetto che non è già un repository | finestra | P + F (`git init`, crea `.git`) |
+| `git_remote_op` | `repo`, `op` (`fetch` \| `pull` \| `push`) | **solo progetto fidato**; `repo` tra le radici di `git_repos`; occupa il repository fino alla fine (una sola scrittura alla volta); `pull` secondo `git_pull_mode` (`--ff-only` predefinito, `--rebase`, `--no-rebase`); `push` imposta l'upstream se manca (`-u origin <branch corrente>`); mai `--force`; eventi `git:progress`/`git:op_done` solo alla finestra del progetto | finestra | P + R (`git fetch/pull/push --progress` in una sessione propria; `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` se l'utente non ha già un comando ssh (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`); helper di credenziali dell'utente attivi; timeout 10 min) |
+| `git_cancel` | `id` | annulla solo un'operazione del progetto della finestra chiamante (uccide il gruppo di processi); la chiusura della finestra annulla le sue operazioni | finestra | — |
 | `tools_check` | — | — | globale | P (cerca `git`, `gh` e i language server nell'ambiente di login; non li esegue) |
 | `trust_check` | — | — | finestra | — |
 | `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
@@ -202,14 +204,14 @@ Rilassamenti e perché:
 ## Permessi Tauri (capabilities)
 
 `src-tauri/capabilities/project.json` (finestre `proj-*`):
-- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `git:changed`, `pty:*`).
+- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `git:changed`, `git:progress`, `git:op_done`, `pty:*`).
   Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
 
 **Come arrivano gli eventi di un progetto.** In Tauri 2 `emit_to(etichetta)` filtra solo gli ascoltatori
 registrati *per quella finestra*: un ascoltatore globale (`listen` senza finestra) di qualunque finestra li riceve
 tutti. Per questo:
 - ogni evento di progetto porta l'id del progetto nel **nome**: `conv:event:<id>`, `conv:upsert:<id>`,
-  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `git:changed:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
+  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `git:changed:<id>`, `git:progress:<id>`, `git:op_done:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
   costruisce il nome (`projects::project_event` / `emit_to_project` nel core, `src/lib/events.ts` nell'interfaccia,
   che lo ricava dal proprio progetto); il core lo emette con `emit_to` verso la sola finestra del progetto;
 - l'interfaccia ascolta solo con `getCurrentWebviewWindow().listen` (finestra corrente), mai con il `listen`
