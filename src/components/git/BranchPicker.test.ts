@@ -4,8 +4,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const gitBranches = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/ipc', () => ({ gitBranches }))
-const store = vi.hoisted(() => ({ busy: null, checkout: vi.fn(async () => true), createBranch: vi.fn(async () => true), merge: vi.fn(async () => undefined) }))
-vi.mock('../../lib/stores/git.svelte', async (orig) => ({ ...(await orig<object>()), git: store }))
+vi.mock('../../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
+vi.mock('../../lib/stores/project.svelte', () => ({ projectStore: { project: null, untrusted: [], refreshBranch: vi.fn() } }))
+vi.mock('../../lib/stores/editor.svelte', () => ({ editor: {} }))
+// store reale (reattivo), con le operazioni del core sostituite
+import { git as store } from '../../lib/stores/git.svelte'
+store.checkout = vi.fn(async () => true)
+store.createBranch = vi.fn(async () => true)
+store.merge = vi.fn(async () => undefined)
 
 import BranchPicker from './BranchPicker.svelte'
 
@@ -18,6 +24,9 @@ const BRANCHES = [
 
 afterEach(() => {
   cleanup()
+  store.error = null
+  store.notice = null
+  store.busy = null
   vi.clearAllMocks()
 })
 
@@ -71,6 +80,39 @@ describe('BranchPicker', () => {
     await fireEvent.click(screen.getByText('feature/login'))
     expect(store.merge).toHaveBeenCalledWith('/r', 'feature/login')
     expect(store.checkout).not.toHaveBeenCalled()
+  })
+
+  it('a failed checkout keeps the picker open and shows the error inside it', async () => {
+    const onclose = await mount()
+    vi.mocked(store.checkout).mockImplementationOnce(async () => {
+      store.error = 'Le modifiche locali verrebbero sovrascritte'
+      return false
+    })
+    await fireEvent.click(screen.getByText('feature/login'))
+    await vi.waitFor(() => expect(store.checkout).toHaveBeenCalled())
+    await Promise.resolve()
+    expect(onclose).not.toHaveBeenCalled()
+    // il messaggio compare tra le righe del selettore dopo il rendering
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('sovrascritte'))
+  })
+
+  it('merge mode closes only on success; with conflicts or an error it stays open with the message', async () => {
+    const onclose = await mount('merge')
+    vi.mocked(store.merge).mockImplementationOnce(async () => {
+      store.notice = 'Unione con 1 conflitto: risolvili o annulla l’unione'
+      return { kind: 'conflicts' as const, conflicts: ['a'] }
+    })
+    await fireEvent.click(screen.getByText('feature/login'))
+    await vi.waitFor(() => expect(screen.getByRole('status').textContent).toContain('1 conflitto'))
+    expect(onclose).not.toHaveBeenCalled()
+    vi.mocked(store.merge).mockImplementationOnce(async () => undefined) // errore del core
+    await fireEvent.click(screen.getByText('feature/login'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onclose).not.toHaveBeenCalled()
+    vi.mocked(store.merge).mockImplementationOnce(async () => ({ kind: 'merged' as const, conflicts: [] }))
+    await fireEvent.click(screen.getByText('feature/login'))
+    await vi.waitFor(() => expect(onclose).toHaveBeenCalled())
   })
 
   it('Escape closes', async () => {

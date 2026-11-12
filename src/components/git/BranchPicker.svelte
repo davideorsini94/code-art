@@ -24,6 +24,8 @@
   const canCreate = $derived(newName !== '' && !createError && git.busy === null)
 
   onMount(() => {
+    git.error = null // niente errori vecchi: quelli mostrati qui sono dell'operazione che si sta per fare
+    git.notice = null
     merging = mode === 'merge'
     creating = mode === 'create'
     gitBranches(repo).then((b) => (branches = b), (e) => (loadError = errorText(e)))
@@ -33,8 +35,9 @@
   async function pick(b: GitBranch) {
     if (merging) {
       if (b.name === current) return
-      await git.merge(repo, b.name)
-      onclose()
+      const out = await git.merge(repo, b.name)
+      // si chiude solo se l'unione è riuscita: con conflitti o errore il messaggio resta qui
+      if (out && out.kind !== 'conflicts') onclose()
     } else if (!b.current && (await git.checkout(repo, b.name))) onclose()
   }
 
@@ -48,6 +51,8 @@
 <div class="picker" data-no-tooltip="contenitore del selettore: Esc lo chiude" role="dialog" aria-label="Branch" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && onclose()}>
   <input bind:this={input} type="text" placeholder={merging ? 'Unisci in quello corrente: scegli un branch' : 'Cerca un branch'} aria-label="Filtra i branch" bind:value={filter} />
   {#if loadError}<div class="err">{loadError}</div>{/if}
+  {#if git.error}<div class="err" role="alert">{git.error}</div>{/if}
+  {#if git.notice}<div class="note" role="status">{git.notice}</div>{/if}
   <ul>
     {#each shown as b (`${b.remote}:${b.name}`)}
       <li>
@@ -98,5 +103,6 @@
   .create input { flex: 1; }
   .go { padding: 4px 12px; border-radius: 8px; border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--txt); font: inherit; cursor: pointer; }
   .go:disabled { opacity: 0.45; cursor: not-allowed; }
-  .err { color: var(--err); font-size: 11.5px; }
+  .err { color: var(--err); font-size: 11.5px; white-space: pre-wrap; }
+  .note { color: var(--wait); font-size: 11.5px; }
 </style>

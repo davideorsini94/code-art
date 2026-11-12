@@ -24,7 +24,8 @@
   // modelli per id di tab (stabile dopo rinomina); il testo non viene mai copiato nello store a ogni tasto
   type Entry = { model: IModel; path: string; rev: number; savedVersion: number }
   const models = new Map<number, Entry>()
-  const diffModels = new Map<number, [IModel, IModel]>()
+  type DiffEntry = { pair: [IModel, IModel]; rev: number; savedVersion: number; editable: boolean }
+  const diffModels = new Map<number, DiffEntry>()
 
   const active = $derived(editor.activeTab)
   // cartella non fidata: editor in sola lettura, niente salvataggio (il core rifiuta comunque)
@@ -82,9 +83,9 @@
     if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 's') return
     if (e.defaultPrevented || (document.activeElement as Element | null)?.closest?.('.monaco-editor')) return
     const t = editor.activeTab
-    if (!t || !isTextTab(t)) return
+    if (!t || !(isTextTab(t) || t.diff?.editable)) return
     e.preventDefault()
-    void editor.save(t.path).catch(() => {})
+    void editor.save(t.path, t.key).catch(() => {})
   }
 
   // Monaco si carica solo quando si apre il primo file di testo
@@ -107,7 +108,7 @@
   function addSave(ed: ICode, m: Monaco) {
     ed.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => {
       const t = editor.activeTab
-      if (t) void editor.save(t.path)
+      if (t) void editor.save(t.path, t.key)
     })
   }
 
@@ -121,7 +122,8 @@
       const model = ed.getModel()
       return ed.hasTextFocus() && sel && model && !sel.isEmpty() ? model.getValueInRange(sel) : ''
     }
-    diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, renderSideBySide: true })
+    diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, originalEditable: false, renderSideBySide: true })
+    addSave(diffEd.getModifiedEditor(), monaco)
   })
 
   $effect(() => {
@@ -163,6 +165,35 @@
     return entry.model
   }
 
+  function ensureDiff(m: Monaco, t: Tab) {
+    const d = t.diff!
+    let entry = diffModels.get(t.id)
+    if (!entry) {
+      const orig = m.editor.createModel(d.before, undefined, m.Uri.parse(`codeart-diff:before${t.path}`))
+      const mod = m.editor.createModel(d.after, undefined, m.Uri.parse(`codeart-diff:after${t.path}`))
+      const e: DiffEntry = { pair: [orig, mod], rev: t.rev, savedVersion: mod.getAlternativeVersionId(), editable: !!d.editable }
+      diffModels.set(t.id, e)
+      entry = e
+      if (d.editable) {
+        // stesso tracciamento di un file: sporco = versione diversa dall'ultima salvata
+        const id = t.id
+        mod.onDidChangeContent(() => editor.setDirty(id, mod.getAlternativeVersionId() !== e.savedVersion))
+        editor.bind(id, {
+          snapshot: () => {
+            const v = mod.getAlternativeVersionId()
+            return { text: mod.getValue(), commit: () => { e.savedVersion = v; editor.setDirty(id, mod.getAlternativeVersionId() !== v) } }
+          },
+        })
+      }
+    } else if (entry.editable && entry.rev !== t.rev) {
+      // ricarica da disco
+      entry.pair[1].setValue(t.baseText)
+      entry.rev = t.rev
+      entry.savedVersion = entry.pair[1].getAlternativeVersionId()
+      editor.setDirty(t.id, false)
+    }
+  }
+
   function create(m: Monaco, t: Tab, text: string, dirty: boolean) {
     const model = m.editor.createModel(text, undefined, m.Uri.file(t.path))
     const entry: Entry = { model, path: t.path, rev: t.rev, savedVersion: dirty ? -1 : model.getAlternativeVersionId() }
@@ -194,19 +225,15 @@
     const liveDiff = new Set(editor.tabs.filter((t) => t.diff).map((t) => t.id))
     for (const [id, pair] of diffModels) {
       if (!liveDiff.has(id)) {
-        pair.forEach((x) => x.dispose())
+        pair.pair.forEach((x) => x.dispose())
         diffModels.delete(id)
+        editor.bind(id, null)
       }
     }
     for (const t of editor.tabs) {
       if (t.error || (!t.diff && !isTextTab(t))) continue
       if (t.diff) {
-        if (!diffModels.has(t.id)) {
-          diffModels.set(t.id, [
-            m.editor.createModel(t.diff.before, undefined, m.Uri.parse(`codeart-diff:before${t.path}`)),
-            m.editor.createModel(t.diff.after, undefined, m.Uri.parse(`codeart-diff:after${t.path}`)),
-          ])
-        }
+        ensureDiff(m, t)
         continue
       }
       ensureModel(m, t)
@@ -220,8 +247,12 @@
         if (second && second.getModel() !== model) second.setModel(model)
       }
     } else if (a?.diff) {
-      const pair = diffModels.get(a.id)
-      if (pair) diffEd?.setModel({ original: pair[0], modified: pair[1] })
+      const entry = diffModels.get(a.id)
+      if (entry) {
+        // solo il lato modificato di un diff "modificabile" (cartella di lavoro) accetta tasti; l'originale mai
+        diffEd?.updateOptions({ readOnly: !(a.diff.editable && !readOnly), originalEditable: false })
+        diffEd?.setModel({ original: entry.pair[0], modified: entry.pair[1] })
+      }
     }
   })
 
@@ -282,8 +313,8 @@
   {#if active?.prompt}
     <div class="bar" role="alert">
       <span>Cambiato su disco</span>
-      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path)}>Ricarica</button>
-      <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path)}>Tieni il mio</button>
+      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path, active.key)}>Ricarica</button>
+      <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path, active.key)}>Tieni il mio</button>
     </div>
   {/if}
 

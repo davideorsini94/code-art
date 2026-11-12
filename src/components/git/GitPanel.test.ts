@@ -94,7 +94,7 @@ describe('GitPanel', () => {
     ipc.gitDiff.mockResolvedValue({ before: 'x', after: 'y', binary: false })
     await mount()
     await fireEvent.click(screen.getByText('b.ts'))
-    await vi.waitFor(() => expect(editor.openDiff).toHaveBeenCalledWith('/Users/dev/app/src/b.ts', 'x', 'y'))
+    await vi.waitFor(() => expect(editor.openDiff).toHaveBeenCalledWith('/Users/dev/app/src/b.ts', 'x', 'y', { editable: true }))
     expect(ipc.gitDiff).toHaveBeenCalledWith(REPO, 'src/b.ts', null, false)
   })
 
@@ -131,6 +131,28 @@ describe('GitPanel', () => {
     expect(await screen.findByText(/non è un repository/)).toBeTruthy()
     await fireEvent.click(screen.getByRole('button', { name: 'Inizializza' }))
     expect(ipc.gitInit).toHaveBeenCalledWith(REPO)
+  })
+
+  it('staged diffs open read-only', async () => {
+    ipc.gitDiff.mockResolvedValue({ before: 'x', after: 'y', binary: false })
+    await mount()
+    await fireEvent.click(screen.getByText('a.ts'))
+    await vi.waitFor(() => expect(editor.openDiff).toHaveBeenCalledWith('/Users/dev/app/src/a.ts', 'x', 'y', { editable: false }))
+  })
+
+  it('multi-folder project: a non-repo folder gets its own "Inizializza" next to the repositories', async () => {
+    project.project = { id: 'p1', name: 'app', folders: [REPO, '/Users/dev/docs'] }
+    await mount()
+    await fireEvent.click(await screen.findByRole('button', { name: 'Inizializza docs' }))
+    expect(ipc.gitInit).toHaveBeenCalledWith('/Users/dev/docs')
+    project.project = { id: 'p1', name: 'app', folders: [REPO] }
+  })
+
+  it('shows the outcome notice in the panel', async () => {
+    await mount()
+    git.notice = 'Fetch completato'
+    expect((await screen.findByText('Fetch completato')).textContent).toBeTruthy()
+    git.notice = null
   })
 
   it('untrusted project: message and "Mi fido", no git calls', async () => {

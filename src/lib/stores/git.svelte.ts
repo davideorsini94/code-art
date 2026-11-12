@@ -9,6 +9,9 @@ import type { GitChangedEvent, GitDiffText, GitOpDoneEvent, GitProgressEvent, Gi
 export type GitBusy = { repo: string; op: string; id: number | null; line: string }
 export type PickerMode = 'switch' | 'create' | 'merge'
 
+/** Oltre il tempo massimo del core (10 min) un'operazione remota senza `git:op_done` si considera finita. */
+export const REMOTE_GUARD_MS = 11 * 60 * 1000
+
 export const REMOTE_LABEL: Record<GitRemoteOp, string> = { fetch: 'Fetch', pull: 'Pull', push: 'Push' }
 
 /** Voci già in stage (i conflitti restano tra le modifiche). */
@@ -40,6 +43,8 @@ export class GitStore {
   private early: (['progress', GitProgressEvent] | ['done', GitOpDoneEvent])[] = []
   private starting = false
   private seq = 0
+  private refreshFailed = false
+  private guard: ReturnType<typeof setTimeout> | null = null
 
   get primary(): string | null {
     return this.repos[0] ?? null
@@ -71,6 +76,13 @@ export class GitStore {
     this.unlisten.forEach((u) => u())
     this.unlisten = []
     window.removeEventListener('focus', this.onFocus)
+    this.clearGuard()
+    this.busy = null
+  }
+
+  private clearGuard() {
+    if (this.guard) clearTimeout(this.guard)
+    this.guard = null
   }
 
   /** Assicura che lo store sia collegato al progetto della finestra (per titolo e palette). */
@@ -90,13 +102,19 @@ export class GitStore {
       this.repos = repos
       this.status = Object.fromEntries(repos.map((r, i) => [r, list[i]]))
       this.loaded = true
+      if (this.refreshFailed) {
+        this.refreshFailed = false
+        this.error = null
+      }
     } catch (e) {
       if (my !== this.seq) return
+      this.refreshFailed = true
       this.error = errorText(e)
     }
   }
 
   private fail(e: unknown) {
+    this.refreshFailed = false
     this.error = errorText(e)
     return undefined
   }
@@ -105,6 +123,7 @@ export class GitStore {
   private async local<T>(repo: string, op: string, fn: () => Promise<T>): Promise<T | undefined> {
     if (this.busy) return undefined
     this.busy = { repo, op, id: null, line: '' }
+    this.notice = null
     try {
       const r = await fn()
       this.error = null
@@ -150,7 +169,13 @@ export class GitStore {
 
   async merge(repo: string, branch: string): Promise<MergeOutcome | undefined> {
     const out = await this.local(repo, 'merge', () => ipc.gitMerge(repo, branch))
-    if (out) this.notice = out.kind === 'conflicts' ? `Unione con ${out.conflicts.length} conflitti` : null
+    if (out) {
+      const n = out.conflicts.length
+      this.notice =
+        out.kind === 'conflicts' ? `Unione con ${n} ${n === 1 ? 'conflitto' : 'conflitti'}: risolvili o annulla l’unione`
+        : out.kind === 'up_to_date' ? `${branch} è già incluso nel branch corrente`
+        : `${branch} unito nel branch corrente`
+    }
     return out
   }
 
@@ -176,7 +201,8 @@ export class GitStore {
       return
     }
     this.error = null
-    editor.openDiff(join(repo, e.path), d.before, d.after)
+    // il lato in cartella di lavoro si modifica solo per le modifiche non in stage; l'indice resta in sola lettura
+    void editor.openDiff(join(repo, e.path), d.before, d.after, { editable: !staged })
   }
 
   /** Percorso assoluto di una voce, per "apri file". */
@@ -192,16 +218,24 @@ export class GitStore {
     this.busy = { repo, op, id: null, line: '' }
     this.starting = true
     this.early = []
+    this.notice = null
     try {
       const id = await ipc.gitRemoteOp(repo, op)
       this.starting = false
       if (this.busy) this.busy = { ...this.busy, id }
+      // rete di sicurezza: se `git:op_done` non arriva (finestra ricaricata, evento perso) lo stato non resta bloccato
+      this.clearGuard()
+      this.guard = setTimeout(() => {
+        this.guard = null
+        if (this.busy?.id === id) this.busy = null
+      }, REMOTE_GUARD_MS)
       const pending = this.early
       this.early = []
       pending.forEach((e) => this.onRemote(e))
     } catch (e) {
       this.starting = false
       this.busy = null
+      this.clearGuard()
       this.fail(e)
     }
   }
@@ -219,7 +253,9 @@ export class GitStore {
       return
     }
     this.busy = null
+    this.clearGuard()
     this.error = e[1].ok ? null : e[1].message
+    this.notice = e[1].ok ? `${REMOTE_LABEL[b.op as GitRemoteOp] ?? b.op} completato` : null
     void this.refresh()
     if (e[1].ok) void projectStore.refreshBranch()
   }

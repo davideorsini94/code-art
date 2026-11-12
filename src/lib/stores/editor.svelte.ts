@@ -42,7 +42,8 @@ export type Tab = {
   mtimeMs: number | null
   error: 'too_large' | 'not_text' | 'forbidden' | 'io' | null
   prompt: boolean // "Cambiato su disco" in attesa di scelta
-  diff: { before: string; after: string } | null
+  /** `editable`: il lato modificato (cartella di lavoro) si può cambiare e salvare; il lato originale resta in sola lettura. */
+  diff: { before: string; after: string; editable?: boolean } | null
   viewer: Viewer
 }
 
@@ -140,17 +141,31 @@ class EditorStore {
     if (t && !t.error) this.reveal = { key: t.key, line, col }
   }
 
-  /** Diff in una scheda propria accanto al file (una sola per file): la scheda del file, anche con modifiche, resta. */
-  openDiff(path: string, before: string, after: string) {
-    const tab: Tab = { ...this.blank(path), key: tabKey(path, true), name: `${baseName(path)} (diff)`, baseText: after, diff: { before, after } }
+  /** Diff in una scheda propria accanto al file (una sola per file): la scheda del file, anche con modifiche, resta.
+   *  `editable`: il lato modificato si può cambiare e salvare (con controllo dell'mtime, come un file); se il file non si
+   *  riesce a leggere come testo, il diff resta in sola lettura. */
+  async openDiff(path: string, before: string, after: string, opts: { editable?: boolean } = {}) {
+    let mtimeMs: number | null = null
+    let editable = false
+    if (opts.editable) {
+      try {
+        const c = await fsRead(path)
+        after = c.text
+        mtimeMs = c.mtimeMs
+        editable = true
+      } catch {
+        /* file sparito o non testo: solo lettura */
+      }
+    }
+    const tab: Tab = { ...this.blank(path), key: tabKey(path, true), name: `${baseName(path)} (diff)`, baseText: after, mtimeMs, diff: editable ? { before, after, editable } : { before, after } }
     this.tabs = [...this.tabs.filter((t) => t.key !== tab.key), tab]
     this.active = tab.key
   }
 
   /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". */
-  async save(path: string) {
-    const t = this.find(path)
-    if (!t || t.diff || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
+  async save(path: string, key = tabKey(path, false)) {
+    const t = this.tabs.find((x) => x.key === key)
+    if (!t || (t.diff && !t.diff.editable) || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
     try {
@@ -197,7 +212,7 @@ class EditorStore {
     }
     if (choice === 'save') {
       try {
-        await this.save(t.path)
+        await this.save(t.path, t.key)
       } catch {
         return // errore di scrittura: la scheda resta, con la barra
       }
@@ -219,12 +234,13 @@ class EditorStore {
   }
 
   /** Scarta le modifiche locali e ricarica da disco. */
-  async reload(path: string) {
-    const t = this.find(path)
+  async reload(path: string, key = tabKey(path, false)) {
+    const t = this.tabs.find((x) => x.key === key)
     if (!t || isBinaryViewer(t.viewer)) return
     try {
       const c = await fsRead(path)
       t.baseText = c.text
+      if (t.diff) t.diff = { ...t.diff, after: c.text }
       t.mtimeMs = c.mtimeMs
       t.rev++
       t.dirty = false
@@ -235,8 +251,8 @@ class EditorStore {
   }
 
   /** Tiene il testo locale: accetta lo stato attuale del disco così il prossimo salvataggio sovrascrive. */
-  async keepMine(path: string) {
-    const t = this.find(path)
+  async keepMine(path: string, key = tabKey(path, false)) {
+    const t = this.tabs.find((x) => x.key === key)
     if (!t) return
     try {
       const c = await fsRead(path)
@@ -251,7 +267,7 @@ class EditorStore {
   async applyChanged(paths: string[]) {
     const set = new Set(paths)
     for (const t of this.tabs) {
-      if (t.diff || !set.has(t.path)) continue
+      if ((t.diff && !t.diff.editable) || !set.has(t.path)) continue
       if (isBinaryViewer(t.viewer)) {
         this.scheduleViewerReload(t.path)
         continue
@@ -266,6 +282,7 @@ class EditorStore {
       const action = onDiskChange(t, disk)
       if (action === 'reload') {
         t.baseText = disk.text
+        if (t.diff) t.diff = { ...t.diff, after: disk.text }
         t.mtimeMs = disk.mtimeMs
         t.rev++
       } else if (action === 'prompt') {

@@ -12,6 +12,7 @@ vi.mock('../lib/ipc', () => ({
   fsWrite: vi.fn(async () => 2),
   asFsError: (e: unknown) => (e && typeof e === 'object' && 'code' in e ? e : { code: 'io', message: String(e) }),
 }))
+const diffOptions = vi.hoisted(() => vi.fn())
 vi.mock('../lib/monaco', () => {
   const model = () => {
     let v = ''
@@ -26,7 +27,7 @@ vi.mock('../lib/monaco', () => {
     monaco: {
       KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1 }, Uri: { file: (p: string) => p, parse: (p: string) => p },
       editor: {
-        create: ed, createDiffEditor: () => ({ ...ed(), setModel() {} }),
+        create: ed, createDiffEditor: () => ({ ...ed(), updateOptions: diffOptions, setModel() {}, getModifiedEditor: () => ed() }),
         createModel: (text: string) => { const m = model(); m.init(text); return m },
       },
     },
@@ -123,5 +124,28 @@ describe('EditorPane markdown tabs', () => {
     expect(screen.getByText('Modifiche non salvate in main.rs')).toBeTruthy()
     await fireEvent.click(screen.getByText('Scarta'))
     expect(editor.tabs).toHaveLength(0)
+  })
+})
+
+describe('EditorPane diff tabs', () => {
+  it('an editable (unstaged) diff makes the modified side editable, the original never; ⌘S path saves it', async () => {
+    render(EditorPane)
+    await editor.openDiff('/Users/dev/app/a.ts', 'indice', 'x', { editable: true })
+    flushSync()
+    await waitFor(() => expect(diffOptions).toHaveBeenCalledWith({ readOnly: false, originalEditable: false }))
+    const t = editor.activeTab!
+    await editor.save(t.path, t.key)
+    expect(fsWrite).toHaveBeenCalledWith('/Users/dev/app/a.ts', '# Titolo\n\nciao', 1)
+  })
+
+  it('a staged diff stays read-only on both sides and cannot be saved', async () => {
+    diffOptions.mockClear()
+    vi.mocked(fsWrite).mockClear()
+    render(EditorPane)
+    await editor.openDiff('/Users/dev/app/b.ts', 'indice', 'x')
+    flushSync()
+    await waitFor(() => expect(diffOptions).toHaveBeenCalledWith({ readOnly: true, originalEditable: false }))
+    await editor.save('/Users/dev/app/b.ts', editor.activeTab!.key)
+    expect(fsWrite).not.toHaveBeenCalled()
   })
 })

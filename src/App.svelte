@@ -4,6 +4,7 @@
   import MissingFolder from './components/MissingFolder.svelte'
   import TrustBanner from './components/TrustBanner.svelte'
   import SidebarView from './components/SidebarView.svelte'
+  import GitToast from './components/git/GitToast.svelte'
   import { sidebar, type SidebarViewId } from './lib/stores/sidebar.svelte'
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
@@ -92,6 +93,9 @@
     }
     window.addEventListener('keydown', onKey, true)
     hooks.toggleTerminal = () => (termVisible = !termVisible)
+    hooks.revealSidebar = () => {
+      if (collapsed.has('sidebar')) toggle('sidebar')
+    }
     return () => window.removeEventListener('keydown', onKey, true)
   })
 
@@ -173,6 +177,7 @@
     </main>
   {:else}
   <TrustBanner />
+  <GitToast panelVisible={sidebar.view === 'git' && !collapsed.has('sidebar')} />
   <main class="body" style:grid-template-columns={template}>
     <div class="slot rail"><Rail {collapsed} ontoggle={toggle} /></div>
     {#each cols as { col, label } (col)}

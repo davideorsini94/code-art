@@ -130,7 +130,7 @@ export function createLatest<T>(run: (q: string) => Promise<T>, onResult: (q: st
 // ---------- comandi ----------
 
 /** Azioni che dipendono da componenti: le registrano App, Titlebar e Palette al montaggio. */
-export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openModes: () => {} }
+export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openModes: () => {}, revealSidebar: () => {} }
 
 export { PERMISSION_MODES } from '../conv/labels'
 
@@ -138,6 +138,7 @@ export { PERMISSION_MODES } from '../conv/labels'
 const onRepo = (run: (repo: string) => void) => () =>
   void git.ensure().then(() => {
     if (git.primary) run(git.primary)
+    else git.error = 'Nessun repository Git in questo progetto'
   })
 const remoteCmd = (op: GitRemoteOp, title: string): Command => ({ id: `git.${op}`, title, run: onRepo((r) => void git.remote(r, op)) })
 const branchCmd = (mode: PickerMode, id: string, title: string): Command => ({ id: `git.${id}`, title, run: onRepo(() => git.openPicker(mode)) })
@@ -182,6 +183,7 @@ export const commands: Command[] = [
     title: 'Commit',
     run: onRepo(() => {
       sidebar.setView('git')
+      hooks.revealSidebar()
       git.focusTick++
     }),
   },

@@ -30,7 +30,7 @@ vi.mock('./project.svelte', () => ({ projectStore: project }))
 const openDiff = vi.fn()
 vi.mock('./editor.svelte', () => ({ editor: { openDiff: (...a: unknown[]) => openDiff(...a) } }))
 
-import { branchNameError, git, stagedEntries, unstagedEntries } from './git.svelte'
+import { branchNameError, git, REMOTE_GUARD_MS, stagedEntries, unstagedEntries } from './git.svelte'
 
 const REPO = '/Users/dev/app'
 const status = (over = {}) => ({ root: REPO, branch: 'main', upstream: null, ahead: 0, behind: 0, detached: false, merging: false, entries: [], truncated: false, ...over })
@@ -150,17 +150,68 @@ describe('git store', () => {
     ipc.gitDiff.mockResolvedValueOnce({ before: 'a', after: 'b', binary: false })
     await git.openDiff(REPO, e, true)
     expect(ipc.gitDiff).toHaveBeenCalledWith(REPO, 'src/a.ts', null, true)
-    expect(openDiff).toHaveBeenCalledWith('/Users/dev/app/src/a.ts', 'a', 'b')
+    expect(openDiff).toHaveBeenCalledWith('/Users/dev/app/src/a.ts', 'a', 'b', { editable: false }) // in stage: sola lettura
+    ipc.gitDiff.mockResolvedValueOnce({ before: 'a', after: 'c', binary: false })
+    await git.openDiff(REPO, e, false)
+    expect(openDiff).toHaveBeenLastCalledWith('/Users/dev/app/src/a.ts', 'a', 'c', { editable: true })
+    openDiff.mockClear()
     ipc.gitDiff.mockResolvedValueOnce({ before: '', after: '', binary: true })
     await git.openDiff(REPO, e, false)
-    expect(openDiff).toHaveBeenCalledTimes(1)
+    expect(openDiff).not.toHaveBeenCalled()
     expect(git.error).toMatch(/binario/)
   })
 
-  it('merge with conflicts leaves a notice', async () => {
+  it('merge outcomes leave a notice', async () => {
     ipc.gitMerge.mockResolvedValue({ kind: 'conflicts', conflicts: ['a', 'b'] })
     await git.merge(REPO, 'dev')
-    expect(git.notice).toBe('Unione con 2 conflitti')
+    expect(git.notice).toMatch(/^Unione con 2 conflitti/)
+    ipc.gitMerge.mockResolvedValue({ kind: 'merged', conflicts: [] })
+    await git.merge(REPO, 'dev')
+    expect(git.notice).toBe('dev unito nel branch corrente')
+  })
+
+  it('a successful remote op leaves an outcome notice', async () => {
+    ipc.gitRemoteOp.mockResolvedValue(8)
+    await git.remote(REPO, 'pull')
+    emit('git:op_done', { id: 8, ok: true, message: '' })
+    expect(git.notice).toBe('Pull completato')
+  })
+
+  it('a failed refresh error is cleared by the next successful refresh', async () => {
+    ipc.gitRepos.mockRejectedValueOnce('git non risponde')
+    await git.refresh()
+    expect(git.error).toBe('git non risponde')
+    await git.refresh()
+    expect(git.error).toBeNull()
+    // un errore di un'operazione non viene cancellato da un refresh riuscito
+    ipc.gitStage.mockRejectedValueOnce('percorso non valido')
+    await git.stage(REPO, ['-x'])
+    await git.refresh()
+    expect(git.error).toBe('percorso non valido')
+  })
+
+  it('safety net: if git:op_done never arrives, busy is released after the guard time; unbind releases it too', async () => {
+    vi.useFakeTimers()
+    try {
+      ipc.gitRemoteOp.mockResolvedValue(9)
+      await git.remote(REPO, 'fetch')
+      expect(git.busy?.id).toBe(9)
+      vi.advanceTimersByTime(REMOTE_GUARD_MS + 1)
+      expect(git.busy).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+    ipc.gitRemoteOp.mockResolvedValue(10)
+    await git.remote(REPO, 'fetch')
+    git.unbind()
+    expect(git.busy).toBeNull()
+  })
+
+  it('a rejected remote start releases busy and shows the error', async () => {
+    ipc.gitRemoteOp.mockRejectedValue('Operazione in corso')
+    await git.remote(REPO, 'push')
+    expect(git.busy).toBeNull()
+    expect(git.error).toBe('Operazione in corso')
   })
 })
 
