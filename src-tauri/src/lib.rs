@@ -1,5 +1,6 @@
 mod claude;
-mod git;
+/// Pubblico per i test di integrazione (argomenti dei comandi git).
+pub mod git;
 /// Pubblici per i test di integrazione (`tests/security.rs`): confinamento dei percorsi, store, fiducia.
 pub mod fs_tree;
 mod lifecycle;
@@ -141,6 +142,16 @@ pub fn run() {
             git::git_diff,
             git::git_branches,
             git::git_log,
+            git::write::git_stage,
+            git::write::git_unstage,
+            git::write::git_discard,
+            git::write::git_commit,
+            git::write::git_checkout,
+            git::write::git_create_branch,
+            git::write::git_delete_branch,
+            git::write::git_merge,
+            git::write::git_merge_abort,
+            git::write::git_init,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -268,3 +268,38 @@ fn search_never_returns_files_outside_the_project_even_through_symlinks() {
     let s = search(&roots, &etc, &AtomicBool::new(false), |c| assert!(c.is_empty(), "{c:?}"));
     assert_eq!(s.hits, 0);
 }
+
+/// Nessun comando git accetta dalla pagina un percorso o un nome di branch che inizia con `-`: sono rifiutati
+/// prima di qualsiasi operazione sul repository (che qui è solo una cartella con `.git`).
+#[test]
+fn git_commands_refuse_dash_arguments() {
+    use code_art_lib::git::write::{self, Confirm, Trasher};
+    struct Never;
+    impl Confirm for Never {
+        fn confirm(&self, _: &str, _: &str, _: &str) -> bool {
+            panic!("nessuna conferma deve essere chiesta")
+        }
+    }
+    impl Trasher for Never {
+        fn trash(&self, _: &Path) -> Result<(), String> {
+            panic!("niente nel Cestino")
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let store = store_with(&base, &[&repo], true);
+    let r = repo.to_string_lossy().into_owned();
+    for bad in ["-f", "--force", "--all", "-D", "--orphan=x", "-"] {
+        let paths = vec![bad.to_string()];
+        assert!(write::stage(&store, "p1", &r, &paths).is_err(), "stage {bad}");
+        assert!(write::unstage(&store, "p1", &r, &paths).is_err(), "unstage {bad}");
+        assert!(write::discard(&store, "p1", &r, &paths, &Never, &Never).is_err(), "discard {bad}");
+        assert!(write::checkout(&store, "p1", &r, bad).is_err(), "checkout {bad}");
+        assert!(write::create_branch(&store, "p1", &r, bad, None, true).is_err(), "create {bad}");
+        assert!(write::create_branch(&store, "p1", &r, "ok", Some(bad), false).is_err(), "from {bad}");
+        assert!(write::delete_branch(&store, "p1", &r, bad, &Never).is_err(), "delete {bad}");
+        assert!(write::merge(&store, "p1", &r, bad).is_err(), "merge {bad}");
+    }
+}

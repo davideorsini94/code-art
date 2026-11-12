@@ -2,6 +2,9 @@
 //! (che esegue hook e `core.fsmonitor` del repository), quindi solo in progetti fidati.
 pub mod cmd;
 pub mod status;
+#[cfg(test)]
+mod testutil;
+pub mod write;
 
 use crate::store::{Project, Result, Store};
 use cmd::{git, git_ok, READ_TIMEOUT};
@@ -169,10 +172,19 @@ fn disk(dir: &Path, rel: &str) -> Result<Side> {
 
 /// Prima = `HEAD` (staged) o indice (non staged); dopo = indice (staged) o disco (non staged).
 pub fn diff(store: &Store, project_id: &str, repo: &str, path: &str, staged: bool) -> Result<DiffText> {
+    diff_with_orig(store, project_id, repo, path, None, staged)
+}
+
+/// Come `diff`; per una rinomina in stage `orig_path` (il nome vecchio) dà il lato prima da `HEAD`.
+pub fn diff_with_orig(store: &Store, project_id: &str, repo: &str, path: &str, orig_path: Option<&str>, staged: bool) -> Result<DiffText> {
     check_rel(path)?;
+    if let Some(o) = orig_path {
+        check_rel(o)?;
+    }
     let dir = resolve_repo(store, project_id, repo)?;
     let (before, after) = if staged {
-        (show(&dir, &format!("HEAD:{path}"))?, show(&dir, &format!(":0:{path}"))?)
+        let old = orig_path.unwrap_or(path);
+        (show(&dir, &format!("HEAD:{old}"))?, show(&dir, &format!(":0:{path}"))?)
     } else {
         (show(&dir, &format!(":0:{path}"))?, disk(&dir, path)?)
     };
@@ -241,9 +253,9 @@ pub async fn git_status(app: AppHandle, window: WebviewWindow, repo: String) -> 
 }
 
 #[tauri::command]
-pub async fn git_diff(app: AppHandle, window: WebviewWindow, repo: String, path: String, staged: bool) -> Result<DiffText> {
+pub async fn git_diff(app: AppHandle, window: WebviewWindow, repo: String, path: String, orig_path: Option<String>, staged: bool) -> Result<DiffText> {
     let id = crate::projects::window_project_id(&window)?;
-    crate::projects::off_main(move || diff(&app.state::<Store>(), &id, &repo, &path, staged)).await
+    crate::projects::off_main(move || diff_with_orig(&app.state::<Store>(), &id, &repo, &path, orig_path.as_deref(), staged)).await
 }
 
 #[tauri::command]
@@ -261,50 +273,8 @@ pub async fn git_log(app: AppHandle, window: WebviewWindow, repo: String, limit:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::testutil::*;
     use std::process::Command;
-
-    /// Esegue git per preparare i repository di prova, isolato dalla configurazione dell'utente.
-    fn g(dir: &Path, args: &[&str]) {
-        let st = Command::new("git")
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(st.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&st.stderr));
-    }
-
-    /// Repository temporaneo con identità locale fittizia (percorso canonico).
-    fn repo() -> tempfile::TempDir {
-        let d = tempfile::tempdir().unwrap();
-        g(d.path(), &["init", "-q", "-b", "main"]);
-        for (k, v) in [("user.name", "test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")] {
-            g(d.path(), &["config", k, v]);
-        }
-        d
-    }
-
-    fn commit_all(d: &Path, msg: &str) {
-        g(d, &["add", "-A"]);
-        g(d, &["commit", "-q", "-m", msg]);
-    }
-
-    /// Store con un progetto "p" fidato che contiene `folders`.
-    fn project(folders: &[&Path]) -> (tempfile::TempDir, Store) {
-        let dir = tempfile::tempdir().unwrap();
-        let s = Store::open(&dir.path().join("t.db")).unwrap();
-        let folders: Vec<String> = folders.iter().map(|f| f.canonicalize().unwrap().to_string_lossy().into_owned()).collect();
-        s.upsert_project(&Project { id: "p".into(), name: "p".into(), folders: folders.clone() }).unwrap();
-        for f in &folders {
-            crate::trust::mark_trusted(&s, f).unwrap();
-        }
-        (dir, s)
-    }
-
-    fn root(d: &tempfile::TempDir) -> String {
-        d.path().canonicalize().unwrap().to_string_lossy().into_owned()
-    }
 
     #[test]
     fn names_with_spaces_accents_newline() {
@@ -408,6 +378,20 @@ mod tests {
         let unstaged = diff(&st, "p", &root(&d), "a.txt", false).unwrap();
         assert_eq!((unstaged.before.as_str(), unstaged.after.as_str()), ("v2\n", "v3\n"));
         assert!(!staged.binary && !unstaged.binary);
+    }
+
+    #[test]
+    fn diff_staged_rename_reads_before_from_orig_path() {
+        let d = repo();
+        std::fs::write(d.path().join("old.txt"), "keep me around\nplease\n").unwrap();
+        commit_all(d.path(), "c1");
+        g(d.path(), &["mv", "old.txt", "new.txt"]);
+        std::fs::write(d.path().join("new.txt"), "keep me around\nplease\nmore\n").unwrap();
+        g(d.path(), &["add", "new.txt"]);
+        let (_s, st) = project(&[d.path()]);
+        let r = diff_with_orig(&st, "p", &root(&d), "new.txt", Some("old.txt"), true).unwrap();
+        assert_eq!((r.before.as_str(), r.after.as_str()), ("keep me around\nplease\n", "keep me around\nplease\nmore\n"));
+        assert!(diff_with_orig(&st, "p", &root(&d), "new.txt", Some("../x"), true).is_err());
     }
 
     #[test]
