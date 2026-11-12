@@ -37,6 +37,40 @@ pub fn kill_group(pid: u32) {
     }
 }
 
+/// Dopo SIGTERM, quanto aspettare prima di SIGKILL (`stop_group`).
+pub const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// Ferma il gruppo di `child` (avviato con `in_new_session`) e lo raccoglie: prima SIGTERM, così git rimuove i suoi
+/// file di lock (`index.lock`, lock dei ref), poi, se dopo `grace` resta qualcuno del gruppo, SIGKILL.
+/// Dopo che il capo è stato raccolto il pgid resta valido finché il gruppo ha membri (il sistema non riusa un pid
+/// che è ancora l'id di un gruppo esistente), quindi il SIGKILL finale raggiunge solo i superstiti.
+pub fn stop_group(child: &mut std::process::Child, grace: Duration) {
+    let Ok(pid) = i32::try_from(child.id()) else { return };
+    if pid <= 0 {
+        return;
+    }
+    // SAFETY: semplici chiamate di sistema; pid negativo = gruppo.
+    unsafe {
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    let until = Instant::now() + grace;
+    let mut reaped = false;
+    while Instant::now() < until {
+        if !reaped {
+            reaped = !matches!(child.try_wait(), Ok(None));
+        }
+        // gruppo vuoto: finito
+        if reaped && unsafe { libc::kill(-pid, 0) } != 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
 /// Dopo l'uscita del processo, quanto aspettare ancora la fine dello stdout (un discendente in
 /// background può tenere aperta la pipe all'infinito: quello che serve è già stato scritto).
 const DRAIN_GRACE: Duration = Duration::from_millis(300);

@@ -145,6 +145,28 @@ fn commit_runs_repository_hooks() {
     assert!(e.contains("bloccato dal hook"), "{e}");
 }
 
+/// Gli hook vedono pathspec normali: un hook che filtra con un glob trova i file (con `GIT_LITERAL_PATHSPECS=1`
+/// ereditato non troverebbe nulla e passerebbe a vuoto).
+#[test]
+fn commit_hooks_see_glob_pathspecs() {
+    let (d, _sd, st, r) = seeded();
+    let hooks = d.path().join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    let seen = d.path().join("visti.txt");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\nfiles=$(git diff --cached --name-only -- '*.txt')\n[ -n \"$files\" ] || {{ echo 'nessun file *.txt' >&2; exit 1; }}\necho \"$files\" > '{}'\n", seen.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    g(d.path(), &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    std::fs::write(d.path().join("a.txt"), "due\n").unwrap();
+    stage(&st, "p", &r, &s(&["a.txt"])).unwrap();
+    commit(&st, "p", &r, "con hook", false).unwrap();
+    assert_eq!(std::fs::read_to_string(&seen).unwrap().trim(), "a.txt");
+}
+
 #[test]
 fn branch_name_starting_with_dash_refused() {
     let (d, _sd, st, r) = seeded();
@@ -356,4 +378,23 @@ fn refused_when_untrusted() {
     assert_eq!(checkout(&st, "p", &r, "main").unwrap_err(), u);
     assert_eq!(merge(&st, "p", &r, "main").unwrap_err(), u);
     assert_eq!(init(&st, "p", &r).unwrap_err(), u);
+}
+
+/// Cestino che rifiuta tutto.
+struct BrokenTrash;
+
+impl Trasher for BrokenTrash {
+    fn trash(&self, _: &Path) -> Result<()> {
+        Err("disco pieno".into())
+    }
+}
+
+#[test]
+fn discard_trash_failure_says_what_was_already_discarded() {
+    let (d, _sd, st, r) = seeded();
+    std::fs::write(d.path().join("a.txt"), "modificato\n").unwrap();
+    std::fs::write(d.path().join("nuovo.txt"), "x").unwrap();
+    let e = discard(&st, "p", &r, &s(&["a.txt", "nuovo.txt"]), &confirm(true), &BrokenTrash).unwrap_err();
+    assert!(e.starts_with("1 file scartati") && e.contains("nuovo.txt") && e.contains("disco pieno"), "{e}");
+    assert!(d.path().join("nuovo.txt").exists());
 }

@@ -269,8 +269,8 @@ fn search_never_returns_files_outside_the_project_even_through_symlinks() {
     assert_eq!(s.hits, 0);
 }
 
-/// Nessun comando git accetta dalla pagina un percorso o un nome di branch che inizia con `-`: sono rifiutati
-/// prima di qualsiasi operazione sul repository (che qui è solo una cartella con `.git`).
+/// Nessun comando git accetta dalla pagina un percorso o un nome di branch che inizia con `-`: il rifiuto viene
+/// dalla validazione (errore specifico), non da git. Controllo positivo: un nome valido arriva fino a git.
 #[test]
 fn git_commands_refuse_dash_arguments() {
     use code_art_lib::git::write::{self, Confirm, Trasher};
@@ -288,18 +288,31 @@ fn git_commands_refuse_dash_arguments() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();
     let repo = base.join("repo");
-    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", "-q", "-b", "main"])
+        .status()
+        .unwrap();
+    assert!(init.success());
     let store = store_with(&base, &[&repo], true);
     let r = repo.to_string_lossy().into_owned();
+    const BAD_PATH: &str = "percorso non valido";
+    const BAD_BRANCH: &str = "nome di branch non valido";
     for bad in ["-f", "--force", "--all", "-D", "--orphan=x", "-"] {
         let paths = vec![bad.to_string()];
-        assert!(write::stage(&store, "p1", &r, &paths).is_err(), "stage {bad}");
-        assert!(write::unstage(&store, "p1", &r, &paths).is_err(), "unstage {bad}");
-        assert!(write::discard(&store, "p1", &r, &paths, &Never, &Never).is_err(), "discard {bad}");
-        assert!(write::checkout(&store, "p1", &r, bad).is_err(), "checkout {bad}");
-        assert!(write::create_branch(&store, "p1", &r, bad, None, true).is_err(), "create {bad}");
-        assert!(write::create_branch(&store, "p1", &r, "ok", Some(bad), false).is_err(), "from {bad}");
-        assert!(write::delete_branch(&store, "p1", &r, bad, &Never).is_err(), "delete {bad}");
-        assert!(write::merge(&store, "p1", &r, bad).is_err(), "merge {bad}");
+        assert_eq!(write::stage(&store, "p1", &r, &paths).unwrap_err(), BAD_PATH, "stage {bad}");
+        assert_eq!(write::unstage(&store, "p1", &r, &paths).unwrap_err(), BAD_PATH, "unstage {bad}");
+        assert_eq!(write::discard(&store, "p1", &r, &paths, &Never, &Never).unwrap_err(), BAD_PATH, "discard {bad}");
+        assert_eq!(write::checkout(&store, "p1", &r, bad).unwrap_err(), BAD_BRANCH, "checkout {bad}");
+        assert_eq!(write::create_branch(&store, "p1", &r, bad, None, true).unwrap_err(), BAD_BRANCH, "create {bad}");
+        assert_eq!(write::create_branch(&store, "p1", &r, "ok", Some(bad), false).unwrap_err(), BAD_BRANCH, "from {bad}");
+        assert_eq!(write::delete_branch(&store, "p1", &r, bad, &Never).unwrap_err(), BAD_BRANCH, "delete {bad}");
+        assert_eq!(write::merge(&store, "p1", &r, bad).unwrap_err(), BAD_BRANCH, "merge {bad}");
     }
+    // controllo positivo: nomi validi superano la validazione e l'errore arriva da git
+    assert!(write::stage(&store, "p1", &r, &["manca.txt".to_string()]).unwrap_err().starts_with("git: "));
+    assert_eq!(write::checkout(&store, "p1", &r, "manca").unwrap_err(), "Il branch «manca» non esiste");
 }

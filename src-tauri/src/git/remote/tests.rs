@@ -164,7 +164,13 @@ fn hang_fetch(s: &Setup) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     let marker = dir.join("partito");
     let script = dir.join("appeso.sh");
-    std::fs::write(&script, format!("#!/bin/sh\ntouch '{}'\nsleep 60\n", marker.display())).unwrap();
+    // registra il proprio pid e l'arrivo di SIGTERM, poi resta appeso
+    let body = format!(
+        "#!/bin/sh\ntrap 'touch \"{d}/term\"; exit 1' TERM\necho $$ > \"{d}/pid\"\ntouch '{m}'\nwhile :; do sleep 0.05; done\n",
+        d = dir.display(),
+        m = marker.display()
+    );
+    std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     g(s.work.path(), &["config", "remote.origin.uploadpack", script.to_str().unwrap()]);
     marker
@@ -194,6 +200,17 @@ fn cancel_kills_long_op() {
     assert!(!ok);
     assert_eq!(msg, CANCELLED);
     assert!(t0.elapsed() < Duration::from_secs(5));
+    // prima SIGTERM (git può togliere i suoi lock), e nessuno del gruppo sopravvive
+    let bin = marker.parent().unwrap();
+    assert!(bin.join("term").exists(), "il gruppo non ha ricevuto SIGTERM");
+    let pid: i32 = std::fs::read_to_string(bin.join("pid")).unwrap().trim().parse().unwrap();
+    let gone = (0..150).any(|_| {
+        // SAFETY: segnale 0 = solo verifica di esistenza
+        let dead = unsafe { libc::kill(pid, 0) } != 0;
+        std::thread::sleep(Duration::from_millis(20));
+        dead
+    });
+    assert!(gone, "il processo appeso è sopravvissuto all'annullamento");
     // il repository è di nuovo libero
     let (id2, rx2) = begin(&s, &ops, RemoteOp::Fetch);
     id2.unwrap();
@@ -238,4 +255,12 @@ fn ssh_is_batch_mode_unless_user_configured() {
     assert_eq!(ssh_override(&user, s.work.path()), None);
     g(s.work.path(), &["config", "core.sshCommand", "ssh -F cfg"]);
     assert_eq!(ssh_override(&env, s.work.path()), None);
+}
+
+#[test]
+fn progress_detection_spares_encoded_urls() {
+    assert!(is_progress("Receiving objects:  45% (9/20)"));
+    assert!(is_progress("Counting objects: 100% (2/2), done."));
+    assert!(!is_progress("fatal: unable to access 'https://h/a%20b.git/': Failed to connect"));
+    assert!(!is_progress("To /x"));
 }

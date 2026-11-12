@@ -1,6 +1,6 @@
 //! Strumenti di sistema (`git`, `gh`, language server): ricerca nell'ambiente di login ed esecuzione con
-//! timeout. Processi sempre con lista di argomenti, in una sessione propria (`kill_group` raggiunge i discendenti).
-use crate::claude::locate::{in_new_session, kill_group, login_env};
+//! timeout. Processi sempre con lista di argomenti, in una sessione propria (`stop_group` raggiunge i discendenti).
+use crate::claude::locate::{in_new_session, login_env, stop_group, TERM_GRACE};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
@@ -124,16 +124,15 @@ pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> 
     let deadline = Instant::now() + timeout;
     let status = loop {
         if overflow.load(Ordering::Relaxed) {
-            kill_group(child.id());
-            let _ = child.wait();
+            stop_group(&mut child, TERM_GRACE);
             return Err(format!("output oltre {} MB", STDOUT_MAX / (1024 * 1024)));
         }
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                kill_group(child.id());
-                let _ = child.wait();
+                // SIGTERM prima: una scrittura git scaduta non lascia `index.lock` orfani
+                stop_group(&mut child, TERM_GRACE);
                 return Err(format!("tempo scaduto dopo {} s", timeout.as_secs().max(1)));
             }
             Err(e) => return Err(format!("attesa non riuscita: {e}")),
@@ -261,6 +260,56 @@ mod tests {
         let e = run_tool(c, Duration::from_millis(200), None).unwrap_err();
         assert!(e.contains("tempo scaduto"), "{e}");
         assert!(t.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Pid scritto da uno script di prova, quando compare.
+    fn read_pid(p: &Path) -> i32 {
+        let t0 = Instant::now();
+        loop {
+            if let Some(n) = std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse().ok()) {
+                return n;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "pid mai scritto");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `true` se `pid` sparisce entro qualche secondo (uno zombie orfano viene raccolto da launchd).
+    fn gone(pid: i32) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) {
+            // SAFETY: segnale 0 = solo verifica di esistenza
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn timeout_sends_sigterm_first() {
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("term");
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("trap 'touch \"{}\"; exit 0' TERM; while :; do sleep 0.05; done", marker.display())]);
+        let t = Instant::now();
+        assert!(run_tool(c, Duration::from_millis(300), None).unwrap_err().contains("tempo scaduto"));
+        assert!(marker.exists(), "il processo non ha ricevuto SIGTERM");
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_kills_processes_ignoring_sigterm() {
+        let d = tempfile::tempdir().unwrap();
+        let pidf = d.path().join("pid");
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("trap '' TERM; echo $$ > \"{}\"; while :; do sleep 0.05; done", pidf.display())]);
+        let t = Instant::now();
+        assert!(run_tool(c, Duration::from_millis(300), None).unwrap_err().contains("tempo scaduto"));
+        let el = t.elapsed();
+        assert!(el >= TERM_GRACE && el < TERM_GRACE + Duration::from_secs(3), "{el:?}");
+        assert!(gone(read_pid(&pidf)));
     }
 
     #[test]

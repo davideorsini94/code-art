@@ -1,10 +1,10 @@
 //! Operazioni remote lunghe (fetch, pull, push): processo in una sessione propria, avanzamento letto da stderr
-//! (`--progress`), annullabili (`kill_group`), timeout 10 minuti. Mai `--force`. Nessuna richiesta di credenziali
+//! (`--progress`), annullabili (`stop_group`: SIGTERM, poi SIGKILL), timeout 10 minuti. Mai `--force`. Nessuna richiesta di credenziali
 //! nel terminale (`GIT_TERMINAL_PROMPT=0`, ssh in `BatchMode`); gli helper di credenziali dell'utente restano attivi.
 use super::cmd::{base_command, git, READ_TIMEOUT, REMOTE_TIMEOUT};
 use super::resolve_repo;
 use super::write::{lock_repo, RepoGuard};
-use crate::claude::locate::{in_new_session, kill_group};
+use crate::claude::locate::{in_new_session, stop_group, TERM_GRACE};
 use crate::store::{Result, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -109,9 +109,10 @@ impl LineSplitter {
     }
 }
 
-/// Riga di avanzamento con percentuale ("Receiving objects:  45% (9/20)").
+/// Riga di avanzamento con percentuale ("Receiving objects:  45% (9/20)"): una cifra seguita da `% ` o `%,`.
+/// Un URL con caratteri codificati (`%2F`) non lo è, e resta nel messaggio d'errore.
 fn is_progress(line: &str) -> bool {
-    line.contains('%') && line.contains(':')
+    line.contains(": ") && line.as_bytes().windows(3).any(|w| w[0].is_ascii_digit() && w[1] == b'%' && matches!(w[2], b' ' | b','))
 }
 
 /// Argomenti per `op`. `push` imposta l'upstream se manca (`-u origin <branch>`).
@@ -178,7 +179,9 @@ fn run(mut cmd: Command, cancel: &AtomicBool, timeout: Duration, on_line: &mut d
     let mut last_progress: Option<Instant> = None;
     let mut handle = |line: String| {
         let progress = is_progress(&line);
-        if !progress || last_progress.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+        // la riga finale di una fase ("100% (20/20), done.") passa sempre: l'interfaccia non resta al 97%
+        let final_step = line.ends_with("done.");
+        if !progress || final_step || last_progress.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
             on_line(&line);
             if progress {
                 last_progress = Some(Instant::now());
@@ -194,15 +197,14 @@ fn run(mut cmd: Command, cancel: &AtomicBool, timeout: Duration, on_line: &mut d
     let deadline = Instant::now() + timeout;
     let status = loop {
         if cancel.load(Ordering::SeqCst) {
-            kill_group(child.id());
-            let _ = child.wait();
+            // SIGTERM prima: git toglie i suoi lock (indice, ref) e il repository resta usabile
+            stop_group(&mut child, TERM_GRACE);
             return Err(CANCELLED.into());
         }
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if Instant::now() >= deadline => {
-                kill_group(child.id());
-                let _ = child.wait();
+                stop_group(&mut child, TERM_GRACE);
                 return Err(format!("tempo scaduto dopo {} s", timeout.as_secs().max(1)));
             }
             Ok(None) => {
