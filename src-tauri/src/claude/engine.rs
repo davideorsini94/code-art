@@ -1475,7 +1475,10 @@ mod tests {
         assert!(matches!(&asks[0], ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b"));
         assert!(env.engine.pending_asks("p2", &sid).is_err()); // altro progetto
         env.engine.answer("p1", &sid, "c6b1b64f-8800-4372-b30a-5b4c4e3c465b", "allow").unwrap();
-        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
+        // la fixture contiene più turni: dopo la risposta il finto può già emettere la richiesta successiva (altro id),
+        // quindi si verifica che quella risposta sia uscita dalla lista, non che la lista sia vuota
+        let left = env.engine.pending_asks("p1", &sid).unwrap();
+        assert!(!left.iter().any(|a| matches!(a, ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b")));
     }
 
     #[test]

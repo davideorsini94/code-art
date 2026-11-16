@@ -147,9 +147,11 @@ fn stop_kills_process_group() {
     }
 }
 
+/// `true` se `pid` non esiste o è uno zombie (morto, in attesa che `launchd` lo raccolga: i discendenti rimasti
+/// orfani non li raccoglie `stop_group`, e `kill(pid, 0)` riesce anche su uno zombie). Nessuna attesa.
 fn gone_now(pid: i32) -> bool {
-    // SAFETY: segnale 0 = solo verifica di esistenza
-    unsafe { libc::kill(pid, 0) != 0 }
+    let out = std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().is_empty() || String::from_utf8_lossy(&out.stdout).trim_start().starts_with('Z')
 }
 
 #[test]
