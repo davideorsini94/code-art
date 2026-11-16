@@ -8,7 +8,7 @@
   import FileIcon from './FileIcon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { relativeToFolders } from '../lib/conv/paths'
-  import { parseConflicts, resolve, type Conflict, type Pick } from '../lib/conflicts'
+  import { parseConflicts, resolveEdit, type Conflict, type Pick } from '../lib/conflicts'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -259,14 +259,23 @@
 
   // conflitti di unione del file attivo: decorazioni, riga di azioni sopra ogni conflitto (view zone costruita con nodi DOM) e contatore
   let conflicts = $state.raw<Conflict[]>([])
-  let conflictAt = -1
   let zoneIds: string[] = []
   let decos: import('monaco-editor').editor.IEditorDecorationsCollection | undefined
 
+  let repaint: (() => void) | undefined
+
   function pickConflict(model: IModel, c: Conflict, pick: Pick) {
     if (readOnly) return
-    const next = resolve(model.getValue(), c, pick)
-    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: next }], () => null)
+    // la vista può essere indietro di qualche istante: si lavora sul conflitto corrente (stessa riga di inizio e stessi lati)
+    const text = model.getValue()
+    const now = parseConflicts(text).find((x) => x.start === c.start && x.ours === c.ours && x.theirs === c.theirs)
+    if (!now) return
+    const e = resolveEdit(text, now, pick)
+    // una sola voce di annullamento: ⌘Z toglie la scelta e nient'altro (né batte-e-ribatti dell'utente)
+    model.pushStackElement()
+    model.pushEditOperations([], [{ range: { startLineNumber: e.startLine, startColumn: 1, endLineNumber: e.endLine, endColumn: e.endColumn }, text: e.text }], () => null)
+    model.pushStackElement()
+    repaint?.()
   }
 
   function actionsNode(model: IModel, c: Conflict) {
@@ -288,7 +297,6 @@
     const text = model.getValue()
     const cs = text.includes('<<<<<<<') ? parseConflicts(text) : []
     conflicts = cs
-    if (conflictAt >= cs.length) conflictAt = -1
     const line = (a: number, b: number, cls: string) => ({ range: { startLineNumber: a, startColumn: 1, endLineNumber: b, endColumn: 1 }, options: { isWholeLine: true, className: cls } })
     const list = cs.flatMap((c) => [
       line(c.start, c.start, 'ca-conflict-mark'),
@@ -302,7 +310,7 @@
     decos.set(list)
     ed.changeViewZones((acc) => {
       zoneIds.forEach((id) => acc.removeZone(id))
-      zoneIds = cs.map((c) => acc.addZone({ afterLineNumber: c.start - 1, heightInPx: 26, domNode: actionsNode(model, c) }))
+      zoneIds = (readOnly ? [] : cs).map((c) => acc.addZone({ afterLineNumber: c.start - 1, heightInPx: 26, domNode: actionsNode(model, c) }))
     })
   }
 
@@ -316,10 +324,20 @@
       return
     }
     const ed = main
-    conflictAt = -1
     paintConflicts(ed, model)
-    const sub = model.onDidChangeContent(() => paintConflicts(ed, model))
+    // modifiche a raffica: si ridisegna dopo 150 ms; subito dopo una scelta
+    let timer: ReturnType<typeof setTimeout> | undefined
+    repaint = () => {
+      clearTimeout(timer)
+      paintConflicts(ed, model)
+    }
+    const sub = model.onDidChangeContent(() => {
+      clearTimeout(timer)
+      timer = setTimeout(() => paintConflicts(ed, model), 150)
+    })
     return () => {
+      clearTimeout(timer)
+      repaint = undefined
       sub.dispose()
       decos?.clear()
       ed.changeViewZones((acc) => zoneIds.forEach((id) => acc.removeZone(id)))
@@ -327,10 +345,11 @@
     }
   })
 
+  /** Dal cursore: il primo conflitto che inizia dopo (↓) o l'ultimo che inizia prima (↑), girando intorno. */
   function jump(dir: 1 | -1) {
     if (!main || conflicts.length === 0) return
-    conflictAt = (conflictAt + dir + conflicts.length) % conflicts.length
-    const c = conflicts[conflictAt]
+    const line = main.getPosition()?.lineNumber ?? 1
+    const c = dir === 1 ? (conflicts.find((x) => x.start > line) ?? conflicts[0]) : ([...conflicts].reverse().find((x) => x.start < line) ??conflicts[conflicts.length - 1])
     main.setPosition({ lineNumber: c.start, column: 1 })
     main.revealLineInCenter(c.start)
     main.focus()

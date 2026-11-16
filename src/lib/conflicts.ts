@@ -14,7 +14,7 @@ const isMarker = (line: string, mark: string) => {
 }
 const isMid = (line: string) => bare(line) === '======='
 
-/** Trova i conflitti (marcatori `<<<<<<<`, `=======`, `>>>>>>>`, con `|||||||` per lo stile diff3). Marcatori sbilanciati o fuori ordine si ignorano. */
+/** Trova i conflitti. `=======` conta solo dopo un `<<<<<<<` ancora aperto e solo il primo di quel livello: una sottolineatura markdown nel lato nostro, prima del separatore vero, e' un limite noto del formato. (marcatori `<<<<<<<`, `=======`, `>>>>>>>`, con `|||||||` per lo stile diff3). Marcatori sbilanciati o fuori ordine si ignorano. */
 export function parseConflicts(text: string): Conflict[] {
   const lines = split(text)
   const out: Conflict[] = []
@@ -42,12 +42,25 @@ export function parseConflicts(text: string): Conflict[] {
   return out
 }
 
-/** Sostituisce il blocco del conflitto con il lato scelto, mantenendo i fine riga del file. */
-export function resolve(text: string, c: Conflict, pick: Pick): string {
+/** Modifica minima per risolvere un conflitto: righe 1-based (come Monaco), `text` con i fine riga del file. */
+export type ConflictEdit = { startLine: number; endLine: number; endColumn: number; text: string }
+
+export function resolveEdit(text: string, c: Conflict, pick: Pick): ConflictEdit {
   const lines = split(text)
   const oursEnd = (c.base ?? c.mid) - 1
   const ours = lines.slice(c.start, oursEnd)
   const theirs = lines.slice(c.mid, c.end - 1)
-  const kept = pick === 'ours' ? ours : pick === 'theirs' ? theirs : [...ours, ...theirs]
-  return [...lines.slice(0, c.start - 1), ...kept, ...lines.slice(c.end)].join('')
+  const kept = (pick === 'ours' ? ours : pick === 'theirs' ? theirs : [...ours, ...theirs]).join('')
+  // dopo la riga `>>>>>>>` c'è almeno un'altra riga (anche vuota): si sostituisce anche il suo a capo
+  if (c.end < text.split('\n').length) return { startLine: c.start, endLine: c.end + 1, endColumn: 1, text: kept }
+  // marcatore finale ultima riga senza a capo: il file resta senza a capo finale
+  return { startLine: c.start, endLine: c.end, endColumn: bare(lines[c.end - 1]).length + 1, text: kept.replace(/\r?\n$/, '') }
+}
+
+/** Sostituisce il blocco del conflitto con il lato scelto, mantenendo i fine riga del file. */
+export function resolve(text: string, c: Conflict, pick: Pick): string {
+  const lines = split(text)
+  const e = resolveEdit(text, c, pick)
+  const after = e.endLine > c.end ? lines.slice(c.end).join('') : ''
+  return lines.slice(0, c.start - 1).join('') + e.text + after
 }

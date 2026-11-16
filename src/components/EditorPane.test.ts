@@ -14,6 +14,7 @@ vi.mock('../lib/ipc', () => ({
 }))
 const diffOptions = vi.hoisted(() => vi.fn())
 const zones = vi.hoisted(() => ({ list: [] as { afterLineNumber: number; domNode: HTMLElement }[] }))
+const cursor = vi.hoisted(() => ({ line: 1, log: [] as string[], edits: [] as unknown[] }))
 vi.mock('../lib/monaco', () => {
   const model = () => {
     let v = ''
@@ -22,8 +23,16 @@ vi.mock('../lib/monaco', () => {
     return {
       getValue: () => v, setValue: (x: string) => { v = x; ver++; subs.forEach((f) => f()) }, dispose() {}, getAlternativeVersionId: () => ver,
       onDidChangeContent: (f: () => void) => { subs.push(f); return { dispose() { subs.splice(subs.indexOf(f), 1) } } },
-      getFullModelRange: () => ({}),
-      pushEditOperations: (_s: unknown, ops: { text: string }[]) => { v = ops[0].text; ver++; subs.forEach((f) => f()); return null },
+      pushStackElement: () => { cursor.log.push('stack') },
+      pushEditOperations: (_s: unknown, ops: { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }[]) => {
+        const r = ops[0].range
+        cursor.log.push('edit')
+        cursor.edits.push(r)
+        const ls = v.match(/[^\n]*\n|[^\n]+$/g) ?? []
+        const at = (line: number, col: number) => ls.slice(0, line - 1).join('').length + col - 1
+        v = v.slice(0, at(r.startLineNumber, r.startColumn)) + ops[0].text + v.slice(at(r.endLineNumber, r.endColumn))
+        ver++; subs.forEach((f) => f()); return null
+      },
       init: (x: string) => (v = x),
     }
   }
@@ -32,7 +41,7 @@ vi.mock('../lib/monaco', () => {
     createDecorationsCollection: () => ({ set() {}, clear() {} }),
     changeViewZones: (cb: (a: { addZone: (z: { afterLineNumber: number; domNode: HTMLElement }) => string; removeZone: (id: string) => void }) => void) =>
       cb({ addZone: (z) => { zones.list.push(z); return String(zones.list.length) }, removeZone: () => { zones.list.length = 0 } }),
-    revealLineInCenter() {}, setPosition() {}, focus() {},
+    revealLineInCenter() {}, setPosition: (p: { lineNumber: number }) => { cursor.line = p.lineNumber }, getPosition: () => ({ lineNumber: cursor.line, column: 1 }), focus() {},
   })
   return {
     monaco: {
@@ -48,6 +57,7 @@ vi.mock('../lib/monaco', () => {
 import EditorPane from './EditorPane.svelte'
 import { editor } from '../lib/stores/editor.svelte'
 import { fsRead, fsWrite } from '../lib/ipc'
+import { projectStore } from '../lib/stores/project.svelte'
 
 beforeAll(() => {
   window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -181,6 +191,80 @@ describe('EditorPane merge conflicts', () => {
     await waitFor(() => expect(editor.activeTab!.dirty).toBe(true))
     await waitFor(() => expect(screen.queryByText('1 conflitto')).toBeNull())
     expect(zones.list).toHaveLength(0)
+  })
+
+  const two = 'a\n<<<<<<< HEAD\nm1\n=======\ns1\n>>>>>>> f\nb\n<<<<<<< HEAD\nm2\n=======\ns2\n>>>>>>> f\nc\n<<<<<<< HEAD\nm3\n=======\ns3\n>>>>>>> f\n'
+  const open3 = async (path: string) => {
+    zones.list.length = 0
+    cursor.line = 1
+    vi.mocked(fsRead).mockResolvedValueOnce({ text: two, mtimeMs: 1 })
+    await editor.open(path)
+    flushSync()
+    await waitFor(() => expect(screen.getByText('3 conflitti')).toBeTruthy())
+  }
+  const up = () => fireEvent.click(screen.getByRole('button', { name: 'Conflitto precedente' }))
+  const down = () => fireEvent.click(screen.getByRole('button', { name: 'Conflitto successivo' }))
+
+  it('navigation follows the cursor: first up goes to the last conflict, first down to the first', async () => {
+    render(EditorPane)
+    await open3('/Users/dev/app/n1.ts')
+    await up()
+    expect(cursor.line).toBe(14)
+    cursor.line = 1
+    await down()
+    expect(cursor.line).toBe(2)
+    await down()
+    expect(cursor.line).toBe(8)
+    await down()
+    expect(cursor.line).toBe(14)
+    await down() // giro completo
+    expect(cursor.line).toBe(2)
+    await up()
+    expect(cursor.line).toBe(14)
+  })
+
+  it('navigation after the cursor was moved by hand and after resolving a conflict', async () => {
+    render(EditorPane)
+    await open3('/Users/dev/app/n2.ts')
+    cursor.line = 9 // dentro il secondo conflitto
+    await down()
+    expect(cursor.line).toBe(14)
+    cursor.line = 9
+    await up()
+    expect(cursor.line).toBe(8)
+    // risolto il primo, i conflitti sono 2 (ora alle righe 4 e 10): giù dal cursore a riga 1 va al primo rimasto
+    zones.list[0].domNode.querySelectorAll('button')[1].click()
+    flushSync()
+    await waitFor(() => expect(screen.getByText('2 conflitti')).toBeTruthy())
+    cursor.line = 1
+    await down()
+    expect(cursor.line).toBe(4)
+    await down()
+    expect(cursor.line).toBe(10)
+    await up()
+    expect(cursor.line).toBe(4)
+  })
+
+  it('a pick is one undo step (stack element before and after) and touches only the conflict lines', async () => {
+    render(EditorPane)
+    await open3('/Users/dev/app/n3.ts')
+    cursor.log.length = 0
+    cursor.edits.length = 0
+    zones.list[1].domNode.querySelectorAll('button')[0].click()
+    expect(cursor.log).toEqual(['stack', 'edit', 'stack'])
+    expect(cursor.edits).toEqual([{ startLineNumber: 8, startColumn: 1, endLineNumber: 13, endColumn: 1 }])
+  })
+
+  it('the action row is not shown when the folder is read-only', async () => {
+    projectStore.untrusted = ['/Users/dev/app']
+    render(EditorPane)
+    zones.list.length = 0
+    vi.mocked(fsRead).mockResolvedValueOnce({ text: two, mtimeMs: 1 })
+    await editor.open('/Users/dev/app/n4.ts')
+    flushSync()
+    await waitFor(() => expect(screen.getByText('3 conflitti')).toBeTruthy())
+    expect(zones.list).toHaveLength(0)
+    projectStore.untrusted = []
   })
 
   it('shows no conflict controls for a file without markers', async () => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import FileIcon from '../FileIcon.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { iconFor } from '../../lib/fileicons'
@@ -18,23 +19,39 @@
   const blocked = $derived(git.busy !== null)
   let open = $state(true)
 
-  // conflitti pronti da segnare come risolti: letti dal disco, senza marcatori e senza modifiche non salvate nell'editor
+  // conflitti pronti da segnare come risolti: letti dal disco, senza marcatori e senza modifiche non salvate nell'editor.
+  // Un file si rilegge quando cambia lo stato (a ogni aggiornamento dello stato git) o la sua scheda, non quando cambiano le altre.
   let ready = $state<Record<string, boolean>>({})
+  const token: Record<string, number> = {}
+  const seen: Record<string, string> = {}
+  function check(p: string) {
+    const abs = git.absolute(repo, p)
+    const n = (token[p] = (token[p] ?? 0) + 1)
+    if (editor.tabs.some((t) => t.key === abs && t.dirty)) {
+      ready[p] = false
+      return
+    }
+    Promise.resolve()
+      .then(() => fsRead(abs))
+      .then((c) => { if (token[p] === n) ready[p] = !c.text.includes('<<<<<<<') || parseConflicts(c.text).length === 0 })
+      .catch(() => { if (token[p] === n) ready[p] = false })
+  }
   $effect(() => {
     const todo = entries.filter((e) => e.conflict).map((e) => e.path)
-    const dirty = new Set(editor.tabs.filter((t) => t.dirty).map((t) => t.key))
-    let stale = false
-    for (const p of todo) {
-      if (dirty.has(git.absolute(repo, p))) {
-        ready[p] = false
-        continue
+    untrack(() => todo.forEach(check))
+  })
+  $effect(() => {
+    const todo = entries.filter((e) => e.conflict).map((e) => e.path)
+    const sigs = todo.map((p) => {
+      const t = editor.tabs.find((x) => x.key === git.absolute(repo, p))
+      return [p, `${t?.dirty ?? '-'}:${t?.mtimeMs ?? '-'}`] as const
+    })
+    untrack(() => {
+      for (const [p, sig] of sigs) {
+        if (seen[p] !== undefined && seen[p] !== sig) check(p)
+        seen[p] = sig
       }
-      Promise.resolve()
-        .then(() => fsRead(git.absolute(repo, p)))
-        .then((c) => { if (!stale) ready[p] = !c.text.includes('<<<<<<<') || parseConflicts(c.text).length === 0 })
-        .catch(() => { if (!stale) ready[p] = false })
-    }
-    return () => { stale = true }
+    })
   })
 </script>
 
@@ -63,11 +80,9 @@
             <span class="fname">{name(e.path)}</span>
             <span class="fdir">{dir(e.path)}</span>
           </button>
-          <span class="acts">
           {#if !staged && e.conflict && ready[e.path]}
             <button class="solve" aria-label="Segna {name(e.path)} come risolto" disabled={blocked} use:tooltip={'Nessun conflitto rimasto: aggiungi il file allo stage'} onclick={() => void git.stage(repo, [e.path])}>Segna come risolto</button>
           {/if}
-          </span>
           <span class="acts hover">
             <button aria-label="Apri il file {name(e.path)}" use:tooltip={'Apri il file'} onclick={() => void editor.open(git.absolute(repo, e.path))}>↗</button>
             {#if !staged}
@@ -100,7 +115,8 @@
   .acts button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--dim); font: inherit; cursor: pointer; }
   .acts button:hover:not(:disabled) { background: var(--glass2); color: var(--txt); }
   .acts button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .acts button.solve { width: auto; padding: 0 8px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
+  .solve { height: 20px; padding: 0 8px; border: 0; border-radius: 5px; font: inherit; font-size: 11px; background: var(--accent-soft); color: var(--accent); cursor: pointer; }
+  .solve:disabled { opacity: 0.4; cursor: not-allowed; }
   .hover { visibility: hidden; }
   .row:hover .hover, .row:focus-within .hover { visibility: visible; }
   .badge { width: 16px; text-align: center; font-size: 11px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; color: var(--wait); }
