@@ -67,14 +67,18 @@ const NESTED_DEPTH: usize = 3;
 const MAX_REPOS: usize = 50;
 /// Cartelle mai attraversate nella ricerca (oltre a quelle nascoste).
 const SKIP_DIRS: &[&str] = &["node_modules", "target", "vendor", "venv", "dist", "build"];
+/// Voci di cartella lette al massimo, per cartella del progetto: una cartella enorme (`~`) non si visita tutta.
+const MAX_VISITED: usize = 2000;
 /// Quanto vale il risultato della ricerca di una cartella.
 const NESTED_TTL: Duration = Duration::from_secs(2);
 
 /// Repository sotto `dir` (esclusa), in ordine di percorso; non scende nei repository trovati né nei link simbolici.
-fn scan_nested(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn scan_nested(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut subs: Vec<(String, PathBuf)> = rd
-        .flatten()
+    let entries: Vec<_> = rd.flatten().take(*budget).collect();
+    *budget = budget.saturating_sub(entries.len().max(1));
+    let mut subs: Vec<(String, PathBuf)> = entries
+        .into_iter()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) // `DirEntry::file_type` non segue i link
         .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
         .filter(|(n, _)| !n.starts_with('.') && !SKIP_DIRS.contains(&n.as_str()))
@@ -86,8 +90,8 @@ fn scan_nested(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         }
         if p.join(".git").exists() {
             out.push(p);
-        } else if depth < NESTED_DEPTH {
-            scan_nested(&p, depth + 1, out);
+        } else if depth < NESTED_DEPTH && *budget > 0 {
+            scan_nested(&p, depth + 1, budget, out);
         }
     }
 }
@@ -96,16 +100,17 @@ type NestedCache = HashMap<String, (Instant, Vec<String>)>;
 static NESTED_CACHE: OnceLock<Mutex<NestedCache>> = OnceLock::new();
 
 /// Repository annidati in `folder` (che non è essa stessa un repository), con una cache breve:
-/// la ricerca gira a ogni comando git e a ogni evento del watcher.
-fn nested_repos(folder: &str) -> Vec<String> {
+/// la ricerca gira a ogni comando git e a ogni evento del watcher. Con `stale_ok` un risultato scaduto si
+/// riusa così com'è (il watcher non rifà mai la visita se ne ha una già fatta).
+fn nested_repos(folder: &str, stale_ok: bool) -> Vec<String> {
     let cache = NESTED_CACHE.get_or_init(Default::default);
     if let Some((at, v)) = cache.lock().ok().and_then(|c| c.get(folder).cloned()) {
-        if at.elapsed() < NESTED_TTL {
+        if stale_ok || at.elapsed() < NESTED_TTL {
             return v;
         }
     }
     let mut found = Vec::new();
-    scan_nested(Path::new(folder), 1, &mut found);
+    scan_nested(Path::new(folder), 1, &mut MAX_VISITED.clone(), &mut found);
     let v: Vec<String> = found.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
     if let Ok(mut c) = cache.lock() {
         c.insert(folder.to_string(), (Instant::now(), v.clone()));
@@ -123,15 +128,27 @@ pub(crate) fn forget_nested() {
 }
 
 /// Repository di un insieme di cartelle senza controllo di fiducia: prima le cartelle che sono radici, poi gli
-/// annidati (dentro cartelle che non lo sono) in ordine di percorso; al massimo `MAX_REPOS`.
+/// annidati (dentro cartelle che non lo sono) in ordine di percorso; senza doppioni (percorso canonico, vale il
+/// primo); al massimo `MAX_REPOS`.
 pub(crate) fn repos_in(folders: &[String]) -> Vec<String> {
-    let mut roots: Vec<String> = folders.iter().filter(|f| is_repo_root(f)).cloned().collect();
-    let mut nested: Vec<String> = folders.iter().filter(|f| !is_repo_root(f)).flat_map(|f| nested_repos(f)).collect();
+    collect_repos(folders, false)
+}
+
+/// Come `repos_in`, ma riusa anche i risultati scaduti: per il thread del watcher, che non deve fermarsi su una visita.
+pub(crate) fn repos_in_cached(folders: &[String]) -> Vec<String> {
+    collect_repos(folders, true)
+}
+
+fn collect_repos(folders: &[String], stale_ok: bool) -> Vec<String> {
+    let roots = folders.iter().filter(|f| is_repo_root(f)).cloned();
+    let mut nested: Vec<String> = folders.iter().filter(|f| !is_repo_root(f)).flat_map(|f| nested_repos(f, stale_ok)).collect();
     nested.sort();
-    nested.dedup();
-    roots.extend(nested);
-    roots.truncate(MAX_REPOS);
+    let mut seen = std::collections::HashSet::new();
     roots
+        .chain(nested)
+        .filter(|r| seen.insert(Path::new(r).canonicalize().unwrap_or_else(|_| PathBuf::from(r))))
+        .take(MAX_REPOS)
+        .collect()
 }
 
 /// Repository del progetto: le cartelle che sono radici, poi quelli annidati (fino a 3 livelli).
@@ -670,9 +687,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         mk_repo(d.path(), "outer");
         mk_repo(d.path(), "outer/inner");
-        // la cartella del progetto che è già un repository non cerca sotto di sé
         let (_s, st) = project(&[d.path()]);
         assert_eq!(rels(&d, repos_of(&st, "p").unwrap()), vec!["outer"]);
+        // la cartella del progetto che è già un repository non cerca sotto di sé
         mk_repo(d.path(), "outer/.git/../sub");
         let root = tempfile::tempdir().unwrap();
         mk_repo(root.path(), ".");
@@ -693,6 +710,34 @@ mod tests {
         assert_eq!(v.len(), MAX_REPOS);
         assert_eq!(v[0], root(&top));
         assert!(v[1..].windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn overlapping_project_folders_do_not_duplicate_repos() {
+        let d = tempfile::tempdir().unwrap();
+        mk_repo(d.path(), "api");
+        mk_repo(d.path(), "web");
+        let (a, b) = (root_of(d.path()), root_of(&d.path().join("api")));
+        let v = repos_in(&[a.clone(), b.clone(), a]);
+        assert_eq!(v, vec![b, format!("{}/web", root_of(d.path()))]);
+    }
+
+    #[test]
+    fn scan_stops_at_the_visit_budget() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..30 {
+            mk_repo(d.path(), &format!("r{i:02}"));
+        }
+        let mut all = Vec::new();
+        scan_nested(d.path(), 1, &mut 1000, &mut all);
+        assert_eq!(all.len(), 30);
+        let mut few = Vec::new();
+        scan_nested(d.path(), 1, &mut 10, &mut few);
+        assert!(few.len() <= 10 && !few.is_empty());
+        // senza budget non si legge nulla
+        let mut none = Vec::new();
+        scan_nested(d.path(), 1, &mut 0, &mut none);
+        assert!(none.is_empty());
     }
 
     #[test]

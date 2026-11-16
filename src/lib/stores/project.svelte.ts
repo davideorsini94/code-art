@@ -9,6 +9,7 @@ class ProjectStore {
   branchRepo = $state<string | null>(null)
   /** File attivo nell'editor: con più repository decide quale branch mostrare. */
   private activeFile: string | null = null
+  private branchSeq = 0
   missing = $state<string[]>([])
   /** Cartelle non fidate: finché ce n'è una, Claude e terminale sono disattivati (il core rifiuta). */
   untrusted = $state<string[]>([])
@@ -33,7 +34,9 @@ class ProjectStore {
 
   async refreshBranch() {
     if (!this.project) return
+    const my = ++this.branchSeq
     const b = await projectBranch(this.activeFile).catch(() => null)
+    if (my !== this.branchSeq) return // una richiesta più recente ha la precedenza
     this.branch = b?.name ?? null
     this.branchRepo = b?.repo ?? null
   }

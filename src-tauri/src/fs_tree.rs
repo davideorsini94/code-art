@@ -405,8 +405,8 @@ fn watch_git(app: &AppHandle, project: &Project, rx: std::sync::mpsc::Receiver<P
             while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 paths.push(p);
             }
-            // l'elenco dei repository è in cache per pochi secondi: un repository nuovo compare entro quel tempo
-            let repos: Vec<(PathBuf, String)> = crate::git::repos_in(&folders)
+            // l'elenco dei repository viene dalla cache (anche scaduta): il watcher non si ferma su una visita; si rinnova al prossimo comando git
+            let repos: Vec<(PathBuf, String)> = crate::git::repos_in_cached(&folders)
                 .into_iter()
                 .flat_map(|r| [Some(PathBuf::from(&r)), Path::new(&r).canonicalize().ok()].into_iter().flatten().map(move |p| (p, r.clone())))
                 .collect();
