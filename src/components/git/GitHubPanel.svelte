@@ -61,6 +61,8 @@
   </header>
   {#if github.missing}
     <div class="msg">{GH_MISSING}</div>
+  {:else if remote === ''}
+    <div class="msg">Il remoto «origin» non è su GitHub.</div>
   {:else if remote === null}
     {#if !publishing}
       <button class="act" use:tooltip={'Crea un repository su GitHub da questo, lo collega come «origin» e invia i commit'} onclick={startPublish}>Pubblica su GitHub</button>
@@ -82,7 +84,7 @@
     <div class="row">
       <select class="field" aria-label="Account GitHub" value={github.account} use:tooltip={'Account di gh usato per questo progetto'} onchange={(e) => void github.setAccount(e.currentTarget.value)}>
         <option value="">Account attivo di gh{github.activeLogin ? ` (${github.activeLogin})` : ''}</option>
-        {#each github.accounts as a (a.login)}<option value={a.login}>{a.login}</option>{/each}
+        {#each github.accounts.filter((a) => !a.active || a.login === github.account) as a (a.login)}<option value={a.login}>{a.login}</option>{/each}
       </select>
     </div>
     <div class="row">

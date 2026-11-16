@@ -108,6 +108,8 @@ export type GitCommit = { hash: string; short: string; subject: string; author: 
 
 // ---- GitHub (specchio di src-tauri/src/github.rs) ----
 export type GhAccount = { login: string; active: boolean }
+/** Remoto `origin`: se esiste e il suo `proprietario/nome` se è su github.com. */
+export type GhRemote = { origin: boolean; github: string | null }
 export type RemoteRepo = { nameWithOwner: string; description: string; private: boolean; updatedAt: string }
 export type ChecksSummary = { passing: number; failing: number; pending: number }
 export type PrState = 'open' | 'closed' | 'all'

@@ -176,8 +176,8 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `git_cancel` | `id` | annulla solo un'operazione del progetto della finestra chiamante (SIGTERM al gruppo di processi, così git toglie i suoi lock; SIGKILL ai superstiti dopo 2 s); la chiusura della finestra annulla le sue operazioni | finestra | — |
 | `gh_accounts` | — | anche dalla finestra di benvenuto (non esegue codice di un progetto); JSON su campi espliciti (`--json hosts`), testo come ripiego | globale | P (`gh auth status`, cartella `/`, timeout 60 s) |
 | `gh_repo_list` | `account`, `limit` | `account` vuoto (attivo) o login valido (alfanumerici e `-`, ≤ 39, mai `-` iniziale) collegato a `gh`; `limit` 1–200; anche dal benvenuto | globale | P + R (`gh repo list --json nameWithOwner,description,isPrivate,updatedAt`) |
-| `gh_clone` | `nameWithOwner`, `account` (facoltativo) | `proprietario/nome` validato; destinazione = cartella scelta col selettore nativo del core (foglio della finestra) + nome del repository, che non deve esistere; la cartella clonata diventa fidata (scelta dall'utente) e si apre in una nuova finestra | globale | P + R + F (`gh repo clone`, timeout 10 min) |
-| `gh_remote` | `repo` | **solo progetto fidato**; `repo` tra le radici di `git_repos` | finestra | P (`git remote get-url origin`) |
+| `gh_clone` | `nameWithOwner`, `account` (facoltativo) | `proprietario/nome` validato; destinazione = cartella scelta col selettore nativo del core (foglio della finestra) + nome del repository, che non deve esistere; la cartella clonata diventa fidata (scelta dall'utente; il repository, anche pubblico e qualunque, lo indica la pagina e lo nomina il titolo del selettore) e si apre in una nuova finestra; `false` = selettore annullato | globale | P + R + F (`gh repo clone`, timeout 10 min) |
+| `gh_remote` | `repo` | **solo progetto fidato**; `repo` tra le radici di `git_repos`; restituisce se `origin` esiste e il suo `proprietario/nome` se è su github.com | finestra | P (`git remote get-url origin`) |
 | `gh_repo_create` | `repo`, `name`, `private`, `description` | come `gh_remote`; `name` (`nome` o `proprietario/nome`: lettere, cifre, `.`, `_`, `-`, mai `-` iniziale); descrizione su una riga ≤ 350 caratteri passata come `--description=`; una sola scrittura alla volta per repository | finestra | P + R (`gh repo create <nome> --source <repo> --remote origin --push --private\|--public`, timeout 10 min) |
 | `gh_pr_list` | `repo`, `state` | come `gh_remote`; `state` `open` \| `closed` \| `all`; ≤ 100 voci | finestra | P + R (`gh pr list --json …`) |
 | `gh_pr_checks` | `repo`, `number` | come `gh_remote`; numero > 0 | finestra | P + R (`gh pr checks --json name,state,link,bucket`) |
@@ -274,10 +274,12 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   riassunto, stato), cartelle fidate. Nessuna credenziale. Schema versionato con `PRAGMA user_version`
   (migrazioni in `store.rs`).
 - Account GitHub: per un account diverso da quello attivo di `gh` (impostazione di progetto `github_account`)
-  il token di `gh auth token --user <login>` va solo nell'ambiente del processo figlio (`GH_TOKEN`), mai nella
-  pagina, nello store, nei log o negli eventi; il tipo `Token` ha un `Debug` che lo nasconde. Ogni messaggio
+  il token di `gh auth token --user <login>` va solo nell'ambiente del processo figlio (`GH_TOKEN`) e quindi dei
+  suoi discendenti (il `git` di `gh repo create --push`/`gh repo clone` e gli hook del repository fidato, che
+  potrebbero comunque chiedere il token a `gh`), mai nella pagina, nello store, nei log o negli eventi. Limite: il push
+  dell'upstream in `gh_pr_create` usa le credenziali git dell'utente (helper, portachiavi), non quell'account; il tipo `Token` ha un `Debug` che lo nasconde. Ogni messaggio
   d'errore di `gh` è ripulito (`Gh::clean`): token in uso, qualunque parola con prefisso di token GitHub
-  (`ghp_`, `gho_`, `github_pat_`…) e percorsi della home (`/Users/<nome>` → `~`). Test:
+  (`ghp_`, `gho_`, `github_pat_`…), `GH_TOKEN`/`GITHUB_TOKEN` dell'ambiente di login, errori di serde e percorsi della home (`/Users/<nome>` → `~`). Test:
   `token_never_in_debug_or_errors`, `clean_hides_tokens_and_home_paths`.
 - Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
 

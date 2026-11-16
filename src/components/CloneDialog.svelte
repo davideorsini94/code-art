@@ -60,8 +60,8 @@
     cloning = nwo
     error = null
     try {
-      await ghClone(nwo, account)
-      github.cloneOpen = false
+      // annullato nel selettore: la finestra resta aperta
+      if (await ghClone(nwo, account)) github.cloneOpen = false
     } catch (e) {
       error = errorText(e)
     } finally {

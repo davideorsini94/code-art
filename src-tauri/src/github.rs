@@ -104,11 +104,22 @@ impl Gh {
         }
     }
 
+    /// JSON di `gh`; l'errore di serde può citare valori della risposta, quindi passa da `clean`.
+    pub fn parse<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
+        serde_json::from_slice(bytes).map_err(|e| format!("gh: risposta non valida ({})", self.clean(&e.to_string(), None)))
+    }
+
     /// Testo da mostrare: senza il token in uso, senza altri token di GitHub, senza percorsi della home.
     pub fn clean(&self, text: &str, token: Option<&Token>) -> String {
         let mut s = text.trim().to_string();
         if let Some(t) = token.filter(|t| !t.0.is_empty()) {
             s = s.replace(&t.0, "***");
+        }
+        // token già nell'ambiente di login, anche senza prefisso
+        for k in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            if let Some(t) = self.env.get(k).filter(|t| t.len() >= 8) {
+                s = s.replace(t.as_str(), "***");
+            }
         }
         s = hide_user_dirs(&hide_token_words(&s));
         // una home fuori da /Users
@@ -150,9 +161,7 @@ fn hide_user_dirs(s: &str) -> String {
     out
 }
 
-fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|e| format!("gh: risposta non valida ({e})"))
-}
+
 
 fn last_url(stdout: &[u8]) -> Option<String> {
     String::from_utf8_lossy(stdout).lines().map(str::trim).rfind(|l| l.starts_with("https://")).map(String::from)
@@ -422,7 +431,7 @@ pub fn accounts(gh: &Gh) -> Result<Vec<GhAccount>> {
     let cwd = Path::new("/");
     let out = gh.run(cwd, None, &["auth", "status", "--hostname", HOST, "--json", "hosts"], None, GH_TIMEOUT)?;
     if out.status == 0 {
-        let status: RawAuthStatus = parse(&out.stdout)?;
+        let status: RawAuthStatus = gh.parse(&out.stdout)?;
         return Ok(status
             .hosts
             .get(HOST)
@@ -491,14 +500,21 @@ pub fn parse_github_remote(url: &str) -> Option<String> {
     check_name_with_owner(path).ok().map(|(o, n)| format!("{o}/{n}"))
 }
 
-/// Repository GitHub del remoto `origin` (`None` se manca o non è su github.com).
-pub fn remote(store: &Store, project_id: &str, repo: &str) -> Result<Option<String>> {
+/// Remoto `origin`: se esiste e, se è su github.com, il suo `proprietario/nome`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhRemote {
+    pub origin: bool,
+    pub github: Option<String>,
+}
+
+pub fn remote(store: &Store, project_id: &str, repo: &str) -> Result<GhRemote> {
     let dir = resolve_repo(store, project_id, repo)?;
     let out = git(&dir, &["remote", "get-url", "origin"], READ_TIMEOUT)?;
     if out.status != 0 {
-        return Ok(None);
+        return Ok(GhRemote { origin: false, github: None });
     }
-    Ok(parse_github_remote(&String::from_utf8_lossy(&out.stdout)))
+    Ok(GhRemote { origin: true, github: parse_github_remote(&String::from_utf8_lossy(&out.stdout)) })
 }
 
 /// Repository di `account` (vuoto = account attivo), al massimo 200.
@@ -511,7 +527,7 @@ pub fn repo_list(gh: &Gh, account: &str, limit: usize) -> Result<Vec<RemoteRepo>
     }
     args.extend(["--limit", &n, "--json", REPO_FIELDS]);
     let out = gh.run_ok(Path::new("/"), token.as_ref(), &args, None, GH_TIMEOUT)?;
-    let raw: Vec<RawRepo> = parse(&out)?;
+    let raw: Vec<RawRepo> = gh.parse(&out)?;
     Ok(raw
         .into_iter()
         .map(|r| RemoteRepo { name_with_owner: r.name_with_owner, description: r.description.unwrap_or_default(), private: r.is_private, updated_at: r.updated_at })
@@ -557,14 +573,14 @@ pub fn pr_list(gh: &Gh, store: &Store, project_id: &str, repo: &str, state: &str
     }
     let token = project_token(gh, store, project_id)?;
     let out = gh.run_ok(&dir, token.as_ref(), &["pr", "list", "--state", state, "--limit", PR_LIMIT, "--json", PR_FIELDS], None, GH_TIMEOUT)?;
-    let raw: Vec<RawPr> = parse(&out)?;
+    let raw: Vec<RawPr> = gh.parse(&out)?;
     Ok(raw.into_iter().map(Pr::from).collect())
 }
 
 fn pr_view(gh: &Gh, dir: &Path, token: Option<&Token>, number: u64) -> Result<Pr> {
     let n = number.to_string();
     let out = gh.run_ok(dir, token, &["pr", "view", &n, "--json", PR_FIELDS], None, GH_TIMEOUT)?;
-    Ok(parse::<RawPr>(&out)?.into())
+    Ok(gh.parse::<RawPr>(&out)?.into())
 }
 
 /// Controlli di una pull request. `gh pr checks` esce con 8 se ci sono controlli in corso e 1 se qualcuno
@@ -580,7 +596,7 @@ pub fn pr_checks(gh: &Gh, store: &Store, project_id: &str, repo: &str, number: u
     if out.stdout.iter().all(u8::is_ascii_whitespace) {
         return if out.status == 0 || out.stderr.contains("no checks reported") { Ok(Vec::new()) } else { Err(gh.failure(&out, token.as_ref())) };
     }
-    let raw: Vec<RawCheck> = parse(&out.stdout)?;
+    let raw: Vec<RawCheck> = gh.parse(&out.stdout)?;
     Ok(raw
         .into_iter()
         .map(|c| {
@@ -612,6 +628,7 @@ pub fn pr_create(gh: &Gh, store: &Store, project_id: &str, repo: &str, title: &s
     let branch = String::from_utf8_lossy(&head.stdout).trim_end_matches('\n').to_string();
     let upstream = git(&dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], READ_TIMEOUT)?;
     if upstream.status != 0 {
+        // limite: il push usa le credenziali git dell'utente (helper/portachiavi), non l'account `github_account`
         crate::git::remote::push_blocking(store, &dir).map_err(|e| gh.clean(&e, None))?;
     }
     let (t, h, b) = (format!("--title={title}"), format!("--head={branch}"), format!("--base={base}"));
@@ -673,8 +690,9 @@ pub async fn gh_repo_list(account: String, limit: usize) -> Result<Vec<RemoteRep
 
 /// Clona `name_with_owner` in una cartella scelta col selettore nativo e la apre come progetto in una nuova
 /// finestra, già fidata (l'ha appena clonata l'utente). `account` vuoto o assente = account attivo.
+/// `false` = selettore annullato.
 #[tauri::command]
-pub async fn gh_clone(app: AppHandle, window: WebviewWindow, name_with_owner: String, account: Option<String>) -> Result<()> {
+pub async fn gh_clone(app: AppHandle, window: WebviewWindow, name_with_owner: String, account: Option<String>) -> Result<bool> {
     let (_, name) = check_name_with_owner(&name_with_owner)?;
     let name = name.to_string();
     let account = account.unwrap_or_default();
@@ -682,7 +700,7 @@ pub async fn gh_clone(app: AppHandle, window: WebviewWindow, name_with_owner: St
         return Err("account GitHub non valido".into());
     }
     let title = format!("Dove clonare {name_with_owner}?");
-    let Some(parent) = crate::projects::pick_folder(&app, &window, &title).await? else { return Ok(()) };
+    let Some(parent) = crate::projects::pick_folder(&app, &window, &title).await? else { return Ok(false) };
     let dest = Path::new(&parent).join(&name);
     let dest = off_main(move || {
         clone(&Gh::locate()?, &account, &name_with_owner, &dest)?;
@@ -690,11 +708,12 @@ pub async fn gh_clone(app: AppHandle, window: WebviewWindow, name_with_owner: St
     })
     .await?;
     crate::trust::mark_trusted(&app.state::<Store>(), &dest)?;
-    crate::projects::open_path(&app, &dest).map(drop)
+    crate::projects::open_path(&app, &dest)?;
+    Ok(true)
 }
 
 #[tauri::command]
-pub async fn gh_remote(app: AppHandle, window: WebviewWindow, repo: String) -> Result<Option<String>> {
+pub async fn gh_remote(app: AppHandle, window: WebviewWindow, repo: String) -> Result<GhRemote> {
     let id = window_project_id(&window)?;
     off_main(move || remote(&app.state::<Store>(), &id, &repo)).await
 }

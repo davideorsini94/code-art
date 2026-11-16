@@ -422,7 +422,10 @@ pub async fn project_branch(app: AppHandle, window: WebviewWindow) -> Result<Opt
 }
 
 /// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
-const WEB_SETTINGS: &[(&str, fn(&str) -> bool)] =
+/// Chiave e validatore di un'impostazione modificabile dalla WebView.
+type SettingRule = (&'static str, fn(&str) -> bool);
+
+const WEB_SETTINGS: &[SettingRule] =
     &[("default_permission_mode", crate::claude::engine::valid_permission_mode), (crate::git::remote::PULL_MODE_KEY, crate::git::remote::valid_pull_mode)];
 
 fn web_setting(key: &str) -> Result<fn(&str) -> bool> {
@@ -435,7 +438,7 @@ pub fn check_web_setting(key: &str, value: &str) -> Result<()> {
 }
 
 /// Impostazioni di progetto modificabili dalla WebView, ciascuna con il suo validatore.
-const PROJECT_SETTINGS: &[(&str, fn(&str) -> bool)] = &[(crate::github::ACCOUNT_KEY, crate::github::valid_account)];
+const PROJECT_SETTINGS: &[SettingRule] = &[(crate::github::ACCOUNT_KEY, crate::github::valid_account)];
 
 /// Chiave nello store di un'impostazione di progetto.
 fn project_setting_key(project_id: &str, key: &str) -> Result<String> {
@@ -675,12 +678,7 @@ mod tests {
         assert!(project_setting_set_for(&s, "p1", "github_account", "--user").is_err());
         assert!(project_setting_set_for(&s, "p1", "claude_path", "/tmp/x").is_err());
         assert!(project_setting_get_for(&s, "p1", "default_permission_mode").is_err());
-        // non si raggiungono le impostazioni globali
-        assert!(settings_key_is_global_only());
-    }
-
-    fn settings_key_is_global_only() -> bool {
-        project_setting_key("p1", "github_account").unwrap() == "project:p1:github_account"
+        assert_eq!(project_setting_key("p1", "github_account").unwrap(), "project:p1:github_account");
     }
 
     #[test]

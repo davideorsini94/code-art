@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const project = vi.hoisted(() => ({ project: { id: 'p1', name: 'app', folders: ['/Users/dev/app'] }, untrusted: [] as string[], acceptTrust: vi.fn() }))
 vi.mock('../../lib/stores/project.svelte', () => ({ projectStore: project }))
 vi.mock('../../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
-const ipc = vi.hoisted(() => ({ gitRepos: vi.fn(), gitStatus: vi.fn(), gitStage: vi.fn(), gitUnstage: vi.fn(), gitDiscard: vi.fn(), gitDiff: vi.fn(), gitInit: vi.fn(), gitRemoteOp: vi.fn(), gitCancel: vi.fn(), gitMergeAbort: vi.fn(), gitBranches: vi.fn(), fsRead: vi.fn(), ghAccounts: vi.fn(async () => []), ghRemote: vi.fn(async () => null), ghPrList: vi.fn(async () => []), projectSettingGet: vi.fn(async () => null) }))
+const ipc = vi.hoisted(() => ({ gitRepos: vi.fn(), gitStatus: vi.fn(), gitStage: vi.fn(), gitUnstage: vi.fn(), gitDiscard: vi.fn(), gitDiff: vi.fn(), gitInit: vi.fn(), gitRemoteOp: vi.fn(), gitCancel: vi.fn(), gitMergeAbort: vi.fn(), gitBranches: vi.fn(), fsRead: vi.fn(), ghAccounts: vi.fn(async () => []), ghRemote: vi.fn(async () => ({ origin: false, github: null })), ghPrList: vi.fn(async () => []), projectSettingGet: vi.fn(async () => null) }))
 vi.mock('../../lib/ipc', () => ipc)
 const editor = vi.hoisted(() => ({ open: vi.fn(), openDiff: vi.fn(), tabs: [] as { key: string; dirty: boolean }[] }))
 vi.mock('../../lib/stores/editor.svelte', () => ({ editor }))

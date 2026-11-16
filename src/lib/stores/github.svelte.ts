@@ -33,7 +33,8 @@ export class GitHubStore {
   account = $state('')
   /** `gh` non installato. */
   missing = $state(false)
-  /** Repository → `proprietario/nome` su GitHub, `null` se non c'è un remoto GitHub. Assente = non ancora letto. */
+  /** Repository → `proprietario/nome` su GitHub; `null` = nessun `origin` (si può pubblicare); `''` = `origin` non su
+   *  GitHub. Assente = non ancora letto. */
   remotes = $state<Record<string, string | null>>({})
   prs = $state<Record<string, Pr[]>>({})
   prState = $state<PrState>('open')
@@ -74,7 +75,8 @@ export class GitHubStore {
   async refreshRepo(repo: string) {
     let nwo: string | null
     try {
-      nwo = await ipc.ghRemote(repo)
+      const r = await ipc.ghRemote(repo)
+      nwo = r.github ?? (r.origin ? '' : null)
     } catch (e) {
       this.fail(e)
       return

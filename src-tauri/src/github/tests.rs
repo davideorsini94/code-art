@@ -177,6 +177,23 @@ fn clean_hides_tokens_and_home_paths() {
 }
 
 #[test]
+fn parse_errors_are_cleaned() {
+    let f = fake();
+    // serde cita i valori nei messaggi di tipo sbagliato
+    let e = f.gh.parse::<Vec<u64>>(b"[\"/Users/dev/ghp_abc123\"]").unwrap_err();
+    assert!(e.starts_with("gh: risposta non valida"), "{e}");
+    assert!(!e.contains("/Users/dev") && !e.contains("ghp_abc"), "{e}");
+}
+
+#[test]
+fn login_env_tokens_are_hidden_too() {
+    let mut f = fake();
+    f.gh.env.insert("GH_TOKEN".into(), "senzaprefisso1".into());
+    f.gh.env.insert("GITHUB_TOKEN".into(), "senzaprefisso2".into());
+    assert_eq!(f.gh.clean("a senzaprefisso1 b senzaprefisso2", None), "a *** b ***");
+}
+
+#[test]
 fn malformed_json_is_a_readable_error() {
     let (_d, _sd, st, r) = seeded();
     let f = fake_with("bad_json");
@@ -372,9 +389,12 @@ fn github_remote_detection() {
         assert_eq!(parse_github_remote(url), None, "{url}");
     }
     let (d, _sd, st, r) = seeded();
-    assert_eq!(remote(&st, "p", &r).unwrap(), None);
-    g(d.path(), &["remote", "add", "origin", "git@github.com:octo-org/demo.git"]);
-    assert_eq!(remote(&st, "p", &r).unwrap().as_deref(), Some("octo-org/demo"));
+    assert_eq!(remote(&st, "p", &r).unwrap(), GhRemote { origin: false, github: None });
+    g(d.path(), &["remote", "add", "origin", "https://gitlab.example.invalid/octo-org/demo.git"]);
+    // un `origin` non GitHub: niente "Pubblica su GitHub" (gh repo create fallirebbe)
+    assert_eq!(remote(&st, "p", &r).unwrap(), GhRemote { origin: true, github: None });
+    g(d.path(), &["remote", "set-url", "origin", "git@github.com:octo-org/demo.git"]);
+    assert_eq!(remote(&st, "p", &r).unwrap(), GhRemote { origin: true, github: Some("octo-org/demo".into()) });
 }
 
 #[test]

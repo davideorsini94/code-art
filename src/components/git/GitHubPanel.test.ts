@@ -37,7 +37,7 @@ function setup({ remote = 'octo-org/app' as string | null, prs = [pr(7), pr(8, {
   ipc.ghAccounts.mockResolvedValue([{ login: 'octo-user', active: true }, { login: 'octo-work', active: false }])
   ipc.projectSettingGet.mockResolvedValue(null)
   ipc.projectSettingSet.mockResolvedValue(undefined)
-  ipc.ghRemote.mockResolvedValue(remote)
+  ipc.ghRemote.mockResolvedValue({ origin: remote !== null, github: remote })
   ipc.ghPrList.mockResolvedValue(prs)
   render(GitHubPanel, { repo: REPO })
 }
@@ -85,7 +85,7 @@ describe('GitHubPanel', () => {
     setup()
     await screen.findByText('PR 7')
     const select = screen.getByLabelText('Account GitHub') as HTMLSelectElement
-    expect([...select.options].map((o) => o.textContent?.trim())).toEqual(['Account attivo di gh (octo-user)', 'octo-user', 'octo-work'])
+    expect([...select.options].map((o) => o.textContent?.trim())).toEqual(['Account attivo di gh (octo-user)', 'octo-work'])
     await fireEvent.change(select, { target: { value: 'octo-work' } })
     await vi.waitFor(() => expect(ipc.projectSettingSet).toHaveBeenCalledWith('github_account', 'octo-work'))
     await vi.waitFor(() => expect(ipc.ghPrList).toHaveBeenCalledTimes(2))
@@ -115,9 +115,19 @@ describe('GitHubPanel', () => {
     expect(ipc.ghPrList).not.toHaveBeenCalled()
   })
 
+  it('with a non-GitHub origin does not offer to publish', async () => {
+    ipc.ghAccounts.mockResolvedValue([])
+    ipc.projectSettingGet.mockResolvedValue(null)
+    ipc.ghRemote.mockResolvedValue({ origin: true, github: null })
+    render(GitHubPanel, { repo: REPO })
+    expect(await screen.findByText(/non è su GitHub/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pubblica su GitHub' })).toBeNull()
+    expect(ipc.ghPrList).not.toHaveBeenCalled()
+  })
+
   it('tells how to install gh when it is missing', async () => {
     ipc.ghAccounts.mockRejectedValue(GH_MISSING)
-    ipc.ghRemote.mockResolvedValue('octo-org/app')
+    ipc.ghRemote.mockResolvedValue({ origin: true, github: 'octo-org/app' })
     ipc.ghPrList.mockRejectedValue(GH_MISSING)
     render(GitHubPanel, { repo: REPO })
     expect(await screen.findByText(GH_MISSING)).toBeTruthy()

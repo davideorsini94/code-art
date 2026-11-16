@@ -34,7 +34,7 @@ describe('CloneDialog', () => {
   it('lists the repositories of the chosen account, filters them and clones one', async () => {
     ipc.ghAccounts.mockResolvedValue([{ login: 'octo-user', active: true }, { login: 'octo-work', active: false }])
     ipc.ghRepoList.mockResolvedValue(repos)
-    ipc.ghClone.mockResolvedValue(undefined)
+    ipc.ghClone.mockResolvedValue(true)
     github.cloneOpen = true
     render(CloneDialog)
     expect(await screen.findByText('octo-user/demo')).toBeTruthy()
@@ -47,6 +47,18 @@ describe('CloneDialog', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Clona octo-user/demo' }))
     expect(ipc.ghClone).toHaveBeenCalledWith('octo-user/demo', 'octo-work')
     await vi.waitFor(() => expect(github.cloneOpen).toBe(false))
+  })
+
+  it('stays open when the folder picker is cancelled', async () => {
+    ipc.ghAccounts.mockResolvedValue([{ login: 'octo-user', active: true }])
+    ipc.ghRepoList.mockResolvedValue(repos)
+    ipc.ghClone.mockResolvedValue(false)
+    github.cloneOpen = true
+    render(CloneDialog)
+    await fireEvent.click(await screen.findByRole('button', { name: 'Clona octo-user/demo' }))
+    await vi.waitFor(() => expect(ipc.ghClone).toHaveBeenCalled())
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Clona octo-user/demo' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(github.cloneOpen).toBe(true)
   })
 
   it('shows the install hint when gh is missing', async () => {
