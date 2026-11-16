@@ -3,9 +3,10 @@ import { listenProject } from '../events'
 import { convArchive, convDelete, convList, convMarkViewed, convRename, convStart, convUnlockTitle } from '../ipc'
 import { errorText, UNTRUSTED } from '../errors'
 import { projectStore } from './project.svelte'
-import { activeCount, nextActiveAfterRemoval, removeConversation, sortConversations, upsertConversation, waitingCount } from '../conv/order'
+import { activeCount, removeConversation, sortConversations, upsertConversation, waitingCount } from '../conv/order'
 import { clearDraft } from '../conv/draft'
 import type { Conversation } from '../types'
+import { closeTab, loadTabs, openTab, pruneTabs, saveTabs } from '../conv/tabs'
 
 /** Per quanto resta visibile un avviso non bloccante. */
 export const NOTICE_MS = 8000
@@ -14,6 +15,8 @@ class ConversationStore {
   /** Tutte le conversazioni del progetto (anche archiviate), una per sessionId. */
   all = $state<Conversation[]>([])
   activeId = $state<string | null>(null)
+  /** Conversazioni aperte come schede, in ordine; ricordate per progetto. */
+  tabs = $state<string[]>([])
   showArchived = $state(false)
   error = $state<string | null>(null)
   /** Avviso non bloccante (es. eliminata ma con un residuo in `~/.claude`). */
@@ -31,11 +34,17 @@ class ConversationStore {
   list = $derived(sortConversations(this.all, this.showArchived))
   waiting = $derived(waitingCount(this.all))
   active = $derived(activeCount(this.all))
+  /** Le conversazioni delle schede aperte, nell'ordine delle schede. */
+  openConvs = $derived(this.tabs.map((id) => this.all.find((c) => c.sessionId === id)).filter((c): c is Conversation => !!c))
 
   /** Carica l'elenco e resta in ascolto di `conv:upsert`. Gli eventi arrivati durante il caricamento
    *  vengono riapplicati sopra l'elenco letto, così non si perde nulla. */
   async start(projectId: string) {
     this.stop()
+    if (this.projectId !== projectId) {
+      this.tabs = []
+      this.activeId = null
+    }
     this.projectId = projectId
     const gen = ++this.generation
     let loading = true
@@ -71,6 +80,32 @@ class ConversationStore {
     loading = false
     for (const c of early) this.upsert(c)
     for (const id of removedEarly) this.remove(id)
+    this.restoreTabs(projectId)
+  }
+
+  /** Schede salvate per il progetto, senza quelle di conversazioni sparite; tiene quelle aperte durante il caricamento. */
+  private restoreTabs(projectId: string) {
+    const saved = loadTabs(projectId)
+    const known = new Set(this.all.map((c) => c.sessionId))
+    let tabs = pruneTabs(saved.tabs, known)
+    for (const t of this.tabs) if (known.has(t)) tabs = openTab(tabs, t)
+    this.tabs = tabs
+    if (!this.activeId || !tabs.includes(this.activeId)) {
+      this.activeId = saved.activeId && tabs.includes(saved.activeId) ? saved.activeId : (tabs[0] ?? null)
+    }
+    this.saveTabs()
+  }
+
+  private saveTabs() {
+    if (this.projectId) saveTabs(this.projectId, { tabs: this.tabs, activeId: this.activeId })
+  }
+
+  /** Chiude la scheda (la conversazione resta nell'elenco e Claude non si ferma). */
+  close(id: string) {
+    const next = closeTab(this.tabs, this.activeId, id)
+    this.tabs = next.tabs
+    this.activeId = next.activeId
+    this.saveTabs()
   }
 
   stop() {
@@ -92,16 +127,18 @@ class ConversationStore {
     this.all = upsertConversation(this.all, c)
   }
 
-  /** `conv:removed`: via dalla lista (anche le archiviate), bozza cancellata; se era l'attiva si passa alla
-   *  scheda successiva o a nessuna. */
+  /** `conv:removed`: via dalla lista (anche le archiviate), bozza cancellata; la sua scheda si chiude. */
   remove(sessionId: string) {
-    this.activeId = nextActiveAfterRemoval(this.list, this.activeId, sessionId)
+    this.close(sessionId)
     this.all = removeConversation(this.all, sessionId)
     clearDraft(sessionId)
   }
 
+  /** Mostra la conversazione, aprendone la scheda se manca. */
   async select(id: string) {
+    this.tabs = openTab(this.tabs, id)
     this.activeId = id
+    this.saveTabs()
     try {
       await convMarkViewed(id)
     } catch (e) {
@@ -159,7 +196,10 @@ class ConversationStore {
   archive = (id: string, archived: boolean) =>
     this.run(async () => {
       await convArchive(id, archived)
-      if (archived) clearDraft(id)
+      if (archived) {
+        clearDraft(id)
+        this.close(id)
+      }
     })
 }
 

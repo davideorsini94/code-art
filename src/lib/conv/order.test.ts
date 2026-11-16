@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Conversation } from '../types'
-import { activeCount, nextActiveAfterRemoval, removeConversation, sortConversations, upsertConversation, waitingCount, WINDOW_THRESHOLD, windowRange } from './order'
+import { activeCount, removeConversation, sortConversations, upsertConversation, waitingCount, WINDOW_THRESHOLD, windowRange } from './order'
 
 const mk = (sessionId: string, status: Conversation['status'], lastActivity: number, extra: Partial<Conversation> = {}): Conversation => ({
   sessionId, projectId: 'p', cwd: '/Users/dev/app', title: sessionId, prevTitle: null, titleChangedAt: null, titleLocked: false,
@@ -75,19 +75,5 @@ describe('rimozione', () => {
     expect(removeConversation(list, 'b').map((c) => c.sessionId)).toEqual(['a', 'c', 'z'])
     expect(list).toHaveLength(4)
     expect(removeConversation(list, 'nessuna')).toHaveLength(4)
-  })
-  const visible = sortConversations(list)
-  it('se non era l\'attiva, l\'attiva resta', () => {
-    expect(nextActiveAfterRemoval(visible, 'a', 'c')).toBe('a')
-    expect(nextActiveAfterRemoval(visible, null, 'c')).toBeNull()
-  })
-  it('se era l\'attiva passa alla scheda successiva, altrimenti alla precedente, altrimenti nessuna', () => {
-    expect(nextActiveAfterRemoval(visible, 'a', 'a')).toBe('b')
-    expect(nextActiveAfterRemoval(visible, 'b', 'b')).toBe('c')
-    expect(nextActiveAfterRemoval(visible, 'c', 'c')).toBe('b')
-    expect(nextActiveAfterRemoval([mk('solo', 'idle', 1)], 'solo', 'solo')).toBeNull()
-  })
-  it('un\'attiva non nella colonna visibile (archiviata) lascia la prima scheda', () => {
-    expect(nextActiveAfterRemoval(visible, 'z', 'z')).toBe('a')
   })
 })
