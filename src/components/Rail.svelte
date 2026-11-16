@@ -9,9 +9,9 @@
     { id: 'files', icon: '◫', label: 'Esplora', what: 'i file del progetto', shortcut: '⌘⇧E' },
     { id: 'search', icon: '⌕', label: 'Cerca', what: 'la ricerca nel progetto', shortcut: '⌘⇧F' },
     { id: 'git', icon: '⑂', label: 'Git', what: 'il controllo del codice', shortcut: '⌘⇧G' },
+    { id: 'convs', icon: '☰', label: 'Conversazioni', what: 'l\'elenco delle conversazioni', shortcut: '⌘⇧C' },
   ]
   const items: { col: ResizableCol; icon: string; label: string; what: string }[] = [
-    { col: 'convlist', icon: '☰', label: 'Conversazioni', what: 'l\'elenco delle conversazioni' },
     { col: 'conv', icon: '✎', label: 'Conversazione', what: 'la conversazione' },
   ]
 
