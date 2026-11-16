@@ -268,7 +268,16 @@ e usabile. Ordine proposto da Claude, visto dall'utente.
      Monaco; altri linguaggi tramite i language server installati sulla
      macchina. *I linguaggi da coprire per primi vanno chiesti all'utente
      all'inizio di questa tappa.*
-3. **SSH**
+3. **SSH e terminali**
+   - Gestione dei terminali locali [utente; dettagli scelte mie]: oggi ogni
+     terminale parte nella prima cartella del progetto. In un progetto con
+     più repository (es. una cartella che ne contiene dieci) serve aprire un
+     terminale nella cartella giusta: "Apri terminale qui" dal menu
+     dell'albero e dall'intestazione di ogni repository nella vista Git;
+     scheda intitolata con la cartella (e il branch se è un repository);
+     rinomina, chiusura e riordino delle schede; scelta della cartella
+     quando se ne apre uno nuovo. I terminali remoti di questa tappa usano
+     le stesse schede.
    - Elenco server (letti anche da `~/.ssh/config`), chiavi e ssh-agent,
      password nel Portachiavi.
    - Il server compare nell'albero: espandi, crea, rinomina, sposta, elimina.
