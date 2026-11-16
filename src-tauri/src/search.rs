@@ -338,10 +338,10 @@ pub fn search_start(app: AppHandle, window: WebviewWindow, store: State<'_, Stor
 #[tauri::command]
 pub fn search_cancel(window: WebviewWindow, searches: State<'_, Searches>, id: u64) -> Result<(), String> {
     let project_id = crate::projects::window_project_id(&window)?;
-    if let Some((cur, flag)) = crate::lock(&searches.active).get(&project_id) {
-        if *cur == id {
-            flag.store(true, Ordering::Relaxed);
-        }
+    if let Some((cur, flag)) = crate::lock(&searches.active).get(&project_id)
+        && *cur == id
+    {
+        flag.store(true, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -493,9 +493,10 @@ pub(crate) fn replace_targets(store: &Store, label: &str, paths: &[String]) -> R
     let project_id = crate::projects::project_id_of_label(label).ok_or("questa finestra non è un progetto")?;
     crate::trust::ensure_project_trusted(store, project_id)?;
     let mut resolved: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for p in paths {
         let r = crate::fs_tree::mutable_path(store, label, p).map_err(|e| e.message)?;
-        if !resolved.contains(&r) {
+        if seen.insert(r.clone()) {
             resolved.push(r);
         }
     }
@@ -809,7 +810,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         w(d.path(), "a.txt", "fn foo(a)\nfn bar(b)\n");
         let a = d.path().join("a.txt");
-        let out = replace_in_files(&[a.clone()], &rq(r"fn (\w+)\((\w)\)", true), "$2 <- ${1}()", &yes).unwrap();
+        let out = replace_in_files(std::slice::from_ref(&a), &rq(r"fn (\w+)\((\w)\)", true), "$2 <- ${1}()", &yes).unwrap();
         assert_eq!(out.replacements, 2);
         assert_eq!(std::fs::read_to_string(a).unwrap(), "a <- foo()\nb <- bar()\n");
     }
@@ -819,13 +820,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         w(d.path(), "a.txt", "ab\nb\n");
         let a = d.path().join("a.txt");
-        let out = replace_in_files(&[a.clone()], &rq("x*", true), "Z", &yes).unwrap();
+        let out = replace_in_files(std::slice::from_ref(&a), &rq("x*", true), "Z", &yes).unwrap();
         assert_eq!((out.files, out.replacements), (0, 0));
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "ab\nb\n");
         // `\s+` non attraversa gli a capo, come nella ricerca
         w(d.path(), "c.txt", "a \n b\n");
         let c = d.path().join("c.txt");
-        replace_in_files(&[c.clone()], &rq(r"\s+", true), "_", &yes).unwrap();
+        replace_in_files(std::slice::from_ref(&c), &rq(r"\s+", true), "_", &yes).unwrap();
         assert_eq!(std::fs::read_to_string(c).unwrap(), "a_\n_b\n");
     }
 
@@ -834,7 +835,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         w(d.path(), "a.txt", "needle\n");
         let a = d.path().join("a.txt");
-        let out = replace_in_files(&[a.clone()], &rq("needle", false), "x", &|_, _| false).unwrap();
+        let out = replace_in_files(std::slice::from_ref(&a), &rq("needle", false), "x", &|_, _| false).unwrap();
         assert!(out.cancelled);
         assert_eq!(std::fs::read_to_string(a).unwrap(), "needle\n");
     }

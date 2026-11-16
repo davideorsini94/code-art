@@ -209,7 +209,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `lsp_send` | `id`, `message` | **solo progetto fidato**; server del progetto della finestra chiamante; oggetto JSON-RPC 2.0 (richiesta, notifica o risposta) ≤ 64 MB; ogni URI `file:` (valori e chiavi, a qualunque profondità; riconosciuto come fa il parser URL WHATWG: spazi e controlli iniziali ignorati, tab e a capo tolti, schema senza maiuscole; poi decodificato) e ogni `rootPath` deve stare dentro le cartelle del progetto (`ensure_inside`: niente `..`, link simbolici risolti, host diverso da `localhost` rifiutato); non si controlla solo il contenuto dei documenti (`textDocument.text`, `contentChanges[].text`); difesa in più, non un confine (vedi "Rischi residui"); metodi qualsiasi, `workspace/executeCommand` compreso | finestra | P (stdin del server, cornice `Content-Length`; in lettura header ≤ 8 KB e contenuto ≤ 64 MB, altrimenti il server viene chiuso) |
 | `lsp_stop` | `id` | solo un server del progetto della finestra chiamante; SIGTERM al gruppo di processi, SIGKILL ai superstiti dopo 2 s | finestra | P |
 | `project_setting_get` | `key` | progetto dalla finestra chiamante; whitelist (`github_account`) | finestra | — |
-| `project_setting_set` | `key`, `value` | progetto dalla finestra chiamante; whitelist + validatore (`github_account`: vuoto o login valido) | finestra | — |
+| `project_setting_set` | `key`, `value` | progetto dalla finestra chiamante; whitelist + validatore (`github_account`: vuoto o login valido); ammesso anche in un progetto non fidato (salva solo la scelta, nessun processo: vale quando il progetto diventa fidato e sceglie solo tra account già collegati a `gh`) | finestra | — |
 | `tools_check` | — | — | globale | P (cerca `git`, `gh` e i language server nell'ambiente di login; non li esegue) |
 | `trust_check` | — | — | finestra | — |
 | `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
@@ -240,14 +240,14 @@ Rilassamenti e perché:
 ## Permessi Tauri (capabilities)
 
 `src-tauri/capabilities/project.json` (finestre `proj-*`):
-- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `git:changed`, `git:progress`, `git:op_done`, `pty:*`).
+- `core:event:allow-listen`, `core:event:allow-unlisten` — eventi del core (`conv:*` compreso `conv:removed`, `fs:changed`, `git:changed`, `git:progress`, `git:op_done`, `search:hits`, `search:done`, `lsp:message`, `lsp:exit`, `pty:*`).
   Niente `allow-emit`: la pagina non può inviare eventi alle altre finestre.
 
 **Come arrivano gli eventi di un progetto.** In Tauri 2 `emit_to(etichetta)` filtra solo gli ascoltatori
 registrati *per quella finestra*: un ascoltatore globale (`listen` senza finestra) di qualunque finestra li riceve
 tutti. Per questo:
 - ogni evento di progetto porta l'id del progetto nel **nome**: `conv:event:<id>`, `conv:upsert:<id>`,
-  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `git:changed:<id>`, `git:progress:<id>`, `git:op_done:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
+  `conv:removed:<id>`, `conv:focus:<id>`, `fs:changed:<id>`, `git:changed:<id>`, `git:progress:<id>`, `git:op_done:<id>`, `search:hits:<id>`, `search:done:<id>`, `lsp:message:<id>`, `lsp:exit:<id>`, `pty:data:<id>`, `pty:exit:<id>`. Un solo helper per lato
   costruisce il nome (`projects::project_event` / `emit_to_project` nel core, `src/lib/events.ts` nell'interfaccia,
   che lo ricava dal proprio progetto); il core lo emette con `emit_to` verso la sola finestra del progetto;
 - l'interfaccia ascolta solo con `getCurrentWebviewWindow().listen` (finestra corrente), mai con il `listen`
@@ -286,6 +286,22 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   `--opzione=valore` o dopo validazione (nomi di repository, login, numeri); i JSON si leggono con `serde` su campi
   espliciti (`--json` con elenco di campi). I comandi su un repository girano solo in progetti fidati (`gh` esegue
   `git` nel repository). Mai `gh auth switch`.
+- `git` (`git/cmd.rs`, `git/remote.rs`): cercato come `gh`, solo in progetti fidati, `current_dir` = repository
+  del progetto (canonicalizzato). Sempre `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, `GIT_MERGE_AUTOEDIT=no`,
+  `-c core.quotepath=off -c color.ui=never`. Letture: in più `GIT_OPTIONAL_LOCKS=0` (non toccano l'indice) e
+  `LC_ALL=C`. Scritture: `LC_ALL=C` dove l'output si analizza, `GIT_LITERAL_PATHSPECS=1` solo per i percorsi della
+  pagina passati su stdin (`--pathspec-from-file=- --pathspec-file-nul`), ambiente dell'utente per i comandi con
+  hook (`commit`, `switch`). Fetch/pull/push: `--progress`, ssh in `BatchMode` se l'utente non ha un proprio comando
+  ssh, mai `--force`. Tutti in una sessione propria con timeout (15 s letture, 120 s scritture, 10 min remoti);
+  annullamento e timeout fermano il gruppo con SIGTERM e poi SIGKILL.
+- Language server (`lsp/`): solo i binari della tabella `lsp/servers.rs` (pyright/pylsp, jdtls, gopls,
+  rust-analyzer) con argomenti costanti (`-data` per jdtls in `~/Library/Application Support/CodeArt/jdtls/<id>`, fuori dal progetto), cercati
+  come gli altri strumenti, `current_dir` = cartella del progetto, ambiente di login, sessione propria; solo in
+  progetti fidati. Fermati alla chiusura della finestra e all'uscita dall'app.
+- Uscita dall'app: `RunEvent::Exit` ferma i processi `claude`, i language server, le operazioni remote git
+  (`RemoteOps::stop_all`, aspetta i thread) e i processi avviati da `run_tool` (scritture git, `gh`, push di
+  `gh_pr_create`: registro in `tools.rs`), sempre SIGTERM, attesa di 2 s, poi SIGKILL: git toglie i suoi lock invece
+  di morire di SIGPIPE da orfano. La chiusura di una finestra annulla le sue operazioni remote.
 
 ## Segreti e log
 

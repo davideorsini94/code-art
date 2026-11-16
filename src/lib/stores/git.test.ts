@@ -190,6 +190,20 @@ describe('git store', () => {
     expect(git.error).toBe('percorso non valido')
   })
 
+  it('a repeated refresh error does not come back after the user closed it; a new one does', async () => {
+    ipc.gitRepos.mockRejectedValue('git non trovato')
+    await git.refresh()
+    expect(git.error).toBe('git non trovato')
+    git.error = null // chiuso dall'utente
+    window.dispatchEvent(new Event('focus'))
+    await git.refresh()
+    expect(git.error).toBeNull()
+    ipc.gitRepos.mockRejectedValue('tempo scaduto dopo 10 s')
+    await git.refresh()
+    expect(git.error).toBe('tempo scaduto dopo 10 s')
+    ipc.gitRepos.mockResolvedValue([REPO])
+  })
+
   it('safety net: if git:op_done never arrives, busy is released after the guard time; unbind releases it too', async () => {
     vi.useFakeTimers()
     try {

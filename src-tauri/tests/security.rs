@@ -392,7 +392,7 @@ fn gh_token_appears_only_in_github_rs() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "rs") && !p.file_name().is_some_and(|n| n == "tests.rs") {
+            } else if p.extension().is_some_and(|x| x == "rs") && p.file_name().is_none_or(|n| n != "tests.rs") {
                 let text = read(&p);
                 let prod = text.split("\n#[cfg(test)]").next().unwrap();
                 if prod.contains("GH_TOKEN") {
@@ -420,7 +420,7 @@ fn search_speed_on_this_repo() {
     for root in [repo.clone(), repo.join("node_modules")] {
         for round in 1..=3 {
             let t = std::time::Instant::now();
-            let s = search(&[root.clone()], &q, &AtomicBool::new(false), |_| {});
+            let s = search(std::slice::from_ref(&root), &q, &AtomicBool::new(false), |_| {});
             println!("{} giro {round}: {:?}, {:?}", root.file_name().unwrap().to_string_lossy(), t.elapsed(), s);
         }
     }

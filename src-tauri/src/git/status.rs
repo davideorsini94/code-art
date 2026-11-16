@@ -62,7 +62,7 @@ pub fn parse_porcelain_v2(z: &[u8]) -> (BranchHeader, Vec<StatusEntry>) {
     while let Some(rec) = recs.next() {
         if let Some(h) = rec.strip_prefix("# ") {
             match h.split_once(' ') {
-                Some(("branch.head", v)) if v == "(detached)" => header.detached = true,
+                Some(("branch.head", "(detached)")) => header.detached = true,
                 Some(("branch.head", v)) => header.branch = Some(v.into()),
                 Some(("branch.upstream", v)) => header.upstream = Some(v.into()),
                 Some(("branch.ab", v)) => {

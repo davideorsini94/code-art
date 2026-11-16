@@ -44,6 +44,8 @@ export class GitStore {
   private starting = false
   private seq = 0
   private refreshFailed = false
+  /** Ultimo errore di rilettura: lo stesso errore non riappare a ogni focus dopo che l'utente l'ha chiuso. */
+  private lastRefreshError: string | null = null
   private guard: ReturnType<typeof setTimeout> | null = null
 
   get primary(): string | null {
@@ -102,14 +104,18 @@ export class GitStore {
       this.repos = repos
       this.status = Object.fromEntries(repos.map((r, i) => [r, list[i]]))
       this.loaded = true
+      this.lastRefreshError = null
       if (this.refreshFailed) {
         this.refreshFailed = false
         this.error = null
       }
     } catch (e) {
       if (my !== this.seq) return
+      const text = errorText(e)
+      if (text === this.lastRefreshError) return
+      this.lastRefreshError = text
       this.refreshFailed = true
-      this.error = errorText(e)
+      this.error = text
     }
   }
 

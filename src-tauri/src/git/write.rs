@@ -106,8 +106,8 @@ fn check_paths(dir: &Path, paths: &[String]) -> Result<()> {
 }
 
 /// Pathspec per `--pathspec-from-file=- --pathspec-file-nul` (letterali grazie a `GIT_LITERAL_PATHSPECS`).
-fn pathspec(paths: &[String]) -> Option<Vec<u8>> {
-    Some(paths.join("\0").into_bytes())
+fn pathspec(paths: &[String]) -> Vec<u8> {
+    paths.join("\0").into_bytes()
 }
 
 const FROM_STDIN: [&str; 2] = ["--pathspec-from-file=-", "--pathspec-file-nul"];
@@ -171,7 +171,7 @@ pub fn stage(store: &Store, project_id: &str, repo: &str, paths: &[String]) -> R
     check_paths(&dir, paths)?;
     let _g = lock_repo(&dir)?;
     // `-A`: anche le cancellazioni
-    git_write_ok(&dir, Write::Paths, &["add", "-A", FROM_STDIN[0], FROM_STDIN[1]], pathspec(paths)).map(drop)
+    git_write_ok(&dir, Write::Paths, &["add", "-A", FROM_STDIN[0], FROM_STDIN[1]], Some(pathspec(paths))).map(drop)
 }
 
 pub fn unstage(store: &Store, project_id: &str, repo: &str, paths: &[String]) -> Result<()> {
@@ -179,10 +179,10 @@ pub fn unstage(store: &Store, project_id: &str, repo: &str, paths: &[String]) ->
     check_paths(&dir, paths)?;
     let _g = lock_repo(&dir)?;
     if head_exists(&dir)? {
-        git_write_ok(&dir, Write::Paths, &["restore", "--staged", FROM_STDIN[0], FROM_STDIN[1]], pathspec(paths)).map(drop)
+        git_write_ok(&dir, Write::Paths, &["restore", "--staged", FROM_STDIN[0], FROM_STDIN[1]], Some(pathspec(paths))).map(drop)
     } else {
         // repository senza commit: non c'è HEAD da cui ripristinare, si toglie dall'indice
-        git_write_ok(&dir, Write::Paths, &["rm", "--cached", "-q", "-r", FROM_STDIN[0], FROM_STDIN[1]], pathspec(paths)).map(drop)
+        git_write_ok(&dir, Write::Paths, &["rm", "--cached", "-q", "-r", FROM_STDIN[0], FROM_STDIN[1]], Some(pathspec(paths))).map(drop)
     }
 }
 
@@ -207,7 +207,7 @@ pub fn discard(store: &Store, project_id: &str, repo: &str, paths: &[String], co
         return Ok(false);
     }
     if !keep.is_empty() {
-        git_write_ok(&dir, Write::Paths, &["restore", "--worktree", FROM_STDIN[0], FROM_STDIN[1]], pathspec(&keep))?;
+        git_write_ok(&dir, Write::Paths, &["restore", "--worktree", FROM_STDIN[0], FROM_STDIN[1]], Some(pathspec(&keep)))?;
     }
     let base = dir.canonicalize().map_err(|e| e.to_string())?;
     for (trashed, p) in loose.iter().enumerate() {

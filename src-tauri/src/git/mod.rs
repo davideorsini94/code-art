@@ -71,7 +71,7 @@ pub(crate) fn resolve_repo(store: &Store, project_id: &str, repo: &str) -> Resul
     repos
         .into_iter()
         .find(|r| Path::new(r).canonicalize().is_ok_and(|c| c == want))
-        .map(|r| PathBuf::from(r))
+        .map(PathBuf::from)
         .ok_or_else(|| "il repository non appartiene al progetto".to_string())
 }
 
@@ -172,6 +172,7 @@ fn disk(dir: &Path, rel: &str) -> Result<Side> {
 }
 
 /// Prima = `HEAD` (staged) o indice (non staged); dopo = indice (staged) o disco (non staged).
+#[cfg(test)]
 pub fn diff(store: &Store, project_id: &str, repo: &str, path: &str, staged: bool) -> Result<DiffText> {
     diff_with_orig(store, project_id, repo, path, None, staged)
 }

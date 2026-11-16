@@ -90,10 +90,10 @@ fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap
             let mut b = buf.lock().unwrap_or_else(|p| p.into_inner());
             let room = cap.saturating_sub(b.len());
             b.extend_from_slice(&chunk[..n.min(room)]);
-            if n > room {
-                if let Some(o) = &over {
-                    o.store(true, Ordering::Relaxed);
-                }
+            if n > room
+                && let Some(o) = &over
+            {
+                o.store(true, Ordering::Relaxed);
             }
         }
         let _ = done.send(());

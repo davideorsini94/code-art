@@ -17,7 +17,7 @@ vi.mock('../ipc', () => ({
   searchCancel: (id: number) => searchCancel(id),
   searchReplace: (...a: unknown[]) => searchReplace(...a),
 }))
-const tabs: { path: string; dirty: boolean; diff: null }[] = []
+const tabs: { path: string; dirty: boolean; diff: { editable?: boolean } | null }[] = []
 vi.mock('./editor.svelte', () => ({ editor: { get tabs() { return tabs } } }))
 
 import { SearchStore, DEBOUNCE_MS } from './search.svelte'
@@ -123,6 +123,17 @@ describe('search store', () => {
     expect(searchReplace).toHaveBeenCalledWith(expect.objectContaining({ text: 'a' }), 'z', ['/p/a'])
     expect(s.outcome).toMatchObject({ replacements: 2, dirtySkipped: 1 })
     expect(searchStart).toHaveBeenCalledTimes(2)
+  })
+
+  it('replaceAll also skips files with unsaved edits in an editable diff tab', async () => {
+    const s = await bound()
+    s.setText('a', true)
+    await vi.advanceTimersByTimeAsync(0)
+    handlers['search:hits']({ payload: { id: 1, hits: [hit('/p/a'), hit('/p/d')] } })
+    tabs.push({ path: '/p/d', dirty: true, diff: { editable: true } })
+    s.replacement = 'z'
+    await s.replaceAll()
+    expect(searchReplace).toHaveBeenCalledWith(expect.objectContaining({ text: 'a' }), 'z', ['/p/a'])
   })
 })
 

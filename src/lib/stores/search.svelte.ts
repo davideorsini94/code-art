@@ -203,9 +203,9 @@ export class SearchStore {
     this.collapsed[path] = !this.collapsed[path]
   }
 
-  /** File con modifiche non salvate nell'editor: non si sostituisce lì. */
+  /** File con modifiche non salvate nell'editor (anche in un diff modificabile): non si sostituisce lì. */
   private dirtyPaths() {
-    return new Set(editor.tabs.filter((t) => t.dirty && !t.diff).map((t) => t.path))
+    return new Set(editor.tabs.filter((t) => t.dirty && (!t.diff || t.diff.editable)).map((t) => t.path))
   }
 
   /** Sostituisce in tutti i file dei risultati (esclusi quelli con modifiche non salvate); il core ricalcola e chiede conferma. */

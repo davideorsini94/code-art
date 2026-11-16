@@ -11,5 +11,11 @@
 {:else}
   {#await import('./git/GitPanel.svelte') then m}
     <m.default />
+  {:catch}
+    <p class="empty">Vista Git non caricata</p>
   {/await}
 {/if}
+
+<style>
+  .empty { margin: 0; padding: 16px; color: var(--faint); font-size: 13px; text-align: center; }
+</style>
