@@ -139,3 +139,8 @@ export const ghPrCreate = (repo: string, title: string, body: string, base: stri
 /** `false` = annullato nella conferma nativa. */
 export const ghPrMerge = (repo: string, number: number, method: MergeMethod, deleteBranch: boolean) =>
   invoke<boolean>('gh_pr_merge', { repo, number, method, deleteBranch })
+
+// ---- language server (il core avvia un server per progetto e linguaggio; i messaggi sono JSON-RPC in stringa) ----
+export const lspStart = (lang: string) => invoke<{ id: number; rootUri: string }>('lsp_start', { lang })
+export const lspSend = (id: number, message: string) => invoke<void>('lsp_send', { id, message })
+export const lspStop = (id: number) => invoke<void>('lsp_stop', { id })

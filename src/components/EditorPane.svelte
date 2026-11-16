@@ -8,6 +8,9 @@
   import FileIcon from './FileIcon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { relativeToFolders } from '../lib/conv/paths'
+  import { lspStore } from '../lib/stores/lsp.svelte'
+  import { LANG_LABEL, languageForPath } from '../lib/lsp/languages'
+  import InfoToast from './InfoToast.svelte'
   import { parseConflicts, resolveEdit, type Conflict, type Pick } from '../lib/conflicts'
 
   type Monaco = typeof import('monaco-editor')
@@ -195,8 +198,24 @@
     }
   }
 
+  // LSP: modulo caricato al primo file di Python, Java, Go o Rust; il lato originale di un diff non passa di qui
+  let lspMod: typeof import('../lib/lsp/runtime') | null = null
+  function lspAttach(m: Monaco, model: IModel, path: string) {
+    if (!languageForPath(path)) return
+    void import('../lib/lsp/runtime').then((r) => {
+      lspMod = r
+      r.attach(m, model, path)
+    })
+  }
+  const lspLang = $derived(active && isTextTab(active) ? languageForPath(active.path) : null)
+  const lspInfo = $derived(lspLang ? lspStore.status[lspLang] : undefined)
+  const lspTip = $derived(
+    !lspLang || !lspInfo ? '' : lspInfo.state === 'pronto' ? `${LANG_LABEL[lspLang]}: language server pronto` : lspInfo.state === 'avvio' ? `${LANG_LABEL[lspLang]}: avvio del language server…` : (lspInfo.detail ?? `${LANG_LABEL[lspLang]}: language server fermo`),
+  )
+
   function create(m: Monaco, t: Tab, text: string, dirty: boolean) {
     const model = m.editor.createModel(text, undefined, m.Uri.file(t.path))
+    lspAttach(m, model, t.path)
     const entry: Entry = { model, path: t.path, rev: t.rev, savedVersion: dirty ? -1 : model.getAlternativeVersionId() }
     models.set(t.id, entry)
     const id = t.id
@@ -204,7 +223,7 @@
     editor.bind(id, {
       snapshot: () => {
         const v = model.getAlternativeVersionId()
-        return { text: model.getValue(), commit: () => { entry.savedVersion = v; editor.setDirty(id, model.getAlternativeVersionId() !== v) } }
+        return { text: model.getValue(), commit: () => { entry.savedVersion = v; editor.setDirty(id, model.getAlternativeVersionId() !== v); lspMod?.didSave(model) } }
       },
     })
     return model
@@ -387,6 +406,9 @@
       </div>
     {/each}
     <span class="grow"></span>
+    {#if lspLang && lspInfo && showCode}
+      <span class="lsp" role="status" use:tooltip={lspTip}>{LANG_LABEL[lspLang]} <span class="ldot {lspInfo.state}" aria-hidden="true">●</span></span>
+    {/if}
     {#if conflicts.length > 0 && showCode}
       <span class="conf" role="group" aria-label="Conflitti di unione">
         <span class="conf-n">{conflicts.length} {conflicts.length === 1 ? 'conflitto' : 'conflitti'}</span>
@@ -486,7 +508,13 @@
   </div>
 </div>
 
+<InfoToast message={lspStore.notice} onclose={() => (lspStore.notice = null)} />
+
 <style>
+  .lsp { margin-right: 8px; font-size: 11px; color: var(--dim); }
+  .ldot.avvio { color: var(--wait); }
+  .ldot.pronto { color: var(--work); }
+  .ldot.fermo { color: var(--err); }
   .pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .tabs { display: flex; align-items: center; gap: 2px; padding: 6px 6px 0; overflow-x: auto; flex: none; }
   .tab {
