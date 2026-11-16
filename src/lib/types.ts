@@ -126,3 +126,10 @@ export type Pr = {
 }
 export type PrCheck = { name: string; state: 'passing' | 'failing' | 'pending' | 'skipped'; url: string }
 export type MergeMethod = 'merge' | 'squash' | 'rebase'
+
+// ---- Language server (specchio di src-tauri/src/lsp/mod.rs) ----
+export type LspLang = 'python' | 'java' | 'go' | 'rust'
+export type LspStart = { id: number; rootUri: string }
+/** Payload degli eventi `lsp:message` (messaggio JSON-RPC del server, come testo) e `lsp:exit` (uscita inattesa). */
+export type LspMessageEvent = { id: number; message: string }
+export type LspExitEvent = { id: number; code: number }

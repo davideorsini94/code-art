@@ -21,15 +21,6 @@ const STDOUT_MAX: usize = 16 * 1024 * 1024;
 /// Dopo l'uscita del processo, quanto aspettare ancora la chiusura delle pipe.
 const DRAIN_GRACE: Duration = Duration::from_millis(300);
 
-/// Language server noti: (linguaggio, binari candidati in ordine di preferenza, come installarlo).
-/// Il client LSP li importa da qui.
-pub const LSP_SERVERS: &[(&str, &[&str], &str)] = &[
-    ("python", &["pyright-langserver", "pylsp"], "npm i -g pyright  oppure  pip install python-lsp-server"),
-    ("java", &["jdtls"], "brew install jdtls"),
-    ("go", &["gopls"], "go install golang.org/x/tools/gopls@latest"),
-    ("rust", &["rust-analyzer"], "rustup component add rust-analyzer"),
-];
-
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Ambiente di login in cache. Condiviso con l'avvio dell'app (`engine::app_launch` lo usa): `OnceLock`
@@ -179,12 +170,12 @@ fn status_for(env: &HashMap<String, String>, system_dirs: &[&str]) -> ToolsStatu
     ToolsStatus {
         git: path("git"),
         gh: path("gh"),
-        lsp: LSP_SERVERS
+        lsp: crate::lsp::servers::SERVERS
             .iter()
-            .map(|(lang, bins, hint)| LspAvail {
-                lang: (*lang).into(),
-                found: bins.iter().any(|b| find_tool_in(env, b, system_dirs).is_some()),
-                install_hint: (*hint).into(),
+            .map(|s| LspAvail {
+                lang: s.lang.into(),
+                found: s.candidates.iter().any(|c| find_tool_in(env, c.bin, system_dirs).is_some()),
+                install_hint: s.install_hint.into(),
             })
             .collect(),
     }

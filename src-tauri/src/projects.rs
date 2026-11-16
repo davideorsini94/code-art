@@ -229,6 +229,7 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
         crate::claude::sessions::unwatch_project(app, id);
         app.state::<crate::search::Searches>().cancel_project(id);
         app.state::<std::sync::Arc<crate::git::remote::RemoteOps>>().cancel_project(id);
+        app.state::<std::sync::Arc<crate::lsp::Lsp>>().stop_project(id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
     app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);

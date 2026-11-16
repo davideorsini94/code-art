@@ -5,6 +5,7 @@ pub mod git;
 pub mod fs_tree;
 mod github;
 mod lifecycle;
+mod lsp;
 mod projects;
 mod pty;
 pub mod search;
@@ -39,6 +40,7 @@ pub fn run() {
         .manage(pty::Ptys::default())
         .manage(search::Searches::default())
         .manage(Arc::new(git::remote::RemoteOps::default()))
+        .manage(Arc::new(lsp::Lsp::default()))
         .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
@@ -167,6 +169,9 @@ pub fn run() {
             github::gh_pr_checks,
             github::gh_pr_create,
             github::gh_pr_merge,
+            lsp::lsp_start,
+            lsp::lsp_send,
+            lsp::lsp_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -188,6 +193,7 @@ pub fn run() {
             RunEvent::Exit => {
                 projects::mark_quitting(app);
                 app.state::<claude::engine::Engine>().stop_all();
+                app.state::<Arc<lsp::Lsp>>().stop_all();
             }
             _ => {}
         }
