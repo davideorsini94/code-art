@@ -168,6 +168,22 @@ fn stop_project_stops_every_server_of_that_project() {
 }
 
 #[test]
+fn stop_all_waits_for_servers_stopped_by_window_close() {
+    let root = tempfile::tempdir().unwrap();
+    let (_db, store) = project(&[root.path()], true);
+    let pidf = root.path().join("pids");
+    let lsp = Arc::new(Lsp::default());
+    lsp.start(&store, "p", "go", fake(&[("FAKE_LSP_PIDS", pidf.to_str().unwrap())]), Events::default().emit()).unwrap();
+    let pids = read_pids(&pidf);
+    // chiusura della finestra (non aspetta), poi uscita dell'app: `stop_all` torna solo a gruppo finito
+    lsp.stop_project("p");
+    lsp.stop_all();
+    for pid in pids {
+        assert!(gone_now(pid), "processo {pid} ancora vivo dopo stop_all");
+    }
+}
+
+#[test]
 fn startup_failure_reports_stderr() {
     let root = tempfile::tempdir().unwrap();
     let (_db, store) = project(&[root.path()], true);
@@ -278,6 +294,14 @@ fn file_uri_outside_project_refused() {
         msg(format!(r#"{{"command":"x","arguments":["file://{o}"]}}"#)),
         // `rootPath` è un percorso, non un URI
         msg(format!(r#"{{"rootPath":"{o}"}}"#)),
+        // forme che un parser URL WHATWG (rust-analyzer) normalizza in `file:///etc/passwd`
+        at(" file:///etc/passwd".to_string()),
+        at(r"fi\tle:///etc/passwd".to_string()),
+        at(r"\nFile:///etc/passwd".to_string()),
+        at(r"\u0001file:///etc/passwd".to_string()),
+        // un campo `text` qualunque non è il contenuto di un documento
+        msg(r#"{"command":"x","arguments":[{"text":"file:///etc/passwd"}]}"#.to_string()),
+        msg(r#"{"textDocument":{"uri":"file:///etc/passwd","text":"x"}}"#.to_string()),
     ];
     for m in &refused {
         assert!(check_message(m, &roots).is_err(), "{m}");
@@ -289,6 +313,7 @@ fn file_uri_outside_project_refused() {
         msg(format!(r#"{{"rootPath":"{p}","rootUri":"file://{p}","workspaceFolders":[{{"uri":"file://{p}","name":"p"}}]}}"#)),
         // il testo di un documento non è un URI
         msg(format!(r#"{{"textDocument":{{"uri":"file://{p}/a.py","text":"file:///etc/passwd"}}}}"#)),
+        msg(format!(r#"{{"textDocument":{{"uri":"file://{p}/a.py","version":2}},"contentChanges":[{{"text":"file:///etc/passwd"}}]}}"#)),
         at("jdt://contents/rt.jar/java.lang/String.class".to_string()),
     ];
     for m in &accepted {

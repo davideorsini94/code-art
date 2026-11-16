@@ -46,7 +46,8 @@ pub struct LspStart {
 }
 
 /// Eventi per la finestra del progetto: `lsp:message` `{ id, message }` e `lsp:exit` `{ id, code }` (uscita
-/// inattesa: il server è già stato riavviato, se c'era budget, e la pagina deve ripetere `initialize`).
+/// inattesa: il server è già stato riavviato, se c'era budget, e la pagina deve ripetere `initialize`). Anche una
+/// notifica `exit` mandata dalla pagina conta come uscita inattesa: per fermare un server si usa `lsp_stop`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LspEvent {
     Message { id: u64, message: String },
@@ -87,8 +88,9 @@ impl RestartBudget {
 // ---------- controllo dei messaggi in uscita ----------
 
 /// Accetta solo un oggetto JSON-RPC 2.0 (richiesta, notifica o risposta) in cui ogni URI `file:` (valori e chiavi,
-/// a qualunque profondità) e ogni `rootPath` stanno dentro `roots`. Il campo `text` (contenuto di un documento) non
-/// è un URI e non si controlla.
+/// a qualunque profondità) e ogni `rootPath` stanno dentro `roots`. Il contenuto dei documenti (`textDocument.text`,
+/// `contentChanges[].text`) non è un URI e non si controlla. È una difesa in più, non un confine: in un progetto fidato
+/// la configurazione del server (e il terminale) eseguono comandi comunque.
 pub fn check_message(message: &str, roots: &[PathBuf]) -> Result<()> {
     if message.len() > framing::MAX_CONTENT {
         return Err("messaggio LSP oltre 64 MB".into());
@@ -103,27 +105,45 @@ pub fn check_message(message: &str, roots: &[PathBuf]) -> Result<()> {
     if !call && !reply {
         return Err("messaggio LSP non valido: né richiesta né risposta".into());
     }
-    check_value(&v, None, roots)
+    check_value(&v, None, Ctx::Other, roots)
 }
 
+/// Come il parser URL (WHATWG) di alcuni server: spazi e controlli C0 iniziali ignorati, tab e a capo tolti ovunque,
+/// schema senza distinzione di maiuscole. Così `" file:…"` o `"fi\tle:…"` non sfuggono al controllo.
 fn is_file_uri(s: &str) -> bool {
-    s.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+    let norm: String = s.trim_start_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).take(5).collect();
+    norm.eq_ignore_ascii_case("file:")
 }
 
-fn check_value(v: &Value, key: Option<&str>, roots: &[PathBuf]) -> Result<()> {
+/// Dove si trova un valore: il campo `text` è il contenuto di un documento (non un URI) solo in `textDocument.text`
+/// e in `contentChanges[].text`.
+#[derive(Clone, Copy, PartialEq)]
+enum Ctx {
+    Other,
+    TextDocument,
+    ContentChange,
+}
+
+fn check_value(v: &Value, key: Option<&str>, ctx: Ctx, roots: &[PathBuf]) -> Result<()> {
     match v {
         Value::String(s) => match key {
-            Some("text") => Ok(()),
             Some("rootPath") => check_path(Path::new(s), roots),
             _ if is_file_uri(s) => check_uri(s, roots),
             _ => Ok(()),
         },
-        Value::Array(items) => items.iter().try_for_each(|x| check_value(x, None, roots)),
+        Value::Array(items) => {
+            let inner = if key == Some("contentChanges") { Ctx::ContentChange } else { Ctx::Other };
+            items.iter().try_for_each(|x| check_value(x, None, inner, roots))
+        }
         Value::Object(map) => map.iter().try_for_each(|(k, x)| {
             if is_file_uri(k) {
                 check_uri(k, roots)?;
             }
-            check_value(x, Some(k), roots)
+            if k == "text" && x.is_string() && matches!(ctx, Ctx::TextDocument | Ctx::ContentChange) {
+                return Ok(());
+            }
+            let inner = if k == "textDocument" { Ctx::TextDocument } else { Ctx::Other };
+            check_value(x, Some(k), inner, roots)
         }),
         _ => Ok(()),
     }
@@ -185,6 +205,9 @@ struct Slot {
 pub struct Lsp {
     next: AtomicU64,
     slots: Mutex<HashMap<u64, Slot>>,
+    /// Supervisori di server fermati senza aspettare (chiusura di una finestra): `stop_all` li aspetta all'uscita,
+    /// altrimenti l'app potrebbe finire prima del loro SIGTERM/SIGKILL.
+    stopping: Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// Avvia `launch` in una sessione propria con tre thread: stdout (messaggi completi → `emit`), stderr (ultime 4 KB)
@@ -266,7 +289,8 @@ fn spawn(lsp: Weak<Lsp>, id: u64, generation: u64, launch: &Launch, emit: Emit) 
                 }
             }
         };
-        // i discendenti rimasti nel gruppo non sopravvivono al server; poi lo stderr finale, se arriva
+        // i discendenti rimasti nel gruppo non sopravvivono al server (il pgid resta valido finché ha membri; a gruppo
+        // vuoto il kill fallisce, salvo un riuso del pid nell'istante tra la raccolta e il segnale); poi lo stderr finale
         stop_group(&mut child, TERM_GRACE);
         let _ = eof_rx.recv_timeout(DRAIN_GRACE);
         if let Some(lsp) = lsp.upgrade() {
@@ -342,7 +366,7 @@ impl Lsp {
         let stdin = {
             let slots = lock(&self.slots);
             let slot = slots.get(&id).filter(|s| s.project == project_id).ok_or_else(|| NOT_RUNNING.to_string())?;
-            slot.run.as_ref().ok_or_else(|| HALTED.to_string())?.stdin.clone()
+            slot.run.as_ref().ok_or_else(|| halted(slot))?.stdin.clone()
         };
         let roots: Vec<PathBuf> = project.folders.iter().map(PathBuf::from).collect();
         check_message(message, &roots)?;
@@ -367,22 +391,25 @@ impl Lsp {
 
     /// Ferma (senza aspettare) e dimentica tutti i server del progetto: chiusura della sua finestra.
     pub fn stop_project(&self, project_id: &str) {
-        let mut slots = lock(&self.slots);
-        slots.retain(|_, s| {
+        let mut handles = Vec::new();
+        lock(&self.slots).retain(|_, s| {
             if s.project != project_id {
                 return true;
             }
-            if let Some(r) = s.run.as_mut() {
-                r.halt();
-            }
+            handles.extend(s.run.as_mut().and_then(Running::halt));
             false
         });
+        let mut stopping = lock(&self.stopping);
+        stopping.retain(|h| !h.is_finished());
+        stopping.extend(handles);
     }
 
-    /// Ferma tutti i server in parallelo e aspetta (uscita dell'app: i gruppi propri sopravviverebbero).
+    /// Ferma tutti i server in parallelo e aspetta anche quelli già in arresto (uscita dell'app: i gruppi propri
+    /// sopravviverebbero). Limitato dalla tolleranza di `stop_group`.
     pub fn stop_all(&self) {
         let slots: Vec<Slot> = lock(&self.slots).drain().map(|(_, s)| s).collect();
-        let handles: Vec<JoinHandle<()>> = slots.into_iter().filter_map(|s| s.run.and_then(|mut r| r.halt())).collect();
+        let mut handles: Vec<JoinHandle<()>> = slots.into_iter().filter_map(|s| s.run.and_then(|mut r| r.halt())).collect();
+        handles.append(&mut lock(&self.stopping));
         for h in handles {
             let _ = h.join();
         }
@@ -411,11 +438,20 @@ impl Lsp {
     }
 }
 
+/// `HALTED` con la causa dell'ultima uscita (codice e stderr finale), se nota.
+fn halted(slot: &Slot) -> String {
+    match &slot.last_exit {
+        Some((code, tail)) if tail.is_empty() => format!("{HALTED} (uscita {code})"),
+        Some((code, tail)) => format!("{HALTED} (uscita {code}: {tail})"),
+        None => HALTED.to_string(),
+    }
+}
+
 fn existing_in(slots: &HashMap<u64, Slot>, project_id: &str, lang: &str) -> Option<Result<LspStart>> {
     let (id, slot) = slots.iter().find(|(_, s)| s.project == project_id && s.lang == lang)?;
     Some(match (&slot.run, slot.starting) {
         (Some(_), _) => Ok(LspStart { id: *id, root_uri: slot.root_uri.clone() }),
-        (None, false) => Err(HALTED.into()),
+        (None, false) => Err(halted(slot)),
         (None, true) => Err(NOT_RUNNING.into()),
     })
 }
