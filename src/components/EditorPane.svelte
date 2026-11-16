@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
+  import { onDestroy, untrack } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { iconFor } from '../lib/fileicons'
@@ -8,6 +8,10 @@
   import FileIcon from './FileIcon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { relativeToFolders } from '../lib/conv/paths'
+  import { lspStore } from '../lib/stores/lsp.svelte'
+  import { LANG_LABEL, languageForPath } from '../lib/lsp/languages'
+  import InfoToast from './InfoToast.svelte'
+  import { parseConflicts, resolveEdit, type Conflict, type Pick } from '../lib/conflicts'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -24,7 +28,8 @@
   // modelli per id di tab (stabile dopo rinomina); il testo non viene mai copiato nello store a ogni tasto
   type Entry = { model: IModel; path: string; rev: number; savedVersion: number }
   const models = new Map<number, Entry>()
-  const diffModels = new Map<number, [IModel, IModel]>()
+  type DiffEntry = { pair: [IModel, IModel]; rev: number; savedVersion: number; editable: boolean }
+  const diffModels = new Map<number, DiffEntry>()
 
   const active = $derived(editor.activeTab)
   // cartella non fidata: editor in sola lettura, niente salvataggio (il core rifiuta comunque)
@@ -82,9 +87,9 @@
     if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 's') return
     if (e.defaultPrevented || (document.activeElement as Element | null)?.closest?.('.monaco-editor')) return
     const t = editor.activeTab
-    if (!t || !isTextTab(t)) return
+    if (!t || !(isTextTab(t) || t.diff?.editable)) return
     e.preventDefault()
-    void editor.save(t.path).catch(() => {})
+    void editor.save(t.path, t.key).catch(() => {})
   }
 
   // Monaco si carica solo quando si apre il primo file di testo
@@ -107,7 +112,7 @@
   function addSave(ed: ICode, m: Monaco) {
     ed.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => {
       const t = editor.activeTab
-      if (t) void editor.save(t.path)
+      if (t) void editor.save(t.path, t.key)
     })
   }
 
@@ -115,7 +120,14 @@
     if (!monaco || !mainEl || !diffEl || main) return
     main = monaco.editor.create(mainEl, { ...options, readOnly })
     addSave(main, monaco)
-    diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, renderSideBySide: true })
+    const ed = main
+    editor.activeSelection = () => {
+      const sel = ed.getSelection()
+      const model = ed.getModel()
+      return ed.hasTextFocus() && sel && model && !sel.isEmpty() ? model.getValueInRange(sel) : ''
+    }
+    diffEd = monaco.editor.createDiffEditor(diffEl, { ...options, readOnly: true, originalEditable: false, renderSideBySide: true })
+    addSave(diffEd.getModifiedEditor(), monaco)
   })
 
   $effect(() => {
@@ -157,8 +169,54 @@
     return entry.model
   }
 
+  function ensureDiff(m: Monaco, t: Tab) {
+    const d = t.diff!
+    let entry = diffModels.get(t.id)
+    if (!entry) {
+      const orig = m.editor.createModel(d.before, undefined, m.Uri.parse(`codeart-diff:before${t.path}`))
+      const mod = m.editor.createModel(d.after, undefined, m.Uri.parse(`codeart-diff:after${t.path}`))
+      const e: DiffEntry = { pair: [orig, mod], rev: t.rev, savedVersion: mod.getAlternativeVersionId(), editable: !!d.editable }
+      diffModels.set(t.id, e)
+      entry = e
+      if (d.editable) {
+        // stesso tracciamento di un file: sporco = versione diversa dall'ultima salvata
+        const id = t.id
+        mod.onDidChangeContent(() => editor.setDirty(id, mod.getAlternativeVersionId() !== e.savedVersion))
+        editor.bind(id, {
+          snapshot: () => {
+            const v = mod.getAlternativeVersionId()
+            return { text: mod.getValue(), commit: () => { e.savedVersion = v; editor.setDirty(id, mod.getAlternativeVersionId() !== v) } }
+          },
+        })
+      }
+    } else if (entry.editable && entry.rev !== t.rev) {
+      // ricarica da disco
+      entry.pair[1].setValue(t.baseText)
+      entry.rev = t.rev
+      entry.savedVersion = entry.pair[1].getAlternativeVersionId()
+      editor.setDirty(t.id, false)
+    }
+  }
+
+  // LSP: modulo caricato al primo file di Python, Java, Go o Rust; il lato originale di un diff non passa di qui
+  let lspMod: typeof import('../lib/lsp/runtime') | null = null
+  function lspAttach(m: Monaco, model: IModel, path: string) {
+    if (!languageForPath(path)) return
+    void import('../lib/lsp/runtime').then((r) => {
+      lspMod = r
+      if (!model.isDisposed?.()) r.attach(m, model, path) // scheda chiusa durante il primo import(): niente
+    })
+  }
+  onDestroy(() => lspMod?.dispose())
+  const lspLang = $derived(active && isTextTab(active) ? languageForPath(active.path) : null)
+  const lspInfo = $derived(lspLang ? lspStore.status[lspLang] : undefined)
+  const lspTip = $derived(
+    !lspLang || !lspInfo ? '' : lspInfo.state === 'pronto' ? `${LANG_LABEL[lspLang]}: language server pronto` : lspInfo.state === 'avvio' ? `${LANG_LABEL[lspLang]}: avvio del language server…` : (lspInfo.detail ?? `${LANG_LABEL[lspLang]}: language server fermo`),
+  )
+
   function create(m: Monaco, t: Tab, text: string, dirty: boolean) {
     const model = m.editor.createModel(text, undefined, m.Uri.file(t.path))
+    lspAttach(m, model, t.path)
     const entry: Entry = { model, path: t.path, rev: t.rev, savedVersion: dirty ? -1 : model.getAlternativeVersionId() }
     models.set(t.id, entry)
     const id = t.id
@@ -166,7 +224,7 @@
     editor.bind(id, {
       snapshot: () => {
         const v = model.getAlternativeVersionId()
-        return { text: model.getValue(), commit: () => { entry.savedVersion = v; editor.setDirty(id, model.getAlternativeVersionId() !== v) } }
+        return { text: model.getValue(), commit: () => { entry.savedVersion = v; editor.setDirty(id, model.getAlternativeVersionId() !== v); lspMod?.didSave(model) } }
       },
     })
     return model
@@ -188,19 +246,15 @@
     const liveDiff = new Set(editor.tabs.filter((t) => t.diff).map((t) => t.id))
     for (const [id, pair] of diffModels) {
       if (!liveDiff.has(id)) {
-        pair.forEach((x) => x.dispose())
+        pair.pair.forEach((x) => x.dispose())
         diffModels.delete(id)
+        editor.bind(id, null)
       }
     }
     for (const t of editor.tabs) {
       if (t.error || (!t.diff && !isTextTab(t))) continue
       if (t.diff) {
-        if (!diffModels.has(t.id)) {
-          diffModels.set(t.id, [
-            m.editor.createModel(t.diff.before, undefined, m.Uri.parse(`codeart-diff:before${t.path}`)),
-            m.editor.createModel(t.diff.after, undefined, m.Uri.parse(`codeart-diff:after${t.path}`)),
-          ])
-        }
+        ensureDiff(m, t)
         continue
       }
       ensureModel(m, t)
@@ -214,9 +268,127 @@
         if (second && second.getModel() !== model) second.setModel(model)
       }
     } else if (a?.diff) {
-      const pair = diffModels.get(a.id)
-      if (pair) diffEd?.setModel({ original: pair[0], modified: pair[1] })
+      const entry = diffModels.get(a.id)
+      if (entry) {
+        // solo il lato modificato di un diff "modificabile" (cartella di lavoro) accetta tasti; l'originale mai
+        diffEd?.updateOptions({ readOnly: !(a.diff.editable && !readOnly), originalEditable: false })
+        diffEd?.setModel({ original: entry.pair[0], modified: entry.pair[1] })
+      }
     }
+  })
+
+  // conflitti di unione del file attivo: decorazioni, riga di azioni sopra ogni conflitto (view zone costruita con nodi DOM) e contatore
+  let conflicts = $state.raw<Conflict[]>([])
+  let zoneIds: string[] = []
+  let decos: import('monaco-editor').editor.IEditorDecorationsCollection | undefined
+
+  let repaint: (() => void) | undefined
+
+  function pickConflict(model: IModel, c: Conflict, pick: Pick) {
+    if (readOnly) return
+    // la vista può essere indietro di qualche istante: si lavora sul conflitto corrente (stessa riga di inizio e stessi lati)
+    const text = model.getValue()
+    const now = parseConflicts(text).find((x) => x.start === c.start && x.ours === c.ours && x.theirs === c.theirs)
+    if (!now) return
+    const e = resolveEdit(text, now, pick)
+    // una sola voce di annullamento: ⌘Z toglie la scelta e nient'altro (né batte-e-ribatti dell'utente)
+    model.pushStackElement()
+    model.pushEditOperations([], [{ range: { startLineNumber: e.startLine, startColumn: 1, endLineNumber: e.endLine, endColumn: e.endColumn }, text: e.text }], () => null)
+    model.pushStackElement()
+    repaint?.()
+  }
+
+  function actionsNode(model: IModel, c: Conflict) {
+    const row = document.createElement('div')
+    row.className = 'ca-conflict-actions'
+    const defs: [Pick, string, string][] = [['ours', 'Tieni la tua', 'Tieni la versione del tuo branch'], ['theirs', 'Tieni l\'altra', 'Tieni la versione in arrivo'], ['both', 'Tieni entrambe', 'Tieni entrambe le versioni, la tua per prima']]
+    for (const [pick, label, tip] of defs) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.textContent = label
+      b.title = tip
+      b.addEventListener('click', () => pickConflict(model, c, pick))
+      row.appendChild(b)
+    }
+    return row
+  }
+
+  function paintConflicts(ed: ICode, model: IModel) {
+    const text = model.getValue()
+    const cs = text.includes('<<<<<<<') ? parseConflicts(text) : []
+    conflicts = cs
+    const line = (a: number, b: number, cls: string) => ({ range: { startLineNumber: a, startColumn: 1, endLineNumber: b, endColumn: 1 }, options: { isWholeLine: true, className: cls } })
+    const list = cs.flatMap((c) => [
+      line(c.start, c.start, 'ca-conflict-mark'),
+      line(c.start + 1, (c.base ?? c.mid) - 1, 'ca-conflict-ours'),
+      ...(c.base ? [line(c.base, c.mid - 1, 'ca-conflict-base')] : []),
+      line(c.mid, c.mid, 'ca-conflict-mark'),
+      line(c.mid + 1, c.end - 1, 'ca-conflict-theirs'),
+      line(c.end, c.end, 'ca-conflict-mark'),
+    ].filter((d) => d.range.startLineNumber <= d.range.endLineNumber))
+    decos ??= ed.createDecorationsCollection()
+    decos.set(list)
+    ed.changeViewZones((acc) => {
+      zoneIds.forEach((id) => acc.removeZone(id))
+      zoneIds = (readOnly ? [] : cs).map((c) => acc.addZone({ afterLineNumber: c.start - 1, heightInPx: 26, domNode: actionsNode(model, c) }))
+    })
+  }
+
+  $effect(() => {
+    const m = monaco
+    void modelTick
+    const t = active
+    const model = t && isTextTab(t) ? models.get(t.id)?.model : undefined
+    if (!m || !main || !model) {
+      conflicts = []
+      return
+    }
+    const ed = main
+    paintConflicts(ed, model)
+    // modifiche a raffica: si ridisegna dopo 150 ms; subito dopo una scelta
+    let timer: ReturnType<typeof setTimeout> | undefined
+    repaint = () => {
+      clearTimeout(timer)
+      paintConflicts(ed, model)
+    }
+    const sub = model.onDidChangeContent(() => {
+      clearTimeout(timer)
+      timer = setTimeout(() => paintConflicts(ed, model), 150)
+    })
+    return () => {
+      clearTimeout(timer)
+      repaint = undefined
+      sub.dispose()
+      decos?.clear()
+      ed.changeViewZones((acc) => zoneIds.forEach((id) => acc.removeZone(id)))
+      zoneIds = []
+    }
+  })
+
+  /** Dal cursore: il primo conflitto che inizia dopo (↓) o l'ultimo che inizia prima (↑), girando intorno. */
+  function jump(dir: 1 | -1) {
+    if (!main || conflicts.length === 0) return
+    const line = main.getPosition()?.lineNumber ?? 1
+    const c = dir === 1 ? (conflicts.find((x) => x.start > line) ?? conflicts[0]) : ([...conflicts].reverse().find((x) => x.start < line) ??conflicts[conflicts.length - 1])
+    main.setPosition({ lineNumber: c.start, column: 1 })
+    main.revealLineInCenter(c.start)
+    main.focus()
+  }
+
+  // "Apri su riga/colonna" (risultati di ricerca): dopo la sincronizzazione dei modelli, quando quello della scheda è nell'editor
+  $effect(() => {
+    const r = editor.reveal
+    void modelTick
+    if (!r || !main || !monaco) return
+    const t = active
+    if (!t || t.key !== r.key || !isTextTab(t)) return
+    const model = models.get(t.id)?.model
+    if (!model || main.getModel() !== model) return
+    const pos = model.validatePosition({ lineNumber: r.line, column: r.col })
+    main.setPosition(pos)
+    main.revealPositionInCenter(pos)
+    main.focus()
+    editor.reveal = null
   })
 </script>
 
@@ -235,6 +407,16 @@
       </div>
     {/each}
     <span class="grow"></span>
+    {#if lspLang && lspInfo && showCode}
+      <span class="lsp" role="status" use:tooltip={lspTip}>{LANG_LABEL[lspLang]} <span class="ldot {lspInfo.state}" role="img" aria-label={lspInfo.state}>●</span></span>
+    {/if}
+    {#if conflicts.length > 0 && showCode}
+      <span class="conf" role="group" aria-label="Conflitti di unione">
+        <span class="conf-n">{conflicts.length} {conflicts.length === 1 ? 'conflitto' : 'conflitti'}</span>
+        <button aria-label="Conflitto precedente" use:tooltip={'Vai al conflitto precedente'} onclick={() => jump(-1)}>↑</button>
+        <button aria-label="Conflitto successivo" use:tooltip={'Vai al conflitto successivo'} onclick={() => jump(1)}>↓</button>
+      </span>
+    {/if}
     {#if editor.tabs.length > 0}
       <button class="tool" class:on={editor.split} use:tooltip={editor.split ? 'Chiudi la vista divisa' : 'Dividi l\'editor'} onclick={() => (editor.split = !editor.split)}>Dividi</button>
     {/if}
@@ -260,8 +442,8 @@
   {#if active?.prompt}
     <div class="bar" role="alert">
       <span>Cambiato su disco</span>
-      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path)}>Ricarica</button>
-      <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path)}>Tieni il mio</button>
+      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path, active.key)}>Ricarica</button>
+      <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path, active.key)}>Tieni il mio</button>
     </div>
   {/if}
 
@@ -327,7 +509,13 @@
   </div>
 </div>
 
+<InfoToast message={lspStore.notice} onclose={() => (lspStore.notice = null)} />
+
 <style>
+  .lsp { margin-right: 8px; font-size: 11px; color: var(--dim); }
+  .ldot.avvio { color: var(--wait); }
+  .ldot.pronto { color: var(--work); }
+  .ldot.fermo { color: var(--err); }
   .pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .tabs { display: flex; align-items: center; gap: 2px; padding: 6px 6px 0; overflow-x: auto; flex: none; }
   .tab {
@@ -363,6 +551,18 @@
   .ed { flex: 1; min-width: 0; height: 100%; }
   .diff { position: absolute; inset: 0; }
   .editors .ed + .ed { border-left: 1px solid var(--edge-soft); }
+  .conf { display: inline-flex; align-items: center; gap: 2px; margin-right: 8px; font-size: 11px; color: var(--wait); }
+  .conf-n { padding: 0 6px; }
+  .conf button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--dim); font: inherit; cursor: default; }
+  .conf button:hover { background: var(--glass2); color: var(--txt); }
+  /* decorazioni e riga di azioni vivono dentro il DOM di Monaco: stili globali, solo token del tema */
+  :global(.ca-conflict-ours) { background: var(--accent-soft); }
+  :global(.ca-conflict-theirs) { background: var(--wait-soft); }
+  :global(.ca-conflict-base) { background: var(--glass); }
+  :global(.ca-conflict-mark) { background: var(--glass2); }
+  :global(.ca-conflict-actions) { display: flex; align-items: center; gap: 6px; height: 100%; padding-left: 12px; font-size: 11px; }
+  :global(.ca-conflict-actions button) { background: var(--glass2); border: 1px solid var(--edge-soft); color: var(--txt); border-radius: 6px; padding: 1px 9px; font: inherit; cursor: default; }
+  :global(.ca-conflict-actions button:hover) { border-color: var(--accent-line); }
   .hidden { display: none; }
   .empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--faint); font-size: 13px; pointer-events: none; }
 </style>

@@ -1,17 +1,43 @@
 <script lang="ts">
   import type { ResizableCol } from '../lib/layout'
   import { tooltip } from '../lib/tooltip'
+  import { sidebar, type SidebarViewId } from '../lib/stores/sidebar.svelte'
 
   let { collapsed, ontoggle }: { collapsed: Set<string>; ontoggle: (col: ResizableCol) => void } = $props()
 
+  const views: { id: SidebarViewId; icon: string; label: string; what: string; shortcut: string }[] = [
+    { id: 'files', icon: '◫', label: 'Esplora', what: 'i file del progetto', shortcut: '⌘⇧E' },
+    { id: 'search', icon: '⌕', label: 'Cerca', what: 'la ricerca nel progetto', shortcut: '⌘⇧F' },
+    { id: 'git', icon: '⑂', label: 'Git', what: 'il controllo del codice', shortcut: '⌘⇧G' },
+  ]
   const items: { col: ResizableCol; icon: string; label: string; what: string }[] = [
-    { col: 'sidebar', icon: '◫', label: 'Progetto', what: 'i file del progetto' },
     { col: 'convlist', icon: '☰', label: 'Conversazioni', what: 'l\'elenco delle conversazioni' },
     { col: 'conv', icon: '✎', label: 'Conversazione', what: 'la conversazione' },
   ]
+
+  const sidebarOpen = $derived(!collapsed.has('sidebar'))
+
+  // vista attiva con il pannello aperto: lo chiude; altrimenti apre il pannello su quella vista
+  function pick(id: SidebarViewId) {
+    if (sidebarOpen && sidebar.view === id) return ontoggle('sidebar')
+    sidebar.setView(id)
+    if (!sidebarOpen) ontoggle('sidebar')
+  }
 </script>
 
 <nav class="glass rail">
+  {#each views as v (v.id)}
+    {@const active = sidebarOpen && sidebar.view === v.id}
+    <button
+      class:on={active}
+      aria-pressed={active}
+      use:tooltip={{ text: `${active ? 'Nascondi' : 'Mostra'} ${v.what}`, shortcut: v.shortcut }}
+      aria-label={v.label}
+      onclick={() => pick(v.id)}
+    >
+      {v.icon}
+    </button>
+  {/each}
   {#each items as it (it.col)}
     <button class:on={!collapsed.has(it.col)} use:tooltip={`${collapsed.has(it.col) ? 'Mostra' : 'Nascondi'} ${it.what}`} aria-label={it.label} onclick={() => ontoggle(it.col)}>
       {it.icon}

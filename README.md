@@ -2,7 +2,7 @@
 
 A lightweight, fast personal IDE for Mac, built around your conversations with [Claude Code](https://claude.com/claude-code).
 
-> **Status: stage 1 of 4 complete.** The core works: project windows, file tree, editor, previews, terminal and Claude conversations. Git, SSH and databases come in the next stages.
+> **Status: stage 2 of 4 complete.** The core works (project windows, file tree, editor, previews, terminal and Claude conversations) and so do the developer tools: project-wide search and replace, Git, GitHub and language servers. SSH and databases come in the next stages.
 
 ## Why
 
@@ -21,7 +21,7 @@ All of it in a dark "liquid glass" theme, with editor, file previews, terminal, 
 | Stage | Scope | Status |
 |---|---|---|
 | 1. The core | Per-project windows, file tree, editor, terminal, Claude conversations with living titles and statuses, file previews, liquid glass theme | done |
-| 2. Developer tools | Git and GitHub (commit, branch, merge, pull requests, repo creation), project-wide search, code completion | planned |
+| 2. Developer tools | Git and GitHub (commit, branch, merge, pull requests, repo creation), project-wide search and replace, language servers (completion, hover, definitions, diagnostics) | done |
 | 3. SSH | Saved servers, remote folders in the tree, drag and drop between Mac and server, remote terminal | planned |
 | 4. Databases | PostgreSQL, MongoDB, Oracle: queries, editable result grid | planned |
 

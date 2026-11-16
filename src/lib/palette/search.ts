@@ -1,6 +1,11 @@
 import { projectPickAndAddFolder, projectPickAndOpen } from '../ipc'
 import { conversations } from '../stores/conversations.svelte'
 import { projectStore } from '../stores/project.svelte'
+import { git } from '../stores/git.svelte'
+import { github } from '../stores/github.svelte'
+import { sidebar } from '../stores/sidebar.svelte'
+import type { GitRemoteOp } from '../types'
+import type { PickerMode } from '../stores/git.svelte'
 
 // ---------- ricerca fuzzy ----------
 
@@ -126,9 +131,18 @@ export function createLatest<T>(run: (q: string) => Promise<T>, onResult: (q: st
 // ---------- comandi ----------
 
 /** Azioni che dipendono da componenti: le registrano App, Titlebar e Palette al montaggio. */
-export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openModes: () => {} }
+export const hooks = { toggleTerminal: () => {}, renameProject: () => {}, openModes: () => {}, revealSidebar: () => {} }
 
 export { PERMISSION_MODES } from '../conv/labels'
+
+/** Comando Git sul primo repository del progetto (collega lo store se serve). */
+const onRepo = (run: (repo: string) => void) => () =>
+  void git.ensure().then(() => {
+    if (git.primary) run(git.primary)
+    else git.error = 'Nessun repository Git in questo progetto'
+  })
+const remoteCmd = (op: GitRemoteOp, title: string): Command => ({ id: `git.${op}`, title, run: onRepo((r) => void git.remote(r, op)) })
+const branchCmd = (mode: PickerMode, id: string, title: string): Command => ({ id: `git.${id}`, title, run: onRepo(() => git.openPicker(mode)) })
 
 export type Command = { id: string; title: string; run(): void }
 
@@ -165,5 +179,30 @@ export const commands: Command[] = [
       if (id) void conversations.delete(id) // la conferma è il dialogo nativo del core
     },
   },
+  {
+    id: 'git.commit',
+    title: 'Commit',
+    run: onRepo(() => {
+      sidebar.setView('git')
+      hooks.revealSidebar()
+      git.focusTick++
+    }),
+  },
+  remoteCmd('fetch', 'Fetch'),
+  remoteCmd('pull', 'Pull'),
+  remoteCmd('push', 'Push'),
+  branchCmd('switch', 'switchBranch', 'Cambia branch'),
+  branchCmd('create', 'createBranch', 'Crea branch'),
+  branchCmd('merge', 'mergeBranch', 'Unisci branch…'),
+  {
+    id: 'github.newPr',
+    title: 'Nuova pull request',
+    run: onRepo((r) => {
+      sidebar.setView('git')
+      hooks.revealSidebar()
+      github.creating = r
+    }),
+  },
+  { id: 'github.clone', title: 'Clona da GitHub…', run: () => (github.cloneOpen = true) },
   { id: 'settings.permissionMode', title: 'Cambia modalità permessi predefinita', run: () => hooks.openModes() },
 ]

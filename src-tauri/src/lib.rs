@@ -1,11 +1,19 @@
 mod claude;
+/// Pubblico per i test di integrazione (argomenti dei comandi git).
+pub mod git;
 /// Pubblici per i test di integrazione (`tests/security.rs`): confinamento dei percorsi, store, fiducia.
 pub mod fs_tree;
+mod github;
 mod lifecycle;
+mod lsp;
 mod projects;
 mod pty;
+pub mod search;
 pub mod store;
+mod tools;
 mod trasher;
+#[cfg(test)]
+mod untrusted_tests;
 pub mod trust;
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,6 +40,9 @@ pub fn run() {
         .manage(projects::Quitting::default())
         .manage(fs_tree::Watchers::default())
         .manage(pty::Ptys::default())
+        .manage(search::Searches::default())
+        .manage(Arc::new(git::remote::RemoteOps::default()))
+        .manage(Arc::new(lsp::Lsp::default()))
         .manage(trust::TrustPrompts::default())
         .manage(claude::sessions::SessionWatchers::default())
         .manage(claude::sessions::MetaCache::default())
@@ -95,6 +106,8 @@ pub fn run() {
             projects::project_branch,
             projects::settings_get,
             projects::settings_set,
+            projects::project_setting_get,
+            projects::project_setting_set,
             fs_tree::fs_list,
             fs_tree::fs_create,
             fs_tree::fs_rename,
@@ -128,6 +141,39 @@ pub fn run() {
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,
+            tools::tools_check,
+            search::search_start,
+            search::search_cancel,
+            search::search_replace,
+            git::git_repos,
+            git::git_status,
+            git::git_diff,
+            git::git_branches,
+            git::git_log,
+            git::write::git_stage,
+            git::write::git_unstage,
+            git::write::git_discard,
+            git::write::git_commit,
+            git::write::git_checkout,
+            git::write::git_create_branch,
+            git::write::git_delete_branch,
+            git::write::git_merge,
+            git::write::git_merge_abort,
+            git::write::git_init,
+            git::remote::git_remote_op,
+            git::remote::git_cancel,
+            github::gh_accounts,
+            github::gh_repo_list,
+            github::gh_clone,
+            github::gh_remote,
+            github::gh_repo_create,
+            github::gh_pr_list,
+            github::gh_pr_checks,
+            github::gh_pr_create,
+            github::gh_pr_merge,
+            lsp::lsp_start,
+            lsp::lsp_send,
+            lsp::lsp_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -149,6 +195,10 @@ pub fn run() {
             RunEvent::Exit => {
                 projects::mark_quitting(app);
                 app.state::<claude::engine::Engine>().stop_all();
+                app.state::<Arc<lsp::Lsp>>().stop_all();
+                // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
+                app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                tools::stop_all();
             }
             _ => {}
         }

@@ -1111,7 +1111,8 @@ impl EventSink for TauriSink {
 /// Ambiente di lancio dell'app: shell di login, calcolata in sottofondo all'avvio.
 pub fn app_launch() -> Arc<LaunchCell> {
     let cell: Arc<LaunchCell> = Arc::new(LazyLock::new(Box::new(|| {
-        let env = super::locate::login_env();
+        // stessa cache di `tools`: una sola shell di login
+        let env = crate::tools::env().clone();
         Launch { claude: super::locate::find_claude(&env), env }
     })));
     let warm = cell.clone();
@@ -1474,7 +1475,10 @@ mod tests {
         assert!(matches!(&asks[0], ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b"));
         assert!(env.engine.pending_asks("p2", &sid).is_err()); // altro progetto
         env.engine.answer("p1", &sid, "c6b1b64f-8800-4372-b30a-5b4c4e3c465b", "allow").unwrap();
-        assert!(env.engine.pending_asks("p1", &sid).unwrap().is_empty());
+        // la fixture contiene più turni: dopo la risposta il finto può già emettere la richiesta successiva (altro id),
+        // quindi si verifica che quella risposta sia uscita dalla lista, non che la lista sia vuota
+        let left = env.engine.pending_asks("p1", &sid).unwrap();
+        assert!(!left.iter().any(|a| matches!(a, ClaudeEvent::Ask { request_id, .. } if request_id == "c6b1b64f-8800-4372-b30a-5b4c4e3c465b")));
     }
 
     #[test]

@@ -54,9 +54,14 @@ struct FsChanged {
     paths: Vec<String>,
 }
 
+#[derive(Serialize, Clone)]
+struct GitChanged {
+    repo: String,
+}
+
 // ---------- logica pura ----------
 
-fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -176,19 +181,60 @@ pub fn stat_confined(roots: &[PathBuf], path: &Path) -> Result<FileStat, FsError
     Ok(FileStat { size: meta.len(), is_file: meta.is_file() })
 }
 
-/// Scrive solo se il file non è cambiato su disco rispetto a `expected` (se dato).
+fn check_mtime(path: &Path, expected: Option<i64>) -> Result<(), FsError> {
+    let Some(exp) = expected else { return Ok(()) };
+    match std::fs::metadata(path) {
+        Ok(meta) if mtime_ms(&meta) == exp => Ok(()),
+        Ok(_) => Err(FsError::new("conflict", "il file è cambiato su disco")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)")),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Scrive in modo atomico: testo in un file temporaneo nella stessa cartella (permessi del file originale, fsync),
+/// poi `rename` sopra il destinazione; un'interruzione non lascia mai un file troncato. Se `expected` è dato, il
+/// controllo dell'mtime avviene subito prima del `rename` (il tratto scoperto è quello tra controllo e rename).
 pub fn write(path: &Path, text: &str, expected: Option<i64>) -> Result<i64, FsError> {
-    if let Some(exp) = expected {
-        match std::fs::metadata(path) {
-            Ok(meta) if mtime_ms(&meta) == exp => {}
-            Ok(_) => return Err(FsError::new("conflict", "il file è cambiato su disco")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(FsError::new("conflict", "il file non esiste più (rimosso o spostato)"));
-            }
-            Err(e) => return Err(e.into()),
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| FsError::new("io", "percorso senza cartella"))?;
+    let name = path.file_name().ok_or_else(|| FsError::new("io", "percorso senza nome"))?;
+    // un link simbolico non si segue né si sostituisce; un file di sola lettura resta tale (come con la scrittura in place)
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(FsError::new("forbidden", "il percorso è un link simbolico"));
+        }
+        if meta.permissions().readonly() {
+            return Err(FsError::new("io", "il file è di sola lettura"));
         }
     }
-    std::fs::write(path, text)?;
+    let tmp = dir.join(format!(".{}.codeart-{}-{}.tmp", name.to_string_lossy(), std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let result = (|| -> Result<(), FsError> {
+        let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            // cartella non scrivibile ma file sì: scrittura in place, sempre con il controllo dell'mtime
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.is_file() => {
+                check_mtime(path, expected)?;
+                std::fs::write(path, text)?;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        check_mtime(path, expected)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(mtime_ms(&std::fs::metadata(path)?))
 }
 
@@ -230,7 +276,17 @@ pub fn all_files(folders: &[PathBuf]) -> Vec<String> {
 
 // ---------- watcher ----------
 
-/// Percorsi che non vanno notificati: dentro `.git` (tranne `.git/HEAD`, serve al branch), `node_modules`, `target`.
+/// Dentro `.git` contano solo `HEAD`, `index` e `refs/**` (stato git visibile all'utente); i `.lock` sono transitori.
+fn is_git_state(rest: &[std::borrow::Cow<'_, str>]) -> bool {
+    match rest {
+        [f] => f == "HEAD" || f == "index",
+        [first, .., last] => first == "refs" && !last.ends_with(".lock"),
+        _ => false,
+    }
+}
+
+/// Percorsi che non vanno notificati: dentro `.git` (tranne `HEAD`, `index` e `refs/**`, che servono a branch e
+/// stato git), `node_modules`, `target`.
 /// Contano solo i componenti sotto la radice del progetto (una radice dentro `target/` non zittisce tutto).
 /// Fuori da ogni radice: si notifica.
 pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
@@ -241,10 +297,24 @@ pub fn is_noise(roots: &[PathBuf], path: &Path) -> bool {
     if comps.iter().any(|c| c == "node_modules" || c == "target") {
         return true;
     }
+    // temporaneo della scrittura atomica (`.<nome>.codeart-<pid>-<n>.tmp`)
+    if comps.last().is_some_and(|c| c.starts_with('.') && c.contains(".codeart-") && c.ends_with(".tmp")) {
+        return true;
+    }
     match comps.iter().position(|c| c == ".git") {
-        Some(i) => !(comps.len() == i + 2 && comps[i + 1] == "HEAD"),
+        Some(i) => !is_git_state(&comps[i + 1..]),
         None => false,
     }
+}
+
+/// Stato git dentro `.git` (`index`, `refs/**`): va a `git:changed` ma non a `fs:changed`. `.git/HEAD` resta
+/// anche in `fs:changed` (aggiorna il branch nella barra del titolo).
+fn is_git_internal(roots: &[PathBuf], path: &Path) -> bool {
+    let Some(rel) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else {
+        return false;
+    };
+    let comps: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    comps.iter().position(|c| c == ".git").is_some_and(|i| !(comps.len() == i + 2 && comps[i + 1] == "HEAD"))
 }
 
 /// Un watcher per ogni progetto aperto (chiave: id progetto).
@@ -254,6 +324,7 @@ pub struct Watchers(Mutex<HashMap<String, RecommendedWatcher>>);
 /// (Ri)avvia il watcher del progetto su tutte le sue cartelle; emette `fs:changed:<id progetto>` alla finestra del progetto.
 pub fn watch_project(app: &AppHandle, project: &Project) {
     let (tx, rx) = channel::<PathBuf>();
+    let (gtx, grx) = channel::<PathBuf>();
     // radici come date e canonicalizzate: gli eventi possono arrivare con l'uno o l'altro percorso
     let roots: Vec<PathBuf> = project
         .folders
@@ -264,7 +335,10 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
             for p in ev.paths.into_iter().filter(|p| !is_noise(&roots, p)) {
-                let _ = tx.send(p);
+                if !is_git_internal(&roots, &p) {
+                    let _ = tx.send(p.clone());
+                }
+                let _ = gtx.send(p);
             }
         }
     }) else {
@@ -273,6 +347,7 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     for f in &project.folders {
         let _ = watcher.watch(Path::new(f), RecursiveMode::Recursive);
     }
+    watch_git(app, project, grx);
     let (handle, project_id) = (app.clone(), project.id.clone());
     std::thread::spawn(move || {
         // il thread termina quando il watcher (e quindi `tx`) viene distrutto
@@ -299,6 +374,43 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
     if let Ok(mut map) = app.state::<Watchers>().0.lock() {
         map.insert(project.id.clone(), watcher);
     }
+}
+
+/// Debounce di `git:changed`.
+const GIT_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Raggruppa i percorsi cambiati per cartella del progetto che è radice di repository (`<cartella>/.git`).
+/// `folders`: (percorso come dato o canonico, cartella del progetto).
+fn changed_repos(folders: &[(PathBuf, String)], paths: &[PathBuf]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (root, folder) in folders {
+        if !out.contains(folder) && paths.iter().any(|p| p.starts_with(root)) && root.join(".git").exists() {
+            out.push(folder.clone());
+        }
+    }
+    out
+}
+
+/// Emette `git:changed {repo}` (debounce 300 ms) quando cambia un percorso non rumoroso di un repository.
+fn watch_git(app: &AppHandle, project: &Project, rx: std::sync::mpsc::Receiver<PathBuf>) {
+    let folders: Vec<(PathBuf, String)> = project
+        .folders
+        .iter()
+        .flat_map(|f| [Some(PathBuf::from(f)), Path::new(f).canonicalize().ok()].into_iter().flatten().map(|p| (p, f.clone())))
+        .collect();
+    let (handle, project_id) = (app.clone(), project.id.clone());
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut paths = vec![first];
+            let deadline = std::time::Instant::now() + GIT_DEBOUNCE;
+            while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                paths.push(p);
+            }
+            for repo in changed_repos(&folders, &paths) {
+                crate::projects::emit_to_project(&handle, &project_id, "git:changed", GitChanged { repo });
+            }
+        }
+    });
 }
 
 pub fn unwatch_project(app: &AppHandle, project_id: &str) {
@@ -530,6 +642,79 @@ mod tests {
     }
 
     #[test]
+    fn write_preserves_permissions_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("run.sh");
+        std::fs::write(&f, "uno").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o750)).unwrap();
+        write(&f, "due", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o750);
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("run.sh")]);
+    }
+
+    #[test]
+    fn write_error_keeps_original_and_removes_temp_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.txt");
+        std::fs::write(&f, "originale").unwrap();
+        let m = mtime_ms(&std::fs::metadata(&f).unwrap());
+        assert_eq!(write(&f, "nuovo", Some(m - 5000)).unwrap_err().code, "conflict");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "originale");
+        // cartella inesistente: errore di I/O, nessun residuo
+        assert!(write(&d.path().join("no/b.txt"), "x", None).is_err());
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("a.txt")]);
+    }
+
+    #[test]
+    fn write_refuses_read_only_and_symlinked_targets() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("ro.txt");
+        std::fs::write(&f, "uno").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(write(&f, "due", None).unwrap_err().code, "io");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "uno");
+        let link = d.path().join("link.txt");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        assert_eq!(write(&link, "x", None).unwrap_err().code, "forbidden");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn write_falls_back_in_place_when_dir_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let sub = d.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let f = sub.join("a.txt");
+        std::fs::write(&f, "uno").unwrap();
+        let m = mtime_ms(&std::fs::metadata(&f).unwrap());
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let denied = std::fs::File::create(sub.join("probe")).is_err(); // root ignora i permessi
+        if denied {
+            assert_eq!(write(&f, "due", Some(m - 5000)).unwrap_err().code, "conflict");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "uno");
+            write(&f, "due", Some(m)).unwrap();
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "due");
+        }
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_temp_files_are_noise() {
+        let roots = vec![PathBuf::from("/Users/dev/app")];
+        assert!(is_noise(&roots, Path::new("/Users/dev/app/src/.a.ts.codeart-123-4.tmp")));
+        assert!(!is_noise(&roots, Path::new("/Users/dev/app/src/a.ts")));
+        assert!(!is_noise(&roots, Path::new("/Users/dev/app/src/notes.tmp")));
+    }
+
+    #[test]
     fn write_with_expected_mtime_on_missing_file_is_conflict() {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("gone.txt");
@@ -607,12 +792,42 @@ mod tests {
         let roots = vec![PathBuf::from("/p")];
         let n = |p: &str| is_noise(&roots, Path::new(p));
         assert!(n("/p/.git/index.lock"));
-        assert!(n("/p/.git/refs/heads/x"));
+        assert!(!n("/p/.git/refs/heads/x"));
+        assert!(n("/p/.git/refs/heads/x.lock"));
         assert!(!n("/p/.git/HEAD"));
+        assert!(!n("/p/.git/index"));
+        assert!(n("/p/.git/objects/ab/cdef"));
+        assert!(n("/p/.git/config"));
+        assert!(n("/p/.git/logs/HEAD"));
         assert!(n("/p/node_modules/a/b.js"));
         assert!(n("/p/target/debug/x"));
         assert!(!n("/p/src/main.rs"));
         assert!(!n("/p/.gitignore"));
+    }
+
+    #[test]
+    fn fs_changed_gets_only_head_from_git_dir() {
+        let roots = vec![PathBuf::from("/p")];
+        let g = |p: &str| is_git_internal(&roots, Path::new(p));
+        assert!(g("/p/.git/index"));
+        assert!(g("/p/.git/refs/heads/x"));
+        assert!(!g("/p/.git/HEAD"));
+        assert!(!g("/p/src/main.rs"));
+        assert!(!g("/p/.gitignore"));
+    }
+
+    #[test]
+    fn changed_repos_picks_folders_with_a_git_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::create_dir_all(a.join(".git")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let folders = vec![(a.clone(), "A".to_string()), (a.clone(), "A".to_string()), (b.clone(), "B".to_string())];
+        let hit = |paths: &[PathBuf]| changed_repos(&folders, paths);
+        assert_eq!(hit(&[a.join("src/x.rs"), a.join(".git/index")]), vec!["A".to_string()]);
+        // cartella senza `.git`: nessun evento
+        assert!(hit(&[b.join("x.rs")]).is_empty());
+        assert!(hit(&[d.path().join("altro")]).is_empty());
     }
 
     #[test]

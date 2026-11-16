@@ -51,6 +51,15 @@ describe('commands', () => {
         'Archivia conversazione',
         'Elimina conversazione',
         'Cambia modalità permessi predefinita',
+        'Commit',
+        'Fetch',
+        'Pull',
+        'Push',
+        'Cambia branch',
+        'Crea branch',
+        'Unisci branch…',
+        'Nuova pull request',
+        'Clona da GitHub…',
       ]),
     )
   })

@@ -67,3 +67,69 @@ export type ConvDeleteOutcome =
   | { kind: 'deletedWithWarning'; message: string }
   | { kind: 'cancelled' }
   | { kind: 'busy' }
+
+// ---- ricerca nel progetto (specchio di src-tauri/src/search.rs) ----
+export type SearchQuery = { text: string; regex: boolean; caseSensitive: boolean; wholeWord: boolean; include: string[]; exclude: string[] }
+/** `col` e `previewCol`/`previewLen`: unità UTF-16, come le stringhe JS (`preview.slice(previewCol, previewCol + previewLen)`). */
+export type SearchHit = { path: string; line: number; col: number; len: number; preview: string; previewCol: number; previewLen: number }
+export type SearchSummary = { files: number; hits: number; truncated: boolean; cancelled: boolean; error: string | null }
+export type ReplaceOutcome = { files: number; replacements: number; skipped: string[]; cancelled: boolean }
+
+// ---- git (specchio di src-tauri/src/git/) ----
+/** Voce di `git_status`: lettere di stato nell'indice (`staged`) e nella cartella di lavoro (`unstaged`). */
+export type GitStatusEntry = {
+  path: string
+  origPath: string | null
+  staged: string | null
+  unstaged: string | null
+  conflict: boolean
+  untracked: boolean
+}
+export type GitRepoStatus = {
+  root: string
+  branch: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  detached: boolean
+  merging: boolean
+  entries: GitStatusEntry[]
+  truncated: boolean
+}
+export type GitDiffText = { before: string; after: string; binary: boolean }
+export type GitBranch = { name: string; remote: boolean; current: boolean; upstream: string | null }
+export type MergeOutcome = { kind: 'fast_forward' | 'merged' | 'conflicts' | 'up_to_date'; conflicts: string[] }
+export type GitRemoteOp = 'fetch' | 'pull' | 'push'
+/** Payload degli eventi `git:changed`, `git:progress` e `git:op_done`. */
+export type GitChangedEvent = { repo: string }
+export type GitProgressEvent = { id: number; line: string }
+export type GitOpDoneEvent = { id: number; ok: boolean; message: string }
+export type GitCommit = { hash: string; short: string; subject: string; author: string; dateIso: string }
+
+// ---- GitHub (specchio di src-tauri/src/github.rs) ----
+export type GhAccount = { login: string; active: boolean }
+/** Remoto `origin`: se esiste e il suo `proprietario/nome` se è su github.com. */
+export type GhRemote = { origin: boolean; github: string | null }
+export type RemoteRepo = { nameWithOwner: string; description: string; private: boolean; updatedAt: string }
+export type ChecksSummary = { passing: number; failing: number; pending: number }
+export type PrState = 'open' | 'closed' | 'all'
+export type Pr = {
+  number: number
+  title: string
+  author: string
+  head: string
+  base: string
+  state: 'open' | 'closed' | 'merged'
+  isDraft: boolean
+  url: string
+  checks: ChecksSummary
+}
+export type PrCheck = { name: string; state: 'passing' | 'failing' | 'pending' | 'skipped'; url: string }
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
+
+// ---- Language server (specchio di src-tauri/src/lsp/mod.rs) ----
+export type LspLang = 'python' | 'java' | 'go' | 'rust'
+export type LspStart = { id: number; rootUri: string }
+/** Payload degli eventi `lsp:message` (messaggio JSON-RPC del server, come testo) e `lsp:exit` (uscita inattesa). */
+export type LspMessageEvent = { id: number; message: string }
+export type LspExitEvent = { id: number; code: number }

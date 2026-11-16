@@ -84,3 +84,63 @@ export const fsAllFiles = () => invoke<string[]>('fs_all_files')
 export type ConvSearchHit = { sessionId: string; snippet: string }
 /** Cerca nel testo dei messaggi delle conversazioni del progetto (anche archiviate); al massimo 30, una per sessione. */
 export const convSearch = (query: string) => invoke<ConvSearchHit[]>('conv_search', { query })
+
+// ---- ricerca nel progetto ----
+import type { ReplaceOutcome, SearchQuery } from './types'
+/** Avvia la ricerca (annulla la precedente della finestra); risultati sugli eventi `search:hits` / `search:done` con questo id. */
+export const searchStart = (query: SearchQuery) => invoke<number>('search_start', { query })
+export const searchCancel = (id: number) => invoke<void>('search_cancel', { id })
+/** Sostituisce nei file indicati dopo una conferma NATIVA del core; solo progetto fidato. Le corrispondenze si ricalcolano sul disco. */
+export const searchReplace = (query: SearchQuery, replacement: string, paths: string[]) =>
+  invoke<ReplaceOutcome>('search_replace', { query, replacement, paths })
+
+// ---- git ----
+import type { GitBranch, GitDiffText, GitRemoteOp, GitRepoStatus, MergeOutcome } from './types'
+/** Cartelle del progetto che sono radici di repository (solo progetto fidato). */
+export const gitRepos = () => invoke<string[]>('git_repos')
+export const gitStatus = (repo: string) => invoke<GitRepoStatus>('git_status', { repo })
+export const gitDiff = (repo: string, path: string, origPath: string | null, staged: boolean) =>
+  invoke<GitDiffText>('git_diff', { repo, path, origPath, staged })
+export const gitBranches = (repo: string) => invoke<GitBranch[]>('git_branches', { repo })
+export const gitStage = (repo: string, paths: string[]) => invoke<void>('git_stage', { repo, paths })
+export const gitUnstage = (repo: string, paths: string[]) => invoke<void>('git_unstage', { repo, paths })
+/** Scarta le modifiche non in stage (i file non tracciati vanno nel Cestino) dopo una conferma NATIVA; `false` = annullato. */
+export const gitDiscard = (repo: string, paths: string[]) => invoke<boolean>('git_discard', { repo, paths })
+/** Ritorna l'hash breve del nuovo commit. */
+export const gitCommit = (repo: string, message: string, amend: boolean) => invoke<string>('git_commit', { repo, message, amend })
+export const gitCheckout = (repo: string, branch: string) => invoke<void>('git_checkout', { repo, branch })
+export const gitCreateBranch = (repo: string, name: string, from: string | null, checkout: boolean) =>
+  invoke<void>('git_create_branch', { repo, name, from, checkout })
+export const gitMerge = (repo: string, branch: string) => invoke<MergeOutcome>('git_merge', { repo, branch })
+export const gitMergeAbort = (repo: string) => invoke<void>('git_merge_abort', { repo })
+export const gitInit = (folder: string) => invoke<void>('git_init', { folder })
+/** Avvia fetch/pull/push: ritorna l'id; avanzamento su `git:progress`, fine su `git:op_done`. */
+export const gitRemoteOp = (repo: string, op: GitRemoteOp) => invoke<number>('git_remote_op', { repo, op })
+export const gitCancel = (id: number) => invoke<void>('git_cancel', { id })
+export const gitLog = (repo: string, limit: number) => invoke<GitCommit[]>('git_log', { repo, limit })
+
+// ---- GitHub (`gh`) ----
+import type { GhAccount, GhRemote, GitCommit, MergeMethod, Pr, PrCheck, PrState, RemoteRepo } from './types'
+
+export const projectSettingGet = (key: string) => invoke<string | null>('project_setting_get', { key })
+export const projectSettingSet = (key: string, value: string) => invoke<void>('project_setting_set', { key, value })
+export const ghAccounts = () => invoke<GhAccount[]>('gh_accounts')
+/** `account` vuoto = account attivo di `gh`. */
+export const ghRepoList = (account: string, limit: number) => invoke<RemoteRepo[]>('gh_repo_list', { account, limit })
+/** Il core chiede dove clonare (selettore nativo) e apre il progetto in una nuova finestra; `false` = selettore annullato. */
+export const ghClone = (nameWithOwner: string, account: string) => invoke<boolean>('gh_clone', { nameWithOwner, account })
+export const ghRemote = (repo: string) => invoke<GhRemote>('gh_remote', { repo })
+export const ghRepoCreate = (repo: string, name: string, priv: boolean, description: string) =>
+  invoke<string>('gh_repo_create', { repo, name, private: priv, description })
+export const ghPrList = (repo: string, state: PrState) => invoke<Pr[]>('gh_pr_list', { repo, state })
+export const ghPrChecks = (repo: string, number: number) => invoke<PrCheck[]>('gh_pr_checks', { repo, number })
+export const ghPrCreate = (repo: string, title: string, body: string, base: string, draft: boolean) =>
+  invoke<Pr>('gh_pr_create', { repo, title, body, base, draft })
+/** `false` = annullato nella conferma nativa. */
+export const ghPrMerge = (repo: string, number: number, method: MergeMethod, deleteBranch: boolean) =>
+  invoke<boolean>('gh_pr_merge', { repo, number, method, deleteBranch })
+
+// ---- language server (il core avvia un server per progetto e linguaggio; i messaggi sono JSON-RPC in stringa) ----
+export const lspStart = (lang: string) => invoke<{ id: number; rootUri: string }>('lsp_start', { lang })
+export const lspSend = (id: number, message: string) => invoke<void>('lsp_send', { id, message })
+export const lspStop = (id: number) => invoke<void>('lsp_stop', { id })

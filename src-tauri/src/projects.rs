@@ -227,6 +227,9 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if let Some(id) = label.strip_prefix(PROJECT_PREFIX) {
         crate::fs_tree::unwatch_project(app, id);
         crate::claude::sessions::unwatch_project(app, id);
+        app.state::<crate::search::Searches>().cancel_project(id);
+        app.state::<std::sync::Arc<crate::git::remote::RemoteOps>>().cancel_project(id);
+        app.state::<std::sync::Arc<crate::lsp::Lsp>>().stop_project(id);
     }
     app.state::<crate::pty::Ptys>().kill_owner(label);
     app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);
@@ -250,7 +253,7 @@ pub fn pick_and_open(app: &AppHandle) {
     });
 }
 
-fn open_path(app: &AppHandle, path: &str) -> Result<Project> {
+pub(crate) fn open_path(app: &AppHandle, path: &str) -> Result<Project> {
     let project = open_folder(&app.state::<Store>(), path)?;
     show_project_window(app, &project)?;
     Ok(project)
@@ -259,14 +262,18 @@ fn open_path(app: &AppHandle, path: &str) -> Result<Project> {
 /// Selettore nativo come foglio della finestra, aperto dal core: il percorso non arriva mai dalla WebView.
 /// La cartella scelta diventa fidata. `None` = annullato.
 async fn pick_folder_for(app: &AppHandle, window: &WebviewWindow, title: &str) -> Result<Option<String>> {
+    let Some(path) = pick_folder(app, window, title).await? else { return Ok(None) };
+    crate::trust::mark_trusted(&app.state::<Store>(), &path)?;
+    Ok(Some(path))
+}
+
+/// Selettore nativo di cartella come foglio della finestra, senza concedere fiducia. `None` = annullato.
+pub(crate) async fn pick_folder(app: &AppHandle, window: &WebviewWindow, title: &str) -> Result<Option<String>> {
     let dialog = app.dialog().file().set_title(title).set_parent(window);
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
         .await
         .map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    let path = path.to_string_lossy().into_owned();
-    crate::trust::mark_trusted(&app.state::<Store>(), &path)?;
-    Ok(Some(path))
+    Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// Id del progetto di una finestra a partire dalla sua etichetta (`proj-<id>`); `None` per le altre finestre.
@@ -394,7 +401,7 @@ pub async fn project_pick_relocate(app: AppHandle, window: WebviewWindow, old: S
 }
 
 /// Lavoro sul disco fuori dal thread principale (i comandi sincroni di Tauri girano lì).
-async fn off_main<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+pub(crate) async fn off_main<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
@@ -416,8 +423,11 @@ pub async fn project_branch(app: AppHandle, window: WebviewWindow) -> Result<Opt
 }
 
 /// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
-const WEB_SETTINGS: &[(&str, fn(&str) -> bool)] =
-    &[("default_permission_mode", crate::claude::engine::valid_permission_mode)];
+/// Chiave e validatore di un'impostazione modificabile dalla WebView.
+type SettingRule = (&'static str, fn(&str) -> bool);
+
+const WEB_SETTINGS: &[SettingRule] =
+    &[("default_permission_mode", crate::claude::engine::valid_permission_mode), (crate::git::remote::PULL_MODE_KEY, crate::git::remote::valid_pull_mode)];
 
 fn web_setting(key: &str) -> Result<fn(&str) -> bool> {
     WEB_SETTINGS.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).ok_or_else(|| format!("impostazione sconosciuta: {key}"))
@@ -426,6 +436,30 @@ fn web_setting(key: &str) -> Result<fn(&str) -> bool> {
 /// Valida chiave e valore di un'impostazione scritta dalla WebView.
 pub fn check_web_setting(key: &str, value: &str) -> Result<()> {
     if web_setting(key)?(value) { Ok(()) } else { Err(format!("valore non valido per {key}")) }
+}
+
+/// Impostazioni di progetto modificabili dalla WebView, ciascuna con il suo validatore.
+const PROJECT_SETTINGS: &[SettingRule] = &[(crate::github::ACCOUNT_KEY, crate::github::valid_account)];
+
+/// Chiave nello store di un'impostazione di progetto.
+fn project_setting_key(project_id: &str, key: &str) -> Result<String> {
+    if !PROJECT_SETTINGS.iter().any(|(k, _)| *k == key) {
+        return Err(format!("impostazione di progetto sconosciuta: {key}"));
+    }
+    Ok(format!("project:{project_id}:{key}"))
+}
+
+pub fn project_setting_get_for(store: &Store, project_id: &str, key: &str) -> Result<Option<String>> {
+    store.setting_get(&project_setting_key(project_id, key)?)
+}
+
+pub fn project_setting_set_for(store: &Store, project_id: &str, key: &str, value: &str) -> Result<()> {
+    let full = project_setting_key(project_id, key)?;
+    let valid = PROJECT_SETTINGS.iter().find(|(k, _)| *k == key).is_some_and(|(_, v)| v(value));
+    if !valid {
+        return Err(format!("valore non valido per {key}"));
+    }
+    store.setting_set(&full, value)
 }
 
 #[tauri::command]
@@ -438,6 +472,17 @@ pub fn settings_get(store: State<Store>, key: String) -> Result<Option<String>> 
 pub fn settings_set(store: State<Store>, key: String, value: String) -> Result<()> {
     check_web_setting(&key, &value)?;
     store.setting_set(&key, &value)
+}
+
+/// Impostazione del progetto della finestra chiamante (whitelist: `github_account`).
+#[tauri::command]
+pub fn project_setting_get(window: WebviewWindow, store: State<Store>, key: String) -> Result<Option<String>> {
+    project_setting_get_for(&store, &window_project_id(&window)?, &key)
+}
+
+#[tauri::command]
+pub fn project_setting_set(window: WebviewWindow, store: State<Store>, key: String, value: String) -> Result<()> {
+    project_setting_set_for(&store, &window_project_id(&window)?, &key, &value)
 }
 
 #[cfg(test)]
@@ -620,6 +665,21 @@ mod tests {
         assert!(check_web_setting("default_permission_mode", "plan").is_ok());
         assert!(check_web_setting("default_permission_mode", "tutto").is_err());
         assert!(check_web_setting("claude_path", "/tmp/x").is_err());
+        assert!(check_web_setting("git_pull_mode", "rebase").is_ok());
+        assert!(check_web_setting("git_pull_mode", "--force").is_err());
+    }
+
+    #[test]
+    fn project_settings_are_per_project_and_validated() {
+        let (_d, s) = store();
+        assert_eq!(project_setting_get_for(&s, "p1", "github_account").unwrap(), None);
+        project_setting_set_for(&s, "p1", "github_account", "octo-work").unwrap();
+        assert_eq!(project_setting_get_for(&s, "p1", "github_account").unwrap().as_deref(), Some("octo-work"));
+        assert_eq!(project_setting_get_for(&s, "p2", "github_account").unwrap(), None);
+        assert!(project_setting_set_for(&s, "p1", "github_account", "--user").is_err());
+        assert!(project_setting_set_for(&s, "p1", "claude_path", "/tmp/x").is_err());
+        assert!(project_setting_get_for(&s, "p1", "default_permission_mode").is_err());
+        assert_eq!(project_setting_key("p1", "github_account").unwrap(), "project:p1:github_account");
     }
 
     #[test]

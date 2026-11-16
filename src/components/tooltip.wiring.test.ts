@@ -14,12 +14,12 @@ afterEach(() => {
 describe('components wire the tooltip', () => {
   it('hovering a real button shows its text in the shared tooltip, keeping its own accessible name', () => {
     render(Rail, { collapsed: new Set<string>(), ontoggle: () => {} })
-    const btn = screen.getByRole('button', { name: 'Progetto' })
+    const btn = screen.getByRole('button', { name: 'Esplora' })
     btn.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))
     vi.advanceTimersByTime(500)
     const tip = document.getElementById('codeart-tooltip')!
     expect(tip.style.display).toBe('block')
-    expect(tip.textContent).toBe('Nascondi i file del progetto')
+    expect(tip.textContent).toBe('Nascondi i file del progetto⌘⇧E')
     expect(btn.hasAttribute('title')).toBe(false)
   })
 })
