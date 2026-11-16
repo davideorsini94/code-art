@@ -379,13 +379,16 @@ pub fn watch_project(app: &AppHandle, project: &Project) {
 /// Debounce di `git:changed`.
 const GIT_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Raggruppa i percorsi cambiati per cartella del progetto che è radice di repository (`<cartella>/.git`).
-/// `folders`: (percorso come dato o canonico, cartella del progetto).
-fn changed_repos(folders: &[(PathBuf, String)], paths: &[PathBuf]) -> Vec<String> {
+/// Raggruppa i percorsi cambiati per repository (radice o annidato; vince il più profondo).
+/// `repos`: (percorso come dato o canonico, repository come lo restituisce `git_repos`).
+fn changed_repos(repos: &[(PathBuf, String)], paths: &[PathBuf]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for (root, folder) in folders {
-        if !out.contains(folder) && paths.iter().any(|p| p.starts_with(root)) && root.join(".git").exists() {
-            out.push(folder.clone());
+    for p in paths {
+        let best = repos.iter().filter(|(root, _)| p.starts_with(root)).max_by_key(|(root, _)| root.components().count());
+        if let Some((_, repo)) = best {
+            if !out.contains(repo) {
+                out.push(repo.clone());
+            }
         }
     }
     out
@@ -393,11 +396,7 @@ fn changed_repos(folders: &[(PathBuf, String)], paths: &[PathBuf]) -> Vec<String
 
 /// Emette `git:changed {repo}` (debounce 300 ms) quando cambia un percorso non rumoroso di un repository.
 fn watch_git(app: &AppHandle, project: &Project, rx: std::sync::mpsc::Receiver<PathBuf>) {
-    let folders: Vec<(PathBuf, String)> = project
-        .folders
-        .iter()
-        .flat_map(|f| [Some(PathBuf::from(f)), Path::new(f).canonicalize().ok()].into_iter().flatten().map(|p| (p, f.clone())))
-        .collect();
+    let folders = project.folders.clone();
     let (handle, project_id) = (app.clone(), project.id.clone());
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
@@ -406,7 +405,12 @@ fn watch_git(app: &AppHandle, project: &Project, rx: std::sync::mpsc::Receiver<P
             while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 paths.push(p);
             }
-            for repo in changed_repos(&folders, &paths) {
+            // l'elenco dei repository viene dalla cache (anche scaduta): il watcher non si ferma su una visita; si rinnova al prossimo comando git
+            let repos: Vec<(PathBuf, String)> = crate::git::repos_in_cached(&folders)
+                .into_iter()
+                .flat_map(|r| [Some(PathBuf::from(&r)), Path::new(&r).canonicalize().ok()].into_iter().flatten().map(move |p| (p, r.clone())))
+                .collect();
+            for repo in changed_repos(&repos, &paths) {
                 crate::projects::emit_to_project(&handle, &project_id, "git:changed", GitChanged { repo });
             }
         }
@@ -817,17 +821,23 @@ mod tests {
     }
 
     #[test]
-    fn changed_repos_picks_folders_with_a_git_root() {
+    fn changed_repos_picks_the_deepest_repo() {
         let d = tempfile::tempdir().unwrap();
-        let (a, b) = (d.path().join("a"), d.path().join("b"));
-        std::fs::create_dir_all(a.join(".git")).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        let folders = vec![(a.clone(), "A".to_string()), (a.clone(), "A".to_string()), (b.clone(), "B".to_string())];
-        let hit = |paths: &[PathBuf]| changed_repos(&folders, paths);
+        let (a, b) = (d.path().join("a"), d.path().join("ws/b"));
+        let repos = vec![(a.clone(), "A".to_string()), (a.clone(), "A".to_string()), (b.clone(), "B".to_string())];
+        let hit = |paths: &[PathBuf]| changed_repos(&repos, paths);
         assert_eq!(hit(&[a.join("src/x.rs"), a.join(".git/index")]), vec!["A".to_string()]);
-        // cartella senza `.git`: nessun evento
-        assert!(hit(&[b.join("x.rs")]).is_empty());
+        // repository annidato: l'indice e i riferimenti passano, il rumore no
+        let roots = vec![d.path().join("ws")];
+        assert_eq!(hit(&[b.join(".git/refs/heads/x")]), vec!["B".to_string()]);
+        assert_eq!(hit(&[b.join(".git/index")]), vec!["B".to_string()]);
+        assert!(!is_noise(&roots, &b.join(".git/refs/heads/x")));
+        assert!(is_git_internal(&roots, &b.join(".git/refs/heads/x")));
+        assert!(is_noise(&roots, &b.join(".git/index.lock")));
+        assert!(!is_git_internal(&roots, &b.join(".git/HEAD")));
+        // fuori da ogni repository: nessun evento
         assert!(hit(&[d.path().join("altro")]).is_empty());
+        assert!(hit(&[d.path().join("ws/x.rs")]).is_empty());
     }
 
     #[test]

@@ -3,7 +3,8 @@
   import { git, REMOTE_LABEL } from '../../lib/stores/git.svelte'
   import type { GitRemoteOp, GitRepoStatus } from '../../lib/types'
 
-  let { repo, status }: { repo: string; status: GitRepoStatus } = $props()
+  /** `compact`: branch e ahead/behind stanno già nell'intestazione della sezione. */
+  let { repo, status, compact = false }: { repo: string; status: GitRepoStatus; compact?: boolean } = $props()
 
   const mine = $derived(git.busy?.repo === repo ? git.busy : null)
   const remoteBusy = $derived(mine !== null && mine.op in REMOTE_LABEL)
@@ -15,11 +16,13 @@
 </script>
 
 <div class="sync">
+  {#if !compact}
   <button class="branch" use:tooltip={'Cambia branch'} onclick={() => git.openPicker('switch', repo)}>
     ⎇ {status.branch ?? (status.detached ? 'HEAD staccato' : 'nessun branch')}
   </button>
   {#if status.ahead > 0 || status.behind > 0}
     <span class="ab" use:tooltip={`${status.ahead} commit da inviare, ${status.behind} da scaricare`}>↑{status.ahead} ↓{status.behind}</span>
+  {/if}
   {/if}
   <span class="spacer"></span>
   {#each ops as o (o.op)}

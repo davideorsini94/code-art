@@ -337,7 +337,9 @@ pub fn init(store: &Store, project_id: &str, folder: &str) -> Result<()> {
         return Err("la cartella è già un repository git".into());
     }
     let _g = lock_repo(&want)?;
-    git_write_ok(Path::new(dir), Write::Parsed, &["init", "-q"], None).map(drop)
+    let r = git_write_ok(Path::new(dir), Write::Parsed, &["init", "-q"], None).map(drop);
+    super::forget_nested();
+    r
 }
 
 // ---------- comandi ----------

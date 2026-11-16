@@ -13,6 +13,7 @@ vi.mock('../lib/ipc', () => ({
 
 import Titlebar from './Titlebar.svelte'
 import { projectStore } from '../lib/stores/project.svelte'
+import { git } from '../lib/stores/git.svelte'
 import { resetTooltipForTests } from '../lib/tooltip'
 
 
@@ -61,6 +62,18 @@ describe('Titlebar', () => {
     const b = screen.getByRole('button', { name: /main/ })
     expect(tipText(b)).toBe('Cambia branch')
     projectStore.branch = null
+  })
+
+  it('the picker opens for the repository of the shown branch', async () => {
+    projectStore.project = { id: 'p', name: 'demo', folders: ['/Users/dev/demo'] }
+    projectStore.branch = 'main'
+    projectStore.branchRepo = '/Users/dev/demo/api'
+    render(Titlebar)
+    await fireEvent.click(screen.getByRole('button', { name: /main/ }))
+    await waitFor(() => expect(git.picker).toEqual({ repo: '/Users/dev/demo/api', mode: 'switch' }))
+    git.closePicker()
+    projectStore.branch = null
+    projectStore.branchRepo = null
   })
 
   it('clicking the branch opens the branch picker, Escape closes it', async () => {

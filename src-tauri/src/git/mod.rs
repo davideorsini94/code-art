@@ -11,7 +11,10 @@ use crate::store::{Project, Result, Store};
 use cmd::{git, git_ok, READ_TIMEOUT};
 use serde::Serialize;
 use status::{parse_porcelain_v2, RepoStatus, MAX_ENTRIES};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Oltre questa dimensione un file nel diff è trattato come binario.
@@ -53,14 +56,105 @@ fn trusted_project(store: &Store, project_id: &str) -> Result<Project> {
     store.get_project(project_id)?.ok_or_else(|| crate::trust::UNTRUSTED.to_string())
 }
 
+/// `folder` stessa è la radice di un repository (`.git` cartella, o file per i worktree).
 fn is_repo_root(folder: &str) -> bool {
     Path::new(folder).join(".git").exists()
 }
 
-/// Cartelle del progetto che sono radici di repository, nell'ordine del progetto.
+/// Profondità massima, sotto la cartella del progetto, a cui si cercano repository annidati.
+const NESTED_DEPTH: usize = 3;
+/// Tetto ai repository di un progetto (radici e annidati insieme).
+const MAX_REPOS: usize = 50;
+/// Cartelle mai attraversate nella ricerca (oltre a quelle nascoste).
+const SKIP_DIRS: &[&str] = &["node_modules", "target", "vendor", "venv", "dist", "build"];
+/// Voci di cartella lette al massimo, per cartella del progetto: una cartella enorme (`~`) non si visita tutta.
+const MAX_VISITED: usize = 2000;
+/// Quanto vale il risultato della ricerca di una cartella.
+const NESTED_TTL: Duration = Duration::from_secs(2);
+
+/// Repository sotto `dir` (esclusa), in ordine di percorso; non scende nei repository trovati né nei link simbolici.
+fn scan_nested(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let entries: Vec<_> = rd.flatten().take(*budget).collect();
+    *budget = budget.saturating_sub(entries.len().max(1));
+    let mut subs: Vec<(String, PathBuf)> = entries
+        .into_iter()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) // `DirEntry::file_type` non segue i link
+        .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
+        .filter(|(n, _)| !n.starts_with('.') && !SKIP_DIRS.contains(&n.as_str()))
+        .collect();
+    subs.sort();
+    for (_, p) in subs {
+        if out.len() >= MAX_REPOS {
+            return;
+        }
+        if p.join(".git").exists() {
+            out.push(p);
+        } else if depth < NESTED_DEPTH && *budget > 0 {
+            scan_nested(&p, depth + 1, budget, out);
+        }
+    }
+}
+
+type NestedCache = HashMap<String, (Instant, Vec<String>)>;
+static NESTED_CACHE: OnceLock<Mutex<NestedCache>> = OnceLock::new();
+
+/// Repository annidati in `folder` (che non è essa stessa un repository), con una cache breve:
+/// la ricerca gira a ogni comando git e a ogni evento del watcher. Con `stale_ok` un risultato scaduto si
+/// riusa così com'è (il watcher non rifà mai la visita se ne ha una già fatta).
+fn nested_repos(folder: &str, stale_ok: bool) -> Vec<String> {
+    let cache = NESTED_CACHE.get_or_init(Default::default);
+    if let Some((at, v)) = cache.lock().ok().and_then(|c| c.get(folder).cloned()) {
+        if stale_ok || at.elapsed() < NESTED_TTL {
+            return v;
+        }
+    }
+    let mut found = Vec::new();
+    scan_nested(Path::new(folder), 1, &mut MAX_VISITED.clone(), &mut found);
+    let v: Vec<String> = found.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(folder.to_string(), (Instant::now(), v.clone()));
+    }
+    v
+}
+
+/// Dimentica le ricerche in cache (dopo `git init`).
+pub(crate) fn forget_nested() {
+    if let Some(c) = NESTED_CACHE.get() {
+        if let Ok(mut c) = c.lock() {
+            c.clear();
+        }
+    }
+}
+
+/// Repository di un insieme di cartelle senza controllo di fiducia: prima le cartelle che sono radici, poi gli
+/// annidati (dentro cartelle che non lo sono) in ordine di percorso; senza doppioni (percorso canonico, vale il
+/// primo); al massimo `MAX_REPOS`.
+pub(crate) fn repos_in(folders: &[String]) -> Vec<String> {
+    collect_repos(folders, false)
+}
+
+/// Come `repos_in`, ma riusa anche i risultati scaduti: per il thread del watcher, che non deve fermarsi su una visita.
+pub(crate) fn repos_in_cached(folders: &[String]) -> Vec<String> {
+    collect_repos(folders, true)
+}
+
+fn collect_repos(folders: &[String], stale_ok: bool) -> Vec<String> {
+    let roots = folders.iter().filter(|f| is_repo_root(f)).cloned();
+    let mut nested: Vec<String> = folders.iter().filter(|f| !is_repo_root(f)).flat_map(|f| nested_repos(f, stale_ok)).collect();
+    nested.sort();
+    let mut seen = std::collections::HashSet::new();
+    roots
+        .chain(nested)
+        .filter(|r| seen.insert(Path::new(r).canonicalize().unwrap_or_else(|_| PathBuf::from(r))))
+        .take(MAX_REPOS)
+        .collect()
+}
+
+/// Repository del progetto: le cartelle che sono radici, poi quelli annidati (fino a 3 livelli).
 pub fn repos_of(store: &Store, project_id: &str) -> Result<Vec<String>> {
     let p = trusted_project(store, project_id)?;
-    Ok(p.folders.into_iter().filter(|f| is_repo_root(f)).collect())
+    Ok(repos_in(&p.folders))
 }
 
 /// `repo` deve essere una delle radici di `repos_of` (confronto sui percorsi canonici).
@@ -550,6 +644,135 @@ mod tests {
         let (a, plain, b) = (repo(), tempfile::tempdir().unwrap(), repo());
         let (_s, st) = project(&[a.path(), plain.path(), b.path()]);
         assert_eq!(repos_of(&st, "p").unwrap(), vec![root(&a), root(&b)]);
+    }
+
+    /// `<base>/<rel>/.git` come cartella (o file, per i worktree).
+    fn mk_repo(base: &Path, rel: &str) {
+        std::fs::create_dir_all(base.join(rel).join(".git")).unwrap();
+    }
+
+    fn rels(base: &tempfile::TempDir, v: Vec<String>) -> Vec<String> {
+        let b = base.path().canonicalize().unwrap();
+        v.iter().map(|r| Path::new(r).strip_prefix(&b).unwrap().to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn nested_repos_are_found_down_to_depth_3() {
+        let d = tempfile::tempdir().unwrap();
+        for r in ["b", "a/x", "c/d/e", "f/g/h/i"] {
+            mk_repo(d.path(), r);
+        }
+        // `.git` file (worktree)
+        std::fs::create_dir_all(d.path().join("w")).unwrap();
+        std::fs::write(d.path().join("w/.git"), "gitdir: /Users/dev/x\n").unwrap();
+        let (_s, st) = project(&[d.path()]);
+        assert_eq!(rels(&d, repos_of(&st, "p").unwrap()), vec!["a/x", "b", "c/d/e", "w"]);
+    }
+
+    #[test]
+    fn nested_scan_skips_hidden_and_build_dirs_and_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        for r in [".hidden/r", "node_modules/r", "target/r", "vendor/r", ".venv/r", "venv/r", "dist/r", "build/r", "ok/r"] {
+            mk_repo(d.path(), r);
+        }
+        let out = tempfile::tempdir().unwrap();
+        mk_repo(out.path(), "esterno");
+        std::os::unix::fs::symlink(out.path().join("esterno"), d.path().join("link")).unwrap();
+        let (_s, st) = project(&[d.path()]);
+        assert_eq!(rels(&d, repos_of(&st, "p").unwrap()), vec!["ok/r"]);
+    }
+
+    #[test]
+    fn nested_scan_does_not_descend_into_a_repo() {
+        let d = tempfile::tempdir().unwrap();
+        mk_repo(d.path(), "outer");
+        mk_repo(d.path(), "outer/inner");
+        let (_s, st) = project(&[d.path()]);
+        assert_eq!(rels(&d, repos_of(&st, "p").unwrap()), vec!["outer"]);
+        // la cartella del progetto che è già un repository non cerca sotto di sé
+        mk_repo(d.path(), "outer/.git/../sub");
+        let root = tempfile::tempdir().unwrap();
+        mk_repo(root.path(), ".");
+        mk_repo(root.path(), "sub");
+        let (_s2, st2) = project(&[root.path()]);
+        assert_eq!(repos_of(&st2, "p").unwrap(), vec![root.path().canonicalize().unwrap().to_string_lossy().into_owned()]);
+    }
+
+    #[test]
+    fn repos_are_capped_and_roots_come_first() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..60 {
+            mk_repo(d.path(), &format!("r{i:02}"));
+        }
+        let top = repo();
+        let (_s, st) = project(&[d.path(), top.path()]);
+        let v = repos_of(&st, "p").unwrap();
+        assert_eq!(v.len(), MAX_REPOS);
+        assert_eq!(v[0], root(&top));
+        assert!(v[1..].windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn overlapping_project_folders_do_not_duplicate_repos() {
+        let d = tempfile::tempdir().unwrap();
+        mk_repo(d.path(), "api");
+        mk_repo(d.path(), "web");
+        let (a, b) = (root_of(d.path()), root_of(&d.path().join("api")));
+        let v = repos_in(&[a.clone(), b.clone(), a]);
+        assert_eq!(v, vec![b, format!("{}/web", root_of(d.path()))]);
+    }
+
+    #[test]
+    fn scan_stops_at_the_visit_budget() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..30 {
+            mk_repo(d.path(), &format!("r{i:02}"));
+        }
+        let mut all = Vec::new();
+        scan_nested(d.path(), 1, &mut 1000, &mut all);
+        assert_eq!(all.len(), 30);
+        let mut few = Vec::new();
+        scan_nested(d.path(), 1, &mut 10, &mut few);
+        assert!(few.len() <= 10 && !few.is_empty());
+        // senza budget non si legge nulla
+        let mut none = Vec::new();
+        scan_nested(d.path(), 1, &mut 0, &mut none);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn nested_repo_is_accepted_by_resolve_repo() {
+        let d = tempfile::tempdir().unwrap();
+        let sub = d.path().join("api");
+        std::fs::create_dir(&sub).unwrap();
+        g(&sub, &["init", "-q", "-b", "main"]);
+        configure(&sub);
+        std::fs::create_dir_all(d.path().join("api/deep")).unwrap();
+        let (_s, st) = project(&[d.path()]);
+        let nested = sub.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(resolve_repo(&st, "p", &nested).unwrap(), PathBuf::from(&nested));
+        assert_eq!(status(&st, "p", &nested).unwrap().branch.as_deref(), Some("main"));
+        // sottocartella del repository, radice del progetto non repository, percorso esterno: rifiutati
+        assert!(resolve_repo(&st, "p", &format!("{nested}/deep")).is_err());
+        assert!(resolve_repo(&st, "p", &root_of(d.path())).is_err());
+        let other = repo();
+        assert!(resolve_repo(&st, "p", &root(&other)).is_err());
+    }
+
+    fn root_of(p: &Path) -> String {
+        p.canonicalize().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn nested_repos_refused_when_untrusted() {
+        let d = tempfile::tempdir().unwrap();
+        mk_repo(d.path(), "a");
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("t.db")).unwrap();
+        let f = root_of(d.path());
+        s.upsert_project(&Project { id: "p".into(), name: "p".into(), folders: vec![f.clone()] }).unwrap();
+        assert_eq!(repos_of(&s, "p").unwrap_err(), crate::trust::UNTRUSTED);
+        assert_eq!(resolve_repo(&s, "p", &format!("{f}/a")).unwrap_err(), crate::trust::UNTRUSTED);
     }
 
     #[test]
