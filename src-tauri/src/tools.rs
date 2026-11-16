@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Cartelle d'installazione abituali fuori dal `PATH` (Homebrew su Apple Silicon e Intel).
-const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+pub(crate) const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 /// Cartelle d'installazione abituali sotto `HOME`.
 const HOME_DIRS: &[&str] = &[".cargo/bin", "go/bin"];
 /// Quanto stderr si conserva (il resto viene scartato).
@@ -43,7 +43,7 @@ fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-fn find_tool_in(env: &HashMap<String, String>, name: &str, system_dirs: &[&str]) -> Option<PathBuf> {
+pub(crate) fn find_tool_in(env: &HashMap<String, String>, name: &str, system_dirs: &[&str]) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') {
         return None;
     }
@@ -66,9 +66,14 @@ pub fn find_tool(env: &HashMap<String, String>, name: &str) -> Option<PathBuf> {
 pub fn tool_command(name: &str) -> Result<Command, String> {
     let env = env();
     let path = find_tool(env, name).ok_or_else(|| format!("`{name}` non trovato"))?;
+    Ok(command_in(&path, env))
+}
+
+/// Comando per il binario `path` con il solo ambiente `env` (quello di login, o uno di prova).
+pub fn command_in(path: &Path, env: &HashMap<String, String>) -> Command {
     let mut cmd = Command::new(path);
     cmd.env_clear().envs(env);
-    Ok(cmd)
+    cmd
 }
 
 #[derive(Debug)]

@@ -153,6 +153,20 @@ fn remote_command(dir: &Path) -> Result<Command> {
     Ok(cmd)
 }
 
+/// Comando completo per `op` in `dir` (argomenti e ssh), lo stesso per le operazioni in sottofondo e per `push_blocking`.
+fn op_command(store: &Store, dir: &Path, op: RemoteOp) -> Result<Command> {
+    let args = op_args(store, dir, op)?;
+    let mut cmd = remote_command(dir)?;
+    cmd.args(&args);
+    Ok(cmd)
+}
+
+/// Push sincrono sullo stesso percorso di `git_remote_op` (upstream impostato se manca, mai `--force`), per chi
+/// tiene già il repository occupato (`lock_repo`): la creazione di una pull request.
+pub(crate) fn push_blocking(store: &Store, dir: &Path) -> Result<String> {
+    run(op_command(store, dir, RemoteOp::Push)?, &AtomicBool::new(false), REMOTE_TIMEOUT, &mut |_| {})
+}
+
 /// Esegue `cmd` finché finisce, scade o viene annullato; `on_line` riceve le righe di stderr (quelle con
 /// percentuale al massimo ogni `PROGRESS_EVERY`). `Ok` = ultima riga utile, `Err` = messaggio leggibile.
 fn run(mut cmd: Command, cancel: &AtomicBool, timeout: Duration, on_line: &mut dyn FnMut(&str)) -> Result<String> {
@@ -263,9 +277,7 @@ impl RemoteOps {
 pub fn start(store: &Store, project_id: &str, repo: &str, op: RemoteOp, ops: Arc<RemoteOps>, emit: impl Fn(RemoteEvent) + Send + Sync + 'static) -> Result<u64> {
     let dir = resolve_repo(store, project_id, repo)?;
     let guard: RepoGuard = lock_repo(&dir)?;
-    let args = op_args(store, &dir, op)?;
-    let mut cmd = remote_command(&dir)?;
-    cmd.args(&args);
+    let cmd = op_command(store, &dir, op)?;
     let id = ops.next.fetch_add(1, Ordering::Relaxed) + 1;
     let cancel = Arc::new(AtomicBool::new(false));
     crate::lock(&ops.active).insert(id, (project_id.to_string(), cancel.clone()));

@@ -3,6 +3,7 @@ mod claude;
 pub mod git;
 /// Pubblici per i test di integrazione (`tests/security.rs`): confinamento dei percorsi, store, fiducia.
 pub mod fs_tree;
+mod github;
 mod lifecycle;
 mod projects;
 mod pty;
@@ -101,6 +102,8 @@ pub fn run() {
             projects::project_branch,
             projects::settings_get,
             projects::settings_set,
+            projects::project_setting_get,
+            projects::project_setting_set,
             fs_tree::fs_list,
             fs_tree::fs_create,
             fs_tree::fs_rename,
@@ -155,6 +158,15 @@ pub fn run() {
             git::write::git_init,
             git::remote::git_remote_op,
             git::remote::git_cancel,
+            github::gh_accounts,
+            github::gh_repo_list,
+            github::gh_clone,
+            github::gh_remote,
+            github::gh_repo_create,
+            github::gh_pr_list,
+            github::gh_pr_checks,
+            github::gh_pr_create,
+            github::gh_pr_merge,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

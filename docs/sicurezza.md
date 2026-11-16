@@ -110,7 +110,7 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
 
 Ambito: **finestra** = progetto ricavato dall'etichetta della finestra chiamante (`proj-<id>`), mai da un
 argomento; le chiamate dalla finestra di benvenuto falliscono. **globale** = non legato a un progetto.
-Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete proprie; `claude` sì, per suo conto, e `git` per fetch/pull/push avviati dall'utente).
+Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete proprie; `claude` sì, per suo conto, `git` per fetch/pull/push avviati dall'utente e `gh` per le operazioni GitHub avviate dall'utente).
 
 | Comando | Dalla WebView | Validazione | Ambito | Effetti |
 |---|---|---|---|---|
@@ -174,6 +174,17 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `git_init` | `folder` | **solo progetto fidato**; `folder` coincide (percorso canonico) con una cartella del progetto che non è già un repository | finestra | P + F (`git init`, crea `.git`) |
 | `git_remote_op` | `repo`, `op` (`fetch` \| `pull` \| `push`) | **solo progetto fidato**; `repo` tra le radici di `git_repos`; occupa il repository fino alla fine (una sola scrittura alla volta); `pull` secondo `git_pull_mode` (`--ff-only` predefinito, `--rebase`, `--no-rebase`); `push` imposta l'upstream se manca (`-u origin <branch corrente>`); mai `--force`; eventi `git:progress`/`git:op_done` solo alla finestra del progetto | finestra | P + R (`git fetch/pull/push --progress` in una sessione propria; `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` se l'utente non ha già un comando ssh (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`); helper di credenziali dell'utente attivi; timeout 10 min, poi SIGTERM e SIGKILL dopo 2 s) |
 | `git_cancel` | `id` | annulla solo un'operazione del progetto della finestra chiamante (SIGTERM al gruppo di processi, così git toglie i suoi lock; SIGKILL ai superstiti dopo 2 s); la chiusura della finestra annulla le sue operazioni | finestra | — |
+| `gh_accounts` | — | anche dalla finestra di benvenuto (non esegue codice di un progetto); JSON su campi espliciti (`--json hosts`), testo come ripiego | globale | P (`gh auth status`, cartella `/`, timeout 60 s) |
+| `gh_repo_list` | `account`, `limit` | `account` vuoto (attivo) o login valido (alfanumerici e `-`, ≤ 39, mai `-` iniziale) collegato a `gh`; `limit` 1–200; anche dal benvenuto | globale | P + R (`gh repo list --json nameWithOwner,description,isPrivate,updatedAt`) |
+| `gh_clone` | `nameWithOwner`, `account` (facoltativo) | `proprietario/nome` validato; destinazione = cartella scelta col selettore nativo del core (foglio della finestra) + nome del repository, che non deve esistere; la cartella clonata diventa fidata (scelta dall'utente) e si apre in una nuova finestra | globale | P + R + F (`gh repo clone`, timeout 10 min) |
+| `gh_remote` | `repo` | **solo progetto fidato**; `repo` tra le radici di `git_repos` | finestra | P (`git remote get-url origin`) |
+| `gh_repo_create` | `repo`, `name`, `private`, `description` | come `gh_remote`; `name` (`nome` o `proprietario/nome`: lettere, cifre, `.`, `_`, `-`, mai `-` iniziale); descrizione su una riga ≤ 350 caratteri passata come `--description=`; una sola scrittura alla volta per repository | finestra | P + R (`gh repo create <nome> --source <repo> --remote origin --push --private\|--public`, timeout 10 min) |
+| `gh_pr_list` | `repo`, `state` | come `gh_remote`; `state` `open` \| `closed` \| `all`; ≤ 100 voci | finestra | P + R (`gh pr list --json …`) |
+| `gh_pr_checks` | `repo`, `number` | come `gh_remote`; numero > 0 | finestra | P + R (`gh pr checks --json name,state,link,bucket`) |
+| `gh_pr_create` | `repo`, `title`, `body`, `base`, `draft` | come `gh_remote`; titolo su una riga ≤ 256 caratteri (`--title=`), corpo ≤ 64 KB da stdin (`--body-file -`), `base` vuota (predefinito) o nome senza spazi né `-` iniziale (`--base=`); `--head=` dal branch corrente (HEAD staccato rifiutato); push con upstream prima, se manca, sullo stesso percorso di `git_remote_op` (mai `--force`); una sola scrittura alla volta per repository | finestra | P + R (`git push`, `gh pr create`, `gh pr view`) |
+| `gh_pr_merge` | `repo`, `number`, `method`, `deleteBranch` | come `gh_remote`; `method` `merge` \| `squash` \| `rebase` (validato prima di chiedere); **conferma nativa** («Annulla» predefinito, una per finestra); una sola scrittura alla volta per repository | finestra | P + R (`gh pr merge --merge\|--squash\|--rebase [--delete-branch]`) |
+| `project_setting_get` | `key` | progetto dalla finestra chiamante; whitelist (`github_account`) | finestra | — |
+| `project_setting_set` | `key`, `value` | progetto dalla finestra chiamante; whitelist + validatore (`github_account`: vuoto o login valido) | finestra | — |
 | `tools_check` | — | — | globale | P (cerca `git`, `gh` e i language server nell'ambiente di login; non li esegue) |
 | `trust_check` | — | — | finestra | — |
 | `trust_accept` | `fromClick` | conferma nativa mostrata dal core; dopo un rifiuto niente domanda automatica, banner ignorato per 10 s | finestra | — |
@@ -244,6 +255,12 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local` (solo file eseguibili).
 - Ambiente della shell di login (`locate.rs`): `$SHELL -l -i -c env`, comando costante; `$SHELL` solo se assoluto.
 - Terminale (`pty.rs`): `$SHELL -l` (solo se percorso assoluto esistente, altrimenti `/bin/zsh`), cwd confinato.
+- `gh` (`github.rs`): cercato come gli altri strumenti (`PATH` di login, poi Homebrew); se manca, "GitHub CLI
+  (`gh`) non trovata: `brew install gh`". Sempre con `run_tool` (sessione propria, timeout, SIGTERM e poi SIGKILL,
+  output limitato), `GH_PROMPT_DISABLED=1`, `GIT_TERMINAL_PROMPT=0`; i valori della pagina passano in forma
+  `--opzione=valore` o dopo validazione (nomi di repository, login, numeri); i JSON si leggono con `serde` su campi
+  espliciti (`--json` con elenco di campi). I comandi su un repository girano solo in progetti fidati (`gh` esegue
+  `git` nel repository). Mai `gh auth switch`.
 
 ## Segreti e log
 
@@ -256,6 +273,12 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
 - SQLite (`codeart.db`): progetti (nomi, percorsi), impostazioni, metadati delle conversazioni (titolo,
   riassunto, stato), cartelle fidate. Nessuna credenziale. Schema versionato con `PRAGMA user_version`
   (migrazioni in `store.rs`).
+- Account GitHub: per un account diverso da quello attivo di `gh` (impostazione di progetto `github_account`)
+  il token di `gh auth token --user <login>` va solo nell'ambiente del processo figlio (`GH_TOKEN`), mai nella
+  pagina, nello store, nei log o negli eventi; il tipo `Token` ha un `Debug` che lo nasconde. Ogni messaggio
+  d'errore di `gh` è ripulito (`Gh::clean`): token in uso, qualunque parola con prefisso di token GitHub
+  (`ghp_`, `gho_`, `github_pat_`…) e percorsi della home (`/Users/<nome>` → `~`). Test:
+  `token_never_in_debug_or_errors`, `clean_hides_tokens_and_home_paths`.
 - Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
 
 ## Dipendenze (2026-11-11)

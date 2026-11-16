@@ -4,7 +4,7 @@ pub mod cmd;
 pub mod remote;
 pub mod status;
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 pub mod write;
 
 use crate::store::{Project, Result, Store};
@@ -64,7 +64,7 @@ pub fn repos_of(store: &Store, project_id: &str) -> Result<Vec<String>> {
 }
 
 /// `repo` deve essere una delle radici di `repos_of` (confronto sui percorsi canonici).
-fn resolve_repo(store: &Store, project_id: &str, repo: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_repo(store: &Store, project_id: &str, repo: &str) -> Result<PathBuf> {
     // prima la fiducia (altrimenti l'interfaccia non mostra "Mi fido"), poi l'argomento della pagina
     let repos = repos_of(store, project_id)?;
     let want = Path::new(repo).canonicalize().map_err(|_| "repository non valido".to_string())?;
