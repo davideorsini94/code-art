@@ -12,6 +12,8 @@ pub mod search;
 pub mod store;
 mod tools;
 mod trasher;
+#[cfg(test)]
+mod untrusted_tests;
 pub mod trust;
 
 use std::sync::{Arc, Mutex, MutexGuard};

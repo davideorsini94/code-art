@@ -489,7 +489,7 @@ pub async fn search_replace(
 
 /// Percorsi da modificare per la finestra `label`: progetto fidato, percorsi dentro il progetto (link simbolici
 /// risolti), senza doppioni.
-fn replace_targets(store: &Store, label: &str, paths: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn replace_targets(store: &Store, label: &str, paths: &[String]) -> Result<Vec<PathBuf>, String> {
     let project_id = crate::projects::project_id_of_label(label).ok_or("questa finestra non è un progetto")?;
     crate::trust::ensure_project_trusted(store, project_id)?;
     let mut resolved: Vec<PathBuf> = Vec::new();

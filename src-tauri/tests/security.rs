@@ -316,3 +316,112 @@ fn git_commands_refuse_dash_arguments() {
     assert!(write::stage(&store, "p1", &r, &["manca.txt".to_string()]).unwrap_err().starts_with("git: "));
     assert_eq!(write::checkout(&store, "p1", &r, "manca").unwrap_err(), "Il branch «manca» non esiste");
 }
+
+/// Comandi della tappa 2 che avviano processi o scrivono sul disco: tutti rifiutano un progetto non fidato
+/// (verificato da `untrusted_tests::every_process_or_write_command_refuses_an_untrusted_project`, nel crate).
+/// Un comando nuovo con questi prefissi rompe il test finché non lo si aggiunge qui E a quella prova.
+const TRUST_GATED: &[&str] = &[
+    "git_repos", "git_status", "git_diff", "git_branches", "git_log", "git_stage", "git_unstage", "git_discard", "git_commit",
+    "git_checkout", "git_create_branch", "git_delete_branch", "git_merge", "git_merge_abort", "git_init", "git_remote_op",
+    "gh_remote", "gh_repo_create", "gh_pr_list", "gh_pr_checks", "gh_pr_create", "gh_pr_merge", "lsp_start", "lsp_send",
+    "search_replace",
+];
+/// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel` e `lsp_stop`
+/// fermano soltanto processi già avviati dalla finestra stessa.
+const NO_TRUST_NEEDED: &[&str] = &["gh_accounts", "gh_repo_list", "gh_clone", "git_cancel", "lsp_stop"];
+
+#[test]
+fn new_process_commands_are_all_classified() {
+    let declared = declared_commands();
+    for c in declared.iter().filter(|c| ["git_", "gh_", "lsp_"].iter().any(|p| c.starts_with(p)) || *c == "search_replace") {
+        assert!(TRUST_GATED.contains(&c.as_str()) || NO_TRUST_NEEDED.contains(&c.as_str()), "{c}: classificalo in security.rs");
+    }
+    for c in TRUST_GATED.iter().chain(NO_TRUST_NEEDED) {
+        assert!(declared.contains(*c), "{c} non esiste più");
+    }
+}
+
+/// File sorgente non di test della tappa 2 (senza il modulo `#[cfg(test)]` finale né i file `tests.rs`).
+fn stage2_sources() -> Vec<(String, String)> {
+    let src = manifest().join("src");
+    let mut files = vec![src.join("search.rs"), src.join("tools.rs"), src.join("github.rs")];
+    for dir in ["git", "github", "lsp"] {
+        let mut stack = vec![src.join(dir)];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files
+        .into_iter()
+        .filter(|p| !p.file_name().is_some_and(|n| n == "tests.rs" || n == "testutil.rs"))
+        .map(|p| {
+            let text = read(&p);
+            let prod = text.split("\n#[cfg(test)]").next().unwrap().to_string();
+            (p.strip_prefix(&src).unwrap().display().to_string(), prod)
+        })
+        .collect()
+}
+
+#[test]
+fn stage2_sources_never_spawn_a_shell() {
+    let files = stage2_sources();
+    assert!(files.len() >= 8, "{} file trovati", files.len());
+    for (name, text) in files {
+        for shell in ["\"sh\"", "\"bash\"", "\"zsh\"", "\"/bin/sh\"", "\"/bin/bash\"", "\"/bin/zsh\"", "\"SHELL\""] {
+            assert!(!text.contains(shell), "{name}: usa una shell ({shell}); i processi vanno avviati con lista di argomenti");
+        }
+        // nessun riferimento a una shell, quindi nessun `-c` che esegua testo composto (`git -c chiave=valore` e
+        // `git switch -c` sono opzioni di git, non di una shell)
+    }
+}
+
+#[test]
+fn gh_token_appears_only_in_github_rs() {
+    let src = manifest().join("src");
+    let mut stack = vec![src.clone()];
+    let mut found = Vec::new();
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") && !p.file_name().is_some_and(|n| n == "tests.rs") {
+                let text = read(&p);
+                let prod = text.split("\n#[cfg(test)]").next().unwrap();
+                if prod.contains("GH_TOKEN") {
+                    found.push(p.strip_prefix(&src).unwrap().display().to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(found, vec!["github.rs".to_string()]);
+}
+
+/// Misura (non parte della suite normale): `cargo test --release --test security search_speed -- --ignored --nocapture`.
+/// Cerca una parola comune nel repository e dentro `node_modules`.
+#[test]
+#[ignore]
+fn search_speed_on_this_repo() {
+    use code_art_lib::search::{search, SearchQuery};
+    use std::sync::atomic::AtomicBool;
+    let repo = manifest().parent().unwrap().to_path_buf();
+    // "the" è comune (nell'albero grande raggiunge il tetto di 10 000 risultati); "zzqqxx" non trova nulla e
+    // costringe a leggere tutti i file: il caso peggiore.
+    let q = SearchQuery { text: std::env::var("SEARCH_WORD").unwrap_or("the".into()), ..Default::default() };
+    // La ricerca salta `node_modules` (rumore e `.gitignore`): per misurarla su un albero grande si cerca anche
+    // dentro `node_modules` come radice.
+    for root in [repo.clone(), repo.join("node_modules")] {
+        for round in 1..=3 {
+            let t = std::time::Instant::now();
+            let s = search(&[root.clone()], &q, &AtomicBool::new(false), |_| {});
+            println!("{} giro {round}: {:?}, {:?}", root.file_name().unwrap().to_string_lossy(), t.elapsed(), s);
+        }
+    }
+}

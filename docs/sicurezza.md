@@ -1,6 +1,6 @@
 # Sicurezza di Code Art
 
-Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
+Verifica della tappa 1 (Task 16) e della tappa 2 (Task 11, sezione "Verifica trasversale della tappa 2"). Requisito del proprietario: "un IDE sicuro".
 
 ## Modello di minaccia (in dieci righe)
 
@@ -105,6 +105,28 @@ Verifica della tappa 1 (Task 16). Requisito del proprietario: "un IDE sicuro".
   non Finder/AppleScript (niente permesso di Automazione). Test con un finto Cestino su cartelle temporanee (mai il vero Cestino né `~/.claude`).
 - **Inventario dei comandi**: `every_command_is_registered_and_listed` verifica che ogni `#[tauri::command]`
   sia registrato in `lib.rs` ed elencato nella tabella qui sotto.
+
+## Verifica trasversale della tappa 2
+
+Test in `src-tauri/tests/security.rs` e `src-tauri/src/untrusted_tests.rs` (nel crate, perché `github` e `lsp`
+non sono moduli pubblici):
+- **Progetto non fidato**: `every_process_or_write_command_refuses_an_untrusted_project` chiama, su un progetto non
+  fidato, ogni comando di git (lettura, scrittura, `fetch`/`pull`/`push`), GitHub su un repository (con un binario
+  `gh` inesistente: se partisse qualcosa l'errore sarebbe diverso), i quattro language server, `lsp_send` e
+  `search_replace`, e pretende `untrusted_folder`. Eccezioni volute: `gh_accounts`, `gh_repo_list`, `gh_clone`
+  (finestra di benvenuto, non eseguono codice di un progetto), `search_start`/`search_cancel` (sola lettura), `git_cancel`
+  e `lsp_stop` (fermano solo processi già avviati dalla finestra). `new_process_commands_are_all_classified`
+  fa fallire la suite se compare un comando `git_*`/`gh_*`/`lsp_*` non classificato.
+- **Nessuna shell**: `stage2_sources_never_spawn_a_shell` scorre i sorgenti non di test della tappa 2 (`search.rs`,
+  `tools.rs`, `git/`, `github.rs`, `github/`, `lsp/`) e fallisce su qualunque riferimento a `sh`, `bash`, `zsh` o
+  `$SHELL`. Nessuna eccezione necessaria: la sonda del `PATH` di login (`$SHELL -l -i -c env`, comando costante)
+  è in `claude/locate.rs`, della tappa 1, e `tools.rs` riusa il suo risultato. Gli altri `-c` sono opzioni di git
+  (`git -c core.quotepath=off`, `git switch -c`), non di una shell.
+- **Token**: `gh_token_appears_only_in_github_rs` verifica che `GH_TOKEN` compaia nel codice non di test solo in
+  `github.rs`.
+- Test già presenti, citati qui per completezza: `git_commands_refuse_dash_arguments`,
+  `search_never_returns_files_outside_the_project_even_through_symlinks`, `refused_when_untrusted` (git, lsp),
+  `replace_refused_when_untrusted_or_outside_project`, `token_never_in_debug_or_errors`.
 
 ## Comandi Tauri
 
@@ -295,6 +317,17 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   (non mantenuti: `proc-macro-error`, `zbus_names`, `zvariant`, `zvariant_derive`; unsound: `glib` 0.18):
   tutte dipendenze transitive di Tauri/wry per Linux (GTK, D-Bus), non compilate su macOS. Nessuna azione.
 
+## Dipendenze (2026-11-16, tappa 2)
+
+- `cargo audit` (cargo-audit 0.23, 1509 avvisi, 520 crate): nessuna vulnerabilità; gli stessi 5 avvisi
+  informativi della tappa 1 (`proc-macro-error`, `zbus_names`, `zvariant`, `zvariant_derive` non mantenuti;
+  `glib` 0.18 unsound), tutti transitivi di Tauri/wry per Linux e non compilati su macOS.
+- `pnpm audit --prod`: nessuna vulnerabilità nota. `pnpm audit` (con le dipendenze di sviluppo): 1 avviso di
+  gravità bassa, `deepmerge` 4.3.1 (prototype poisoning in `mergeObject()`, GHSA-gcqx-w48m-w2h4), portato da
+  `@sveltejs/vite-plugin-svelte`. Non correggibile: non esiste una versione corretta e `deepmerge` non finisce nel
+  pacchetto dell'app (solo strumenti di build, su dati nostri). Rischio residuo accettato; da ricontrollare agli
+  aggiornamenti di `vite-plugin-svelte`.
+
 ## Repository pubblico
 
 Scansione dei file tracciati: nessun percorso personale (solo `/Users/dev` e `/Users/a` nei test), nessuna
@@ -303,6 +336,10 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 
 ## Rischi residui
 
+- **Avvisi di audit non risolvibili** (vedi "Dipendenze (2026-11-16, tappa 2)"): `deepmerge` (bassa, solo
+  strumenti di build) e 5 avvisi informativi su dipendenze Linux di Tauri.
+- **`git` e `gh` in una cartella fidata eseguono gli hook e la configurazione del repository** (`core.fsmonitor`,
+  hook di `.git/hooks`, alias): è per questo che tutti i comandi git e GitHub rifiutano i progetti non fidati.
 - **Fidarsi di una cartella significa fidarsi della pagina in quella finestra.** In una finestra di progetto
   fidato una WebView compromessa può avviare un terminale (`pty_spawn` + `pty_write`) ed eseguire qualunque
   comando come l'utente, ovunque, leggendone l'output da `pty:data`; lo stesso tramite `claude` in bypass
