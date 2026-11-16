@@ -5,6 +5,10 @@ import type { Project } from '../types'
 class ProjectStore {
   project = $state<Project | null>(null)
   branch = $state<string | null>(null)
+  /** Repository del branch mostrato (il selettore agisce su questo). */
+  branchRepo = $state<string | null>(null)
+  /** File attivo nell'editor: con più repository decide quale branch mostrare. */
+  private activeFile: string | null = null
   missing = $state<string[]>([])
   /** Cartelle non fidate: finché ce n'è una, Claude e terminale sono disattivati (il core rifiuta). */
   untrusted = $state<string[]>([])
@@ -28,7 +32,17 @@ class ProjectStore {
   }
 
   async refreshBranch() {
-    if (this.project) this.branch = await projectBranch().catch(() => null)
+    if (!this.project) return
+    const b = await projectBranch(this.activeFile).catch(() => null)
+    this.branch = b?.name ?? null
+    this.branchRepo = b?.repo ?? null
+  }
+
+  /** Il file attivo dell'editor è cambiato: con più repository il branch mostrato segue il file. */
+  setActiveFile(path: string | null) {
+    if (path === this.activeFile) return
+    this.activeFile = path
+    void this.refreshBranch()
   }
 
   async refreshMissing() {

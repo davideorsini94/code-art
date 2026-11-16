@@ -68,24 +68,45 @@ pub fn missing_folders(store: &Store, id: &str) -> Result<Vec<String>> {
     Ok(must_get(store, id)?.folders.into_iter().filter(|f| !Path::new(f).is_dir()).collect())
 }
 
-/// Branch corrente della cartella principale, letto da `.git/HEAD` (anche worktree con `.git` file).
-pub fn branch(store: &Store, id: &str) -> Result<Option<String>> {
-    let p = must_get(store, id)?;
-    let Some(root) = p.folders.first() else { return Ok(None) };
+/// Branch mostrato nella barra del titolo e repository a cui appartiene.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBranch {
+    pub repo: String,
+    pub name: String,
+}
+
+/// Branch corrente di un repository, letto da `<repo>/.git/HEAD` (anche worktree con `.git` file).
+fn head_branch(root: &str) -> Option<String> {
     let mut git = Path::new(root).join(".git");
     if git.is_file() {
-        let Ok(text) = std::fs::read_to_string(&git) else { return Ok(None) };
-        let Some(dir) = text.trim().strip_prefix("gitdir:") else { return Ok(None) };
-        let dir = dir.trim();
+        let text = std::fs::read_to_string(&git).ok()?;
+        let dir = text.trim().strip_prefix("gitdir:")?.trim();
         git = if Path::new(dir).is_absolute() { dir.into() } else { Path::new(root).join(dir) };
     }
-    let Ok(head) = std::fs::read_to_string(git.join("HEAD")) else { return Ok(None) };
+    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
     let head = head.trim();
-    Ok(match head.strip_prefix("ref: refs/heads/") {
+    match head.strip_prefix("ref: refs/heads/") {
         Some(b) => Some(b.to_string()),
         None if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) => Some(head[..7].to_string()),
         None => None,
-    })
+    }
+}
+
+/// Branch per la barra del titolo: con un solo repository nel progetto, il suo; con più repository, quello che
+/// contiene `file` (il file attivo nell'editor; usato solo come prefisso di percorso); altrimenti nessuno.
+pub fn branch(store: &Store, id: &str, file: Option<&str>) -> Result<Option<ProjectBranch>> {
+    let p = must_get(store, id)?;
+    let repos = crate::git::repos_in(&p.folders);
+    let repo = match (repos.as_slice(), file) {
+        ([one], _) => one,
+        ([], _) | (_, None) => return Ok(None),
+        (many, Some(f)) => match many.iter().filter(|r| Path::new(f).starts_with(r)).max_by_key(|r| r.len()) {
+            Some(r) => r,
+            None => return Ok(None),
+        },
+    };
+    Ok(head_branch(repo).map(|name| ProjectBranch { repo: repo.clone(), name }))
 }
 
 // ---------- finestre ----------
@@ -417,9 +438,9 @@ pub fn project_pick_and_open(app: AppHandle) {
 }
 
 #[tauri::command]
-pub async fn project_branch(app: AppHandle, window: WebviewWindow) -> Result<Option<String>> {
+pub async fn project_branch(app: AppHandle, window: WebviewWindow, file: Option<String>) -> Result<Option<ProjectBranch>> {
     let id = window_project_id(&window)?;
-    off_main(move || branch(&app.state::<Store>(), &id)).await
+    off_main(move || branch(&app.state::<Store>(), &id, file.as_deref())).await
 }
 
 /// Impostazioni modificabili dalla WebView, ciascuna con il suo validatore.
@@ -689,10 +710,33 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
         let p = open_folder(&s, root.to_str().unwrap()).unwrap();
-        assert_eq!(branch(&s, &p.id).unwrap().as_deref(), Some("feature/x"));
+        let name = |s: &Store| branch(s, &p.id, None).unwrap().map(|b| b.name);
+        assert_eq!(name(&s).as_deref(), Some("feature/x"));
         std::fs::write(root.join(".git/HEAD"), "0123456789abcdef0123\n").unwrap();
-        assert_eq!(branch(&s, &p.id).unwrap().as_deref(), Some("0123456"));
+        assert_eq!(name(&s).as_deref(), Some("0123456"));
         std::fs::remove_dir_all(root.join(".git")).unwrap();
-        assert_eq!(branch(&s, &p.id).unwrap(), None);
+        assert_eq!(name(&s), None);
+    }
+
+    #[test]
+    fn branch_with_nested_repos_follows_the_active_file() {
+        let (d, s) = store();
+        let ws = d.path().join("ws");
+        for (r, b) in [("a", "dev"), ("b", "main")] {
+            std::fs::create_dir_all(ws.join(r).join(".git")).unwrap();
+            std::fs::write(ws.join(r).join(".git/HEAD"), format!("ref: refs/heads/{b}\n")).unwrap();
+        }
+        let p = open_folder(&s, ws.to_str().unwrap()).unwrap();
+        let root = p.folders[0].clone();
+        // più repository e nessun file: niente
+        assert_eq!(branch(&s, &p.id, None).unwrap(), None);
+        // file fuori da ogni repository: niente
+        assert_eq!(branch(&s, &p.id, Some(&format!("{root}/note.md"))).unwrap(), None);
+        let got = branch(&s, &p.id, Some(&format!("{root}/b/src/x.rs"))).unwrap().unwrap();
+        assert_eq!((got.repo.as_str(), got.name.as_str()), (format!("{root}/b").as_str(), "main"));
+        // un solo repository: il suo, con o senza file
+        std::fs::remove_dir_all(ws.join("a")).unwrap();
+        crate::git::forget_nested();
+        assert_eq!(branch(&s, &p.id, None).unwrap().map(|b| b.name).as_deref(), Some("main"));
     }
 }

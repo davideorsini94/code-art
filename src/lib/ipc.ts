@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Project } from './types'
+import type { Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -10,7 +10,8 @@ export const projectPickAndAddFolder = () => invoke<Project | null>('project_pic
 export const projectPickRelocate = (old: string) => invoke<Project | null>('project_pick_relocate', { old })
 export const projectRename = (name: string) => invoke<Project>('project_rename', { name })
 export const projectMissingFolders = () => invoke<string[]>('project_missing_folders')
-export const projectBranch = () => invoke<string | null>('project_branch')
+/** Branch della barra del titolo: l'unico repository del progetto o quello che contiene `file`; `null` se non è chiaro. */
+export const projectBranch = (file: string | null = null) => invoke<ProjectBranch | null>('project_branch', { file })
 /** Cartelle del progetto della finestra non ancora fidate (Claude e terminale disattivati finché ce n'è una). */
 export const trustCheck = () => invoke<string[]>('trust_check')
 /** Mostra la domanda nativa "Ti fidi di questa cartella?"; vero se ora il progetto è fidato.

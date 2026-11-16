@@ -224,3 +224,67 @@ describe('GitPanel conflicts', () => {
     expect(ipc.gitStage).toHaveBeenCalledWith(REPO, ['a.ts'])
   })
 })
+
+describe('GitPanel nested repositories', () => {
+  const WS = '/Users/dev/ws'
+  const BE = `${WS}/suis-be`
+  const WEB = `${WS}/apps/web`
+  const dirty = status({ ahead: 0, behind: 0, entries: [e('x.ts', { unstaged: 'M' })] })
+  const clean = status({ ahead: 1, behind: 0, entries: [] })
+  const title = (r: string) => r.slice(WS.length + 1)
+
+  async function mountWs(repos: string[], by: Record<string, unknown>) {
+    project.project = { id: 'p1', name: 'ws', folders: [WS] }
+    ipc.gitRepos.mockResolvedValue(repos)
+    ipc.gitStatus.mockImplementation(async (r: string) => ({ ...(by[r] as object), root: r }))
+    render(GitPanel)
+    await screen.findByRole('region', { name: title(repos[0]) })
+  }
+  afterEach(() => {
+    project.project = { id: 'p1', name: 'app', folders: [REPO] }
+  })
+
+  it('one section per nested repository, titled by its path under the project folder, and no "Inizializza"', async () => {
+    await mountWs([BE, WEB], { [BE]: dirty, [WEB]: clean })
+    expect(screen.getByRole('region', { name: 'suis-be' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'apps/web' })).toBeTruthy()
+    expect(screen.queryByText(/non è un repository/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Inizializza/ })).toBeNull()
+  })
+
+  it('repositories with changes start expanded, clean ones collapsed; the header toggles', async () => {
+    await mountWs([BE, WEB], { [BE]: dirty, [WEB]: clean })
+    const be = screen.getByRole('region', { name: 'suis-be' })
+    const web = screen.getByRole('region', { name: 'apps/web' })
+    expect(within(be).getByRole('button', { name: /suis-be/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(within(be).getByText('x.ts')).toBeTruthy()
+    const toggle = within(web).getByRole('button', { name: /apps\/web/ })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(within(web).queryByRole('button', { name: 'Fetch' })).toBeNull()
+    // intestazione compatta: branch, ahead/behind e numero di modifiche
+    expect(within(web).getByText(/↑1 ↓0/)).toBeTruthy()
+    expect(be.querySelector('.head .count')?.textContent).toBe('1')
+    expect(web.querySelector('.head .count')).toBeNull()
+    await fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(within(web).getByRole('button', { name: 'Fetch' })).toBeTruthy()
+    await fireEvent.click(within(be).getByRole('button', { name: /suis-be/ }))
+    expect(within(be).queryByText('x.ts')).toBeNull()
+  })
+
+  it('the section header opens the branch picker for that repository', async () => {
+    await mountWs([BE, WEB], { [BE]: dirty, [WEB]: clean })
+    await fireEvent.click(within(screen.getByRole('region', { name: 'apps/web' })).getByRole('button', { name: /main/ }))
+    expect(git.picker).toEqual({ repo: WEB, mode: 'switch' })
+    git.closePicker()
+  })
+
+  it('a folder without any repository under it still offers "Inizializza"', async () => {
+    project.project = { id: 'p1', name: 'ws', folders: [WS, '/Users/dev/docs'] }
+    ipc.gitRepos.mockResolvedValue([BE])
+    ipc.gitStatus.mockResolvedValue(status({ root: BE }))
+    render(GitPanel)
+    expect(await screen.findByRole('button', { name: 'Inizializza docs' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Inizializza ws' })).toBeNull()
+  })
+})

@@ -8,6 +8,7 @@
   import { tooltip } from '../lib/tooltip'
   import { errorText } from '../lib/errors'
   import { git } from '../lib/stores/git.svelte'
+  import { editor } from '../lib/stores/editor.svelte'
   import BranchPicker from './git/BranchPicker.svelte'
 
   let editing = $state(false)
@@ -38,8 +39,11 @@
 
   async function openPicker() {
     await git.ensure()
-    git.openPicker('switch')
+    git.openPicker('switch', projectStore.branchRepo ?? undefined)
   }
+
+  // con più repository nel progetto il branch in barra è quello del file aperto
+  $effect(() => projectStore.setActiveFile(editor.activeTab?.path ?? null))
 
   onMount(() => {
     hooks.renameProject = startEdit

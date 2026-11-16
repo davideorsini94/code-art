@@ -133,3 +133,6 @@ export type LspStart = { id: number; rootUri: string }
 /** Payload degli eventi `lsp:message` (messaggio JSON-RPC del server, come testo) e `lsp:exit` (uscita inattesa). */
 export type LspMessageEvent = { id: number; message: string }
 export type LspExitEvent = { id: number; code: number }
+
+/** Branch mostrato nella barra del titolo e repository a cui appartiene. */
+export type ProjectBranch = { repo: string; name: string }

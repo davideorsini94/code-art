@@ -11,11 +11,22 @@
   const trusted = $derived(projectStore.untrusted.length === 0)
   const folders = $derived(projectStore.project?.folders ?? [])
   const norm = (p: string) => p.replace(/\/+$/, '')
-  /** Cartelle del progetto che non sono (ancora) repository: si possono inizializzare. */
-  const nonRepos = $derived(git.loaded ? folders.filter((f) => !git.repos.some((r) => norm(r) === norm(f))) : [])
+  /** Cartelle del progetto senza alcun repository né in sé né sotto di sé: si possono inizializzare. */
+  const nonRepos = $derived(git.loaded ? folders.filter((f) => !git.repos.some((r) => norm(r) === norm(f) || norm(r).startsWith(`${norm(f)}/`))) : [])
   /** Gruppi calcolati una volta per cambio di stato (non a ogni rendering). */
   const groups = $derived(Object.fromEntries(git.repos.map((r) => [r, git.status[r] ? { staged: stagedEntries(git.status[r]), unstaged: unstagedEntries(git.status[r]) } : null])))
   const name = (p: string) => p.replace(/\/+$/, '').split('/').pop() ?? p
+  /** Titolo di una sezione: percorso relativo alla cartella del progetto che la contiene (`suis-be`, `apps/web`); la cartella stessa, per nome. */
+  function title(repo: string) {
+    const r = norm(repo)
+    const f = folders.map(norm).find((f) => r.startsWith(`${f}/`))
+    return f ? r.slice(f.length + 1) : name(repo)
+  }
+  /** Un solo repository, ed è la cartella del progetto: niente intestazione né chiusura. */
+  const plain = $derived(git.repos.length === 1 && folders.some((f) => norm(f) === norm(git.repos[0])))
+  /** Scelta dell'utente per sezione; senza scelta, aperta solo se ci sono modifiche. */
+  let toggled = $state<Record<string, boolean>>({})
+  const isOpen = (repo: string) => plain || (toggled[repo] ?? (git.status[repo]?.entries.length ?? 0) > 0)
 
   onMount(() => {
     void git.ensure()
@@ -35,9 +46,25 @@
       {@const st = git.status[repo]}
       {@const g = groups[repo]}
       {#if st && g}
-        <section class="repo" aria-label={name(repo)}>
-          {#if git.repos.length > 1}<h3 use:tooltip={repo}>{name(repo)}</h3>{/if}
-          <SyncBar {repo} status={st} />
+        {@const open = isOpen(repo)}
+        <section class="repo" aria-label={title(repo)}>
+          {#if !plain}
+            <div class="head">
+              <button class="toggle" aria-expanded={open} use:tooltip={open ? `Chiudi ${repo}` : `Apri ${repo}`} onclick={() => (toggled[repo] = !open)}>
+                <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
+                <span class="title">{title(repo)}</span>
+              </button>
+              <button class="branch" use:tooltip={'Cambia branch'} onclick={() => git.openPicker('switch', repo)}>⎇ {st.branch ?? (st.detached ? 'HEAD staccato' : 'nessun branch')}</button>
+              {#if st.ahead > 0 || st.behind > 0}
+                <span class="ab" use:tooltip={`${st.ahead} commit da inviare, ${st.behind} da scaricare`}>↑{st.ahead} ↓{st.behind}</span>
+              {/if}
+              {#if st.entries.length > 0}
+                <span class="count" use:tooltip={`${st.entries.length} ${st.entries.length === 1 ? 'modifica' : 'modifiche'}`}>{st.entries.length}</span>
+              {/if}
+            </div>
+          {/if}
+          {#if open}
+          <SyncBar {repo} status={st} compact={!plain} />
           {#if st.merging}
             {@const n = st.entries.filter((e) => e.conflict).length}
             <div class="merge" role="status">
@@ -50,6 +77,7 @@
           <ChangeList {repo} title="Modifiche" entries={g.unstaged} staged={false} />
           {#if st.truncated}<div class="warn">Elenco troncato: ci sono troppe modifiche.</div>{/if}
           <GitHubPanel {repo} />
+          {/if}
         </section>
       {/if}
     {/each}
@@ -65,7 +93,16 @@
 <style>
   .git { display: flex; flex-direction: column; gap: 10px; padding: 8px; height: 100%; min-height: 0; overflow-y: auto; font-size: 12px; color: var(--txt); }
   .repo { display: flex; flex-direction: column; gap: 8px; }
-  h3 { margin: 0; font-size: 12px; font-weight: 650; }
+  .head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .toggle { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--txt); font: inherit; font-weight: 650; cursor: pointer; text-align: left; }
+  .toggle:hover { background: var(--glass); }
+  .chev { width: 10px; color: var(--dim); }
+  .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .branch { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 8px; border-radius: 8px; border: 1px solid var(--edge-soft); background: var(--glass); color: var(--txt); font: inherit; font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; cursor: pointer; }
+  .branch:hover { background: var(--glass2); }
+  .ab { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .count { padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--txt); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: no-preference) { .toggle, .branch { transition: background var(--dur); } }
   .msg { color: var(--dim); }
   .norepo { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
   .err { color: var(--err); padding: 4px 8px; border-radius: 8px; background: var(--err-soft); white-space: pre-wrap; }
