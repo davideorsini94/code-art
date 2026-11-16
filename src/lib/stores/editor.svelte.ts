@@ -145,6 +145,12 @@ class EditorStore {
    *  `editable`: il lato modificato si può cambiare e salvare (con controllo dell'mtime, come un file); se il file non si
    *  riesce a leggere come testo, il diff resta in sola lettura. */
   async openDiff(path: string, before: string, after: string, opts: { editable?: boolean } = {}) {
+    // un diff con modifiche non salvate non si sostituisce (le perderebbe): si riporta in primo piano
+    const open = this.tabs.find((t) => t.key === tabKey(path, true))
+    if (open?.dirty) {
+      this.active = open.key
+      return
+    }
     let mtimeMs: number | null = null
     let editable = false
     if (opts.editable) {

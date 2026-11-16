@@ -114,6 +114,21 @@ describe('editor tabs with unsaved changes', () => {
     expect(editor.tabs).toHaveLength(2)
   })
 
+  it('reopening a diff whose modified side has unsaved edits keeps those edits (activates the tab)', async () => {
+    await editor.openDiff('/p/a.ts', 'indice', 'x', { editable: true })
+    const t = editor.activeTab!
+    editor.setDirty(t.id, true)
+    await editor.openDiff('/p/b.ts', 'i', 'x')
+    await editor.openDiff('/p/a.ts', 'indice2', 'x', { editable: true })
+    expect(editor.tabs.filter((x) => x.key === 'diff:/p/a.ts')).toHaveLength(1)
+    expect(editor.activeTab?.id).toBe(t.id)
+    expect(editor.activeTab?.dirty).toBe(true)
+    // pulito: si sostituisce con i dati nuovi
+    editor.setDirty(t.id, false)
+    await editor.openDiff('/p/a.ts', 'indice3', 'x', { editable: true })
+    expect(editor.activeTab?.diff?.before).toBe('indice3')
+  })
+
   it('closing a dirty tab asks first: Annulla keeps it, Scarta closes it', async () => {
     await dirtyFile('/p/a.ts')
     editor.requestClose('/p/a.ts')
