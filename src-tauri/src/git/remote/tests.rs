@@ -219,6 +219,36 @@ fn cancel_kills_long_op() {
 }
 
 #[test]
+fn stop_all_stops_and_joins_running_ops() {
+    let s = setup();
+    let marker = hang_fetch(&s);
+    let ops = Arc::new(RemoteOps::default());
+    let (id, rx) = begin(&s, &ops, RemoteOp::Fetch);
+    id.unwrap();
+    wait_for(&marker);
+    let bin = marker.parent().unwrap();
+    let pid: i32 = std::fs::read_to_string(bin.join("pid")).unwrap().trim().parse().unwrap();
+    let t0 = Instant::now();
+    ops.stop_all();
+    assert!(t0.elapsed() < TERM_GRACE + Duration::from_secs(2), "{:?}", t0.elapsed());
+    // stop_all torna dopo la fine del lavoro: l'evento di fine è già arrivato
+    match rx.try_recv() {
+        Ok(RemoteEvent::Done { ok, message, .. }) => assert!(!ok && message == CANCELLED, "{message}"),
+        other => panic!("nessuna fine prima del ritorno di stop_all: {other:?}"),
+    }
+    assert!(bin.join("term").exists(), "il gruppo non ha ricevuto SIGTERM");
+    let gone = (0..150).any(|_| {
+        // SAFETY: segnale 0 = solo verifica di esistenza
+        let dead = unsafe { libc::kill(pid, 0) } != 0;
+        std::thread::sleep(Duration::from_millis(20));
+        dead
+    });
+    assert!(gone, "il processo appeso è sopravvissuto all'arresto");
+    // durante l'uscita non parte più nulla
+    assert!(begin(&s, &ops, RemoteOp::Fetch).0.is_err());
+}
+
+#[test]
 fn remote_op_holds_the_repo_lock() {
     let s = setup();
     let marker = hang_fetch(&s);

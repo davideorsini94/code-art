@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
@@ -163,8 +164,11 @@ fn op_command(store: &Store, dir: &Path, op: RemoteOp) -> Result<Command> {
 
 /// Push sincrono sullo stesso percorso di `git_remote_op` (upstream impostato se manca, mai `--force`), per chi
 /// tiene già il repository occupato (`lock_repo`): la creazione di una pull request.
+/// Iscritto nel registro di `tools`: l'uscita dall'app lo ferma come `run_tool`.
 pub(crate) fn push_blocking(store: &Store, dir: &Path) -> Result<String> {
-    run(op_command(store, dir, RemoteOp::Push)?, &AtomicBool::new(false), REMOTE_TIMEOUT, &mut |_| {})
+    let cmd = op_command(store, dir, RemoteOp::Push)?;
+    let ticket = crate::tools::RUNNING.register()?;
+    run(cmd, &ticket.stop, REMOTE_TIMEOUT, &mut |_| {})
 }
 
 /// Esegue `cmd` finché finisce, scade o viene annullato; `on_line` riceve le righe di stderr (quelle con
@@ -243,11 +247,14 @@ fn run(mut cmd: Command, cancel: &AtomicBool, timeout: Duration, on_line: &mut d
     }
 }
 
-/// Operazioni remote in corso: id → (progetto, flag di annullamento).
+/// Operazioni remote in corso: id → (progetto, flag di annullamento), più i thread che le eseguono (l'uscita
+/// dall'app li aspetta).
 #[derive(Default)]
 pub struct RemoteOps {
     next: AtomicU64,
     active: Mutex<HashMap<u64, (String, Arc<AtomicBool>)>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
+    stopping: AtomicBool,
 }
 
 impl RemoteOps {
@@ -259,6 +266,24 @@ impl RemoteOps {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Uscita dall'app: annulla tutte le operazioni e aspetta i loro thread, così ogni processo riceve SIGTERM
+    /// (git toglie i suoi lock) invece di restare orfano. Limitato dalla tolleranza di `stop_group`; da qui in poi
+    /// `start` rifiuta nuove operazioni.
+    pub fn stop_all(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        // con `workers` bloccato nessuno `start` è a metà: ogni thread avviato è nella lista e il suo flag in `active`
+        let handles = {
+            let mut workers = crate::lock(&self.workers);
+            for (_, flag) in crate::lock(&self.active).values() {
+                flag.store(true, Ordering::SeqCst);
+            }
+            std::mem::take(&mut *workers)
+        };
+        for h in handles {
+            let _ = h.join();
         }
     }
 
@@ -278,10 +303,17 @@ pub fn start(store: &Store, project_id: &str, repo: &str, op: RemoteOp, ops: Arc
     let dir = resolve_repo(store, project_id, repo)?;
     let guard: RepoGuard = lock_repo(&dir)?;
     let cmd = op_command(store, &dir, op)?;
+    let mut workers = crate::lock(&ops.workers);
+    if ops.stopping.load(Ordering::SeqCst) {
+        return Err(crate::tools::STOPPED.into());
+    }
+    workers.retain(|h| !h.is_finished());
     let id = ops.next.fetch_add(1, Ordering::Relaxed) + 1;
     let cancel = Arc::new(AtomicBool::new(false));
     crate::lock(&ops.active).insert(id, (project_id.to_string(), cancel.clone()));
-    std::thread::spawn(move || {
+    let worker_ops = ops.clone();
+    let worker = std::thread::spawn(move || {
+        let ops = worker_ops;
         let _guard = guard;
         let result = run(cmd, &cancel, REMOTE_TIMEOUT, &mut |line| emit(RemoteEvent::Progress { id, line: line.to_string() }));
         crate::lock(&ops.active).remove(&id);
@@ -293,6 +325,7 @@ pub fn start(store: &Store, project_id: &str, repo: &str, op: RemoteOp, ops: Arc
         drop(_guard);
         emit(RemoteEvent::Done { id, ok, message });
     });
+    workers.push(worker);
     Ok(id)
 }
 

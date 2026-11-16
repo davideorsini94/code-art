@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,11 @@ const STDERR_MAX: usize = 8 * 1024;
 const STDOUT_MAX: usize = 16 * 1024 * 1024;
 /// Dopo l'uscita del processo, quanto aspettare ancora la chiusura delle pipe.
 const DRAIN_GRACE: Duration = Duration::from_millis(300);
+
+/// Errore di un processo fermato (o mai avviato) per l'uscita dall'app.
+pub const STOPPED: &str = "Operazione interrotta: l'app si sta chiudendo";
+/// Oltre la tolleranza di `stop_group`, quanto aspettare ancora i processi in arresto.
+const STOP_MARGIN: Duration = Duration::from_secs(1);
 
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
@@ -95,9 +100,74 @@ fn spawn_reader(mut r: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>, cap
     });
 }
 
+/// Processi in corso (scritture git, `gh`, letture), ciascuno con il suo flag di arresto: all'uscita dall'app
+/// `stop_all` li ferma come un timeout (SIGTERM, poi SIGKILL) invece di lasciarli orfani.
+#[derive(Default)]
+pub struct Running {
+    next: AtomicU64,
+    flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    stopping: AtomicBool,
+}
+
+/// Iscrizione nel registro: si cancella da sola quando il processo è finito.
+pub struct Ticket<'a> {
+    reg: &'a Running,
+    id: u64,
+    pub stop: Arc<AtomicBool>,
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        crate::lock(&self.reg.flags).remove(&self.id);
+    }
+}
+
+impl Running {
+    /// Iscrive un processo che sta per partire; `Err(STOPPED)` se l'app si sta chiudendo.
+    pub fn register(&self) -> Result<Ticket<'_>, String> {
+        let mut flags = crate::lock(&self.flags);
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(STOPPED.into());
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        flags.insert(id, stop.clone());
+        Ok(Ticket { reg: self, id, stop })
+    }
+
+    /// Ferma tutti i processi iscritti e aspetta che abbiano finito (limitato dalla tolleranza di `stop_group`);
+    /// da qui in poi non ne parte più nessuno.
+    pub fn stop_all(&self) {
+        {
+            let flags = crate::lock(&self.flags);
+            self.stopping.store(true, Ordering::SeqCst);
+            for f in flags.values() {
+                f.store(true, Ordering::SeqCst);
+            }
+        }
+        let until = Instant::now() + TERM_GRACE + STOP_MARGIN;
+        while !crate::lock(&self.flags).is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Registro dei processi dell'app (`run_tool`, push sincrono di `gh_pr_create`).
+pub static RUNNING: std::sync::LazyLock<Running> = std::sync::LazyLock::new(Running::default);
+
+/// Uscita dall'app: ferma i processi avviati da `run_tool` e dal push sincrono.
+pub fn stop_all() {
+    RUNNING.stop_all();
+}
+
 /// Esegue `cmd` (stdin chiuso o alimentato da `input`); allo scadere di `timeout` uccide il gruppo e
 /// restituisce "tempo scaduto". Non resta mai bloccata su pipe tenute aperte da discendenti.
-pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+pub fn run_tool(cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+    run_tool_in(&RUNNING, cmd, timeout, input)
+}
+
+fn run_tool_in(reg: &Running, mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+    let ticket = reg.register()?;
     in_new_session(&mut cmd);
     let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
     let mut child = cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("avvio non riuscito: {e}"))?;
@@ -122,6 +192,10 @@ pub fn run_tool(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> 
         if overflow.load(Ordering::Relaxed) {
             stop_group(&mut child, TERM_GRACE);
             return Err(format!("output oltre {} MB", STDOUT_MAX / (1024 * 1024)));
+        }
+        if ticket.stop.load(Ordering::SeqCst) {
+            stop_group(&mut child, TERM_GRACE);
+            return Err(STOPPED.into());
         }
         match child.try_wait() {
             Ok(Some(st)) => break st,
@@ -334,6 +408,28 @@ mod tests {
         c.args(["-c", "yes | head -c 20000000"]);
         let e = run_tool(c, Duration::from_secs(20), None).unwrap_err();
         assert!(e.contains("output oltre"), "{e}");
+    }
+
+    #[test]
+    fn stop_all_terminates_running_tools_with_sigterm_first() {
+        let d = tempfile::tempdir().unwrap();
+        let (pidf, marker) = (d.path().join("pid"), d.path().join("term"));
+        let reg = Arc::new(Running::default());
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("trap 'touch \"{}\"; exit 0' TERM; echo $$ > \"{}\"; while :; do sleep 0.05; done", marker.display(), pidf.display())]);
+        let r = reg.clone();
+        let worker = std::thread::spawn(move || run_tool_in(&r, c, Duration::from_secs(60), None));
+        let pid = read_pid(&pidf);
+        let t = Instant::now();
+        reg.stop_all();
+        assert!(t.elapsed() < TERM_GRACE + Duration::from_secs(2), "{:?}", t.elapsed());
+        // stop_all torna solo quando il gruppo è fermo: SIGTERM arrivato, nessuno sopravvive
+        assert!(marker.exists(), "il processo non ha ricevuto SIGTERM");
+        // SAFETY: segnale 0 = solo verifica di esistenza
+        assert!(unsafe { libc::kill(-pid, 0) } != 0 || gone(pid), "il gruppo è sopravvissuto");
+        assert_eq!(worker.join().unwrap().unwrap_err(), STOPPED);
+        // dopo l'arresto non parte più nulla
+        assert_eq!(run_tool_in(&reg, Command::new("true"), Duration::from_secs(5), None).unwrap_err(), STOPPED);
     }
 
     #[test]

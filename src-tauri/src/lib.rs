@@ -196,6 +196,9 @@ pub fn run() {
                 projects::mark_quitting(app);
                 app.state::<claude::engine::Engine>().stop_all();
                 app.state::<Arc<lsp::Lsp>>().stop_all();
+                // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
+                app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                tools::stop_all();
             }
             _ => {}
         }
