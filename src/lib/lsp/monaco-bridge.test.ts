@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createBridge, type LspApi } from './monaco-bridge'
+import { createBridge, pathToFileUri, type LspApi } from './monaco-bridge'
 import { renderMarkdown } from '../safe-markdown'
 
 type Msg = { jsonrpc: '2.0'; id?: number; method?: string; params?: any; result?: any }
@@ -397,5 +397,47 @@ describe('definition', () => {
     expect(open.openCodeEditor(null, res('/etc/passwd'), { startLineNumber: 1, startColumn: 1 })).toBe(true)
     expect(open.openCodeEditor(null, res('/etc/passwd', 'http'), undefined)).toBe(false)
     expect(t.opened).toHaveLength(1)
+  })
+})
+
+describe('scope and encoding', () => {
+  it('maps every LSP completion kind, Snippet included, to the Monaco kind', async () => {
+    const names = ['Text', 'Method', 'Function', 'Constructor', 'Field', 'Variable', 'Class', 'Interface', 'Module', 'Property', 'Unit', 'Value', 'Enum', 'Keyword', 'Snippet', 'Color', 'File', 'Reference', 'Folder', 'EnumMember', 'Constant', 'Struct', 'Event', 'Operator', 'TypeParameter']
+    // valori di monaco.languages.CompletionItemKind (editor.api.d.ts)
+    const monacoKind: Record<string, number> = { Method: 0, Function: 1, Constructor: 2, Field: 3, Variable: 4, Class: 5, Struct: 6, Interface: 7, Module: 8, Property: 9, Event: 10, Operator: 11, Unit: 12, Value: 13, Constant: 14, Enum: 15, EnumMember: 16, Keyword: 17, Text: 18, Color: 19, File: 20, Reference: 21, Folder: 23, TypeParameter: 24, Snippet: 28 }
+    const t = make({ replies: { 'textDocument/completion': () => names.map((n, i) => ({ label: n, kind: i + 1 })) } })
+    const model = await ready(t)
+    const res = await t.providers.completion.python.provideCompletionItems(model, { lineNumber: 1, column: 1 }, { triggerKind: 0 }, token())
+    expect(res.suggestions.map((s: any) => s.kind)).toEqual(names.map((n) => monacoKind[n]))
+  })
+
+  it('does not attach files outside the project folders', async () => {
+    const t = make()
+    t.bridge.attach(fakeModel('/Users/dev/other/a.py', '') as never, '/Users/dev/other/a.py')
+    t.bridge.attach(fakeModel(`${FOLDER}/../x.py`, '') as never, `${FOLDER}/../x.py`)
+    await tick()
+    expect(t.api.start).not.toHaveBeenCalled()
+  })
+
+  it('sends URIs for paths with spaces and accents that decode to the same path and sit under rootUri', async () => {
+    const path = '/Users/dev/proj/Mio Modulo/caffè+@x.py'
+    expect(pathToFileUri(path)).toBe('file:///Users/dev/proj/Mio%20Modulo/caff%C3%A8+@x.py')
+    const t = make()
+    await ready(t, path, 'x')
+    const uri = t.sent.find((m) => m.method === 'textDocument/didOpen')!.params.textDocument.uri as string
+    expect(uri.startsWith('file:///Users/dev/proj/')).toBe(true)
+    expect(uri).not.toMatch(/ |è/)
+    expect(decodeURIComponent(new URL(uri).pathname)).toBe(path) // come il core: decodifica percentuale
+  })
+
+  it('keeps a monotonic version over several didChange', async () => {
+    const t = make()
+    const model = await ready(t)
+    vi.useFakeTimers()
+    for (const v of ['a', 'b', 'c']) {
+      model.edit(v)
+      await vi.advanceTimersByTimeAsync(150)
+    }
+    expect(t.sent.filter((m) => m.method === 'textDocument/didChange').map((m) => m.params.textDocument.version)).toEqual([2, 3, 4])
   })
 })

@@ -43,3 +43,10 @@ export function attach(monaco: typeof M, model: M.editor.ITextModel, path: strin
 export function didSave(model: M.editor.ITextModel) {
   bridge?.didSave(model)
 }
+
+/** Alla chiusura dell'editor: ferma i server (`lsp_stop`) e toglie gli ascoltatori. */
+export function dispose() {
+  const b = bridge
+  bridge = null
+  void b?.dispose()
+}

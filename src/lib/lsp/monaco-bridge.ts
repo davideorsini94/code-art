@@ -71,11 +71,18 @@ export function fileUriToPath(uri: string): string | null {
   }
 }
 
+/** URI `file:` di un percorso con la codifica del core (crate `url`, come `rootUri`): spazi e accenti in percentuale. */
+export function pathToFileUri(path: string): string {
+  const u = new URL('file:///')
+  u.pathname = path
+  return u.href
+}
+
 const lspPos = (p: { lineNumber: number; column: number }) => ({ line: p.lineNumber - 1, character: p.column - 1 })
 const monRange = (r: any): M.IRange => ({ startLineNumber: r.start.line + 1, startColumn: r.start.character + 1, endLineNumber: r.end.line + 1, endColumn: r.end.character + 1 })
 
 // LSP CompletionItemKind (1..25) -> monaco.languages.CompletionItemKind
-const KIND = [18, 0, 1, 2, 3, 4, 5, 7, 8, 9, 12, 13, 15, 17, 25, 19, 20, 21, 23, 16, 14, 6, 10, 11, 24]
+const KIND = [18, 0, 1, 2, 3, 4, 5, 7, 8, 9, 12, 13, 15, 17, 28, 19, 20, 21, 23, 16, 14, 6, 10, 11, 24]
 const SEVERITY: Record<number, number> = { 1: 8, 2: 4, 3: 2, 4: 1 } // Error, Warning, Info, Hint
 
 function fenced(code: string, lang = ''): string {
@@ -110,6 +117,7 @@ export class LspBridge {
     ]).then((offs) => {
       this.offs = offs
     })
+    this.listening.catch(() => {}) // se l'ascolto fallisce l'errore esce da startSession/dispose, non come rifiuto non gestito
     this.register()
   }
 
@@ -120,8 +128,8 @@ export class LspBridge {
     const lang = languageForPath(path)
     if (!lang || model.uri.scheme !== 'file') return
     const key = model.uri.path
-    if (this.docs.has(key)) return
-    const doc: Doc = { model, path: key, uri: model.uri.toString(), lang, version: 1, opened: false, timer: undefined, subs: [] }
+    if (this.docs.has(key) || !this.inProject(key)) return
+    const doc: Doc = { model, path: key, uri: pathToFileUri(key), lang, version: 1, opened: false, timer: undefined, subs: [] }
     this.docs.set(key, doc)
     doc.subs.push(model.onDidChangeContent(() => this.scheduleChange(doc)), model.onWillDispose(() => this.detach(model)))
     const s = this.sessions.get(lang)

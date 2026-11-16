@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
+  import { onDestroy, untrack } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { iconFor } from '../lib/fileicons'
@@ -204,9 +204,10 @@
     if (!languageForPath(path)) return
     void import('../lib/lsp/runtime').then((r) => {
       lspMod = r
-      r.attach(m, model, path)
+      if (!model.isDisposed?.()) r.attach(m, model, path) // scheda chiusa durante il primo import(): niente
     })
   }
+  onDestroy(() => lspMod?.dispose())
   const lspLang = $derived(active && isTextTab(active) ? languageForPath(active.path) : null)
   const lspInfo = $derived(lspLang ? lspStore.status[lspLang] : undefined)
   const lspTip = $derived(
@@ -407,7 +408,7 @@
     {/each}
     <span class="grow"></span>
     {#if lspLang && lspInfo && showCode}
-      <span class="lsp" role="status" use:tooltip={lspTip}>{LANG_LABEL[lspLang]} <span class="ldot {lspInfo.state}" aria-hidden="true">●</span></span>
+      <span class="lsp" role="status" use:tooltip={lspTip}>{LANG_LABEL[lspLang]} <span class="ldot {lspInfo.state}" role="img" aria-label={lspInfo.state}>●</span></span>
     {/if}
     {#if conflicts.length > 0 && showCode}
       <span class="conf" role="group" aria-label="Conflitti di unione">
