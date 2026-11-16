@@ -22,13 +22,13 @@ afterEach(() => {
 })
 
 describe('ConvTabs', () => {
-  it('una scheda per conversazione aperta, attiva marcata, clic seleziona, × chiude', async () => {
+  it('una scheda per conversazione aperta, attiva marcata, clic seleziona, il pulsante chiude', async () => {
     conversations.all = [mk('a', 'Fatture', 'waiting'), mk('b', 'Login'), mk('c', 'Non aperta')]
     conversations.tabs = ['a', 'b']
     conversations.activeId = 'a'
     render(ConvTabs)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent?.replace('×', '').trim())).toEqual(['Fatture', 'Login'])
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(['Fatture', 'Login'])
     expect(tabs[0].getAttribute('aria-selected')).toBe('true')
     expect(screen.queryByText('Non aperta')).toBeNull()
     await fireEvent.click(tabs[1])

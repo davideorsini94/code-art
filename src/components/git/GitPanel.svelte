@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../Icon.svelte'
   import { onMount } from 'svelte'
   import ChangeList from './ChangeList.svelte'
   import CommitBox from './CommitBox.svelte'
@@ -51,12 +52,12 @@
           {#if !plain}
             <div class="head">
               <button class="toggle" aria-expanded={open} use:tooltip={open ? `Chiudi ${repo}` : `Apri ${repo}`} onclick={() => (toggled[repo] = !open)}>
-                <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
+                <span class="chev" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
                 <span class="title">{title(repo)}</span>
               </button>
-              <button class="branch" use:tooltip={'Cambia branch'} onclick={() => git.openPicker('switch', repo)}>⎇ {st.branch ?? (st.detached ? 'HEAD staccato' : 'nessun branch')}</button>
+              <button class="branch" use:tooltip={'Cambia branch'} onclick={() => git.openPicker('switch', repo)}><Icon name="branch" size={13} /> {st.branch ?? (st.detached ? 'HEAD staccato' : 'nessun branch')}</button>
               {#if st.ahead > 0 || st.behind > 0}
-                <span class="ab" use:tooltip={`${st.ahead} commit da inviare, ${st.behind} da scaricare`}>↑{st.ahead} ↓{st.behind}</span>
+                <span class="ab" use:tooltip={`${st.ahead} commit da inviare, ${st.behind} da scaricare`}><Icon name="arrowUp" size={12} />{st.ahead} <Icon name="arrowDown" size={12} />{st.behind}</span>
               {/if}
               {#if st.entries.length > 0}
                 <span class="count" use:tooltip={`${st.entries.length} ${st.entries.length === 1 ? 'modifica' : 'modifiche'}`}>{st.entries.length}</span>
@@ -113,4 +114,7 @@
   .link:disabled { opacity: 0.45; cursor: not-allowed; }
   .act { padding: 4px 12px; border-radius: 8px; border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--txt); font: inherit; cursor: pointer; }
   .act:disabled { opacity: 0.45; cursor: not-allowed; }
+  .branch, .ab { display: inline-flex; align-items: center; gap: 4px; }
+  .ab { gap: 2px; }
+  .chev { display: inline-flex; }
 </style>

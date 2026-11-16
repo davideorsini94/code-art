@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { onDestroy, tick } from 'svelte'
   import { listenProject } from '../lib/events'
   import { openExternal } from '../lib/external'
@@ -206,10 +207,10 @@
       <div class="tab" class:on={t.key === active} class:dead={t.exited} role="tab" use:tooltip={t.exited ? `${t.title} (terminato)` : t.title} aria-selected={t.key === active} tabindex="0"
         onclick={() => select(t.key)} onkeydown={(e) => e.key === 'Enter' && select(t.key)}>
         <span>{t.title}</span>
-        <button class="x" aria-label="Chiudi {t.title}" use:tooltip={'Chiudi terminale'} onclick={(e) => { e.stopPropagation(); void close(t.key) }}>×</button>
+        <button class="x" aria-label="Chiudi {t.title}" use:tooltip={'Chiudi terminale'} onclick={(e) => { e.stopPropagation(); void close(t.key) }}><Icon name="x" size={14} /></button>
       </div>
     {/each}
-    <button class="plus" aria-label="Nuovo terminale" use:tooltip={'Nuovo terminale'} onclick={() => void newTab()}>+</button>
+    <button class="plus" aria-label="Nuovo terminale" use:tooltip={'Nuovo terminale'} onclick={() => void newTab()}><Icon name="plus" size={14} /></button>
   </div>
   <div class="host" bind:this={host}></div>
 </div>
@@ -229,4 +230,5 @@
   .x:hover, .plus:hover { background: var(--glass2); color: var(--txt); }
   .host { position: relative; flex: 1; min-height: 0; padding: 4px 8px 6px; }
   .host :global(.term) { position: absolute; inset: 4px 8px 6px; }
+  .x, .plus { display: inline-flex; align-items: center; justify-content: center; }
 </style>

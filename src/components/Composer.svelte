@@ -4,6 +4,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { onDestroy, tick } from 'svelte'
   import { chat } from '../lib/stores/chat.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
@@ -241,7 +242,7 @@
       {#each thumbs as t (t)}
         <li>
           <img src={t.url} alt={t.name} use:tooltip={t.name} />
-          <button type="button" class="x" aria-label="Rimuovi {t.name}" use:tooltip={`Rimuovi ${t.name}`} onclick={() => removeThumb(t)}>×</button>
+          <button type="button" class="x" aria-label="Rimuovi {t.name}" use:tooltip={`Rimuovi ${t.name}`} onclick={() => removeThumb(t)}><Icon name="x" size={12} /></button>
         </li>
       {/each}
     </ul>
@@ -344,4 +345,5 @@
   .ro { color: var(--faint); font-size: 11.5px; margin: 0; }
   .warn { color: var(--wait); font-size: 11.5px; margin: 0; }
   @media (prefers-reduced-motion: no-preference) { .chip, .box { transition: border-color var(--dur); } }
+  .x { display: inline-flex; align-items: center; justify-content: center; }
 </style>

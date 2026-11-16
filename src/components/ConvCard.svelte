@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { untrack } from 'svelte'
   import type { Conversation } from '../lib/types'
   import { relativeTime } from '../lib/conv/time'
@@ -90,7 +91,7 @@
       <button class="lock" use:tooltip={'Titolo bloccato: clic per sbloccare'} aria-label="Sblocca il titolo" onclick={(e) => { e.stopPropagation(); onunlock?.() }}>🔒</button>
     {/if}
     {#if conv.maybeOpenElsewhere}
-      <span class="else" use:tooltip={'Forse aperta in un altro programma'} aria-label="Forse aperta in un altro programma">⧉</span>
+      <span class="else" use:tooltip={'Forse aperta in un altro programma'} aria-label="Forse aperta in un altro programma"><Icon name="elsewhere" size={13} /></span>
     {/if}
   </div>
   {#if conv.prevTitle}
@@ -142,4 +143,5 @@
   .badge { font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
   .badge.waiting { color: var(--wait); }
   .badge.working { color: var(--work); }
+  .else { display: inline-flex; align-items: center; }
 </style>

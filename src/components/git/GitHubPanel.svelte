@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../Icon.svelte'
   import { onMount } from 'svelte'
   import PrCreate from './PrCreate.svelte'
   import { tooltip } from '../../lib/tooltip'
@@ -91,7 +92,7 @@
       <select class="field" aria-label="Pull request da mostrare" value={github.prState} use:tooltip={'Quali pull request mostrare'} onchange={(e) => void github.setPrState(e.currentTarget.value as PrState)}>
         {#each Object.entries(STATE_LABEL) as [v, l] (v)}<option value={v}>{l}</option>{/each}
       </select>
-      <button class="icon" aria-label="Aggiorna le pull request" disabled={github.loading} use:tooltip={'Aggiorna le pull request'} onclick={() => void github.refreshPrs(repo)}>↻</button>
+      <button class="icon" aria-label="Aggiorna le pull request" disabled={github.loading} use:tooltip={'Aggiorna le pull request'} onclick={() => void github.refreshPrs(repo)}><Icon name="refresh" size={15} /></button>
       <span class="grow"></span>
       <button class="act" disabled={github.creating === repo} use:tooltip={'Apre una pull request dal branch corrente'} onclick={() => (github.creating = repo)}>Nuova pull request</button>
     </div>
@@ -172,4 +173,5 @@
   .dot.wait { background: var(--wait); }
   .dot.none { background: var(--edge); }
   @media (prefers-reduced-motion: no-preference) { .dot { transition: background-color var(--dur) ease; } }
+  .icon { display: inline-flex; align-items: center; justify-content: center; }
 </style>

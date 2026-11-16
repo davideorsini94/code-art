@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { loadBlobUrl, formatSize } from '../lib/blob'
   import { asFsError } from '../lib/ipc'
   import { tooltip } from '../lib/tooltip'
@@ -89,9 +90,9 @@
     <span>{formatSize(size)}</span>
     <span class="grow"></span>
     {#if isSvg && onAsText}<button use:tooltip={'Apri il file SVG come testo nell\'editor'} onclick={onAsText}>Apri come testo</button>{/if}
-    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => step(-1)} aria-label="Riduci">−</button>
+    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => step(-1)} aria-label="Riduci"><Icon name="zoomOut" size={16} /></button>
     <span class="z">{zoom === 'fit' ? 'Adatta' : `${Math.round(zoom * 100)}%`}</span>
-    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => step(1)} aria-label="Ingrandisci">+</button>
+    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => step(1)} aria-label="Ingrandisci"><Icon name="zoomIn" size={16} /></button>
     <button class:on={zoom === 'fit'} use:tooltip={{ text: 'Adatta alla finestra', shortcut: '⌘0' }} onclick={() => (zoom = 'fit')}>Adatta</button>
     <button class:on={zoom === 1} use:tooltip={'Dimensione reale (100%)'} onclick={() => (zoom = 1)}>100%</button>
   </div>
@@ -112,4 +113,5 @@
   button { background: var(--glass); border: 1px solid var(--edge-soft); color: var(--dim); border-radius: 6px; padding: 2px 9px; font-size: 11px; cursor: default; }
   button:hover { color: var(--txt); background: var(--glass2); }
   button.on { color: var(--accent); border-color: var(--accent); }
+  button { display: inline-flex; align-items: center; justify-content: center; }
 </style>

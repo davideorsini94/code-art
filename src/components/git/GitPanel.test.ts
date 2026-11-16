@@ -71,7 +71,7 @@ describe('GitPanel', () => {
     expect(staged.textContent).toContain('a.ts')
     expect(changes.textContent).toContain('b.ts')
     expect(changes.textContent).toContain('new.txt')
-    expect(screen.getByText(/↑2 ↓1/)).toBeTruthy()
+    expect(document.querySelector('.ab')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('2 1')
     expect(tipText(screen.getByRole('button', { name: /main/ }))).toBe('Cambia branch')
   })
 
@@ -262,7 +262,7 @@ describe('GitPanel nested repositories', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(within(web).queryByRole('button', { name: 'Fetch' })).toBeNull()
     // intestazione compatta: branch, ahead/behind e numero di modifiche
-    expect(within(web).getByText(/↑1 ↓0/)).toBeTruthy()
+    expect(web.querySelector('.ab')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('1 0')
     expect(be.querySelector('.head .count')?.textContent).toBe('1')
     expect(web.querySelector('.head .count')).toBeNull()
     await fireEvent.click(toggle)

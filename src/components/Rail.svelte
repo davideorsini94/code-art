@@ -1,18 +1,19 @@
 <script lang="ts">
   import type { ResizableCol } from '../lib/layout'
+  import Icon, { type IconName } from './Icon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { sidebar, type SidebarViewId } from '../lib/stores/sidebar.svelte'
 
   let { collapsed, ontoggle }: { collapsed: Set<string>; ontoggle: (col: ResizableCol) => void } = $props()
 
-  const views: { id: SidebarViewId; icon: string; label: string; what: string; shortcut: string }[] = [
-    { id: 'files', icon: '◫', label: 'Esplora', what: 'i file del progetto', shortcut: '⌘⇧E' },
-    { id: 'search', icon: '⌕', label: 'Cerca', what: 'la ricerca nel progetto', shortcut: '⌘⇧F' },
-    { id: 'git', icon: '⑂', label: 'Git', what: 'il controllo del codice', shortcut: '⌘⇧G' },
-    { id: 'convs', icon: '☰', label: 'Conversazioni', what: 'l\'elenco delle conversazioni', shortcut: '⌘⇧C' },
+  const views: { id: SidebarViewId; icon: IconName; label: string; what: string; shortcut: string }[] = [
+    { id: 'files', icon: 'files', label: 'Esplora', what: 'i file del progetto', shortcut: '⌘⇧E' },
+    { id: 'search', icon: 'search', label: 'Cerca', what: 'la ricerca nel progetto', shortcut: '⌘⇧F' },
+    { id: 'git', icon: 'branch', label: 'Git', what: 'il controllo del codice', shortcut: '⌘⇧G' },
+    { id: 'convs', icon: 'chats', label: 'Conversazioni', what: 'l\'elenco delle conversazioni', shortcut: '⌘⇧C' },
   ]
-  const items: { col: ResizableCol; icon: string; label: string; what: string }[] = [
-    { col: 'conv', icon: '✎', label: 'Conversazione', what: 'la conversazione' },
+  const items: { col: ResizableCol; icon: IconName; label: string; what: string }[] = [
+    { col: 'conv', icon: 'chat', label: 'Conversazione', what: 'la conversazione' },
   ]
 
   const sidebarOpen = $derived(!collapsed.has('sidebar'))
@@ -35,15 +36,15 @@
       aria-label={v.label}
       onclick={() => pick(v.id)}
     >
-      {v.icon}
+      <Icon name={v.icon} size={18} />
     </button>
   {/each}
   {#each items as it (it.col)}
     <button class:on={!collapsed.has(it.col)} use:tooltip={`${collapsed.has(it.col) ? 'Mostra' : 'Nascondi'} ${it.what}`} aria-label={it.label} onclick={() => ontoggle(it.col)}>
-      {it.icon}
+      <Icon name={it.icon} size={18} />
     </button>
   {/each}
-  <button class="bottom" use:tooltip={'Impostazioni: in arrivo'} aria-label="Impostazioni" aria-disabled="true">⚙</button>
+  <button class="bottom" use:tooltip={'Impostazioni: in arrivo'} aria-label="Impostazioni" aria-disabled="true"><Icon name="settings" size={18} /></button>
 </nav>
 
 <style>

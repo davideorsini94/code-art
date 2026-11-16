@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../Icon.svelte'
   import { onMount } from 'svelte'
   import { tooltip } from '../../lib/tooltip'
   import { gitBranches } from '../../lib/ipc'
@@ -57,7 +58,7 @@
     {#each shown as b (`${b.remote}:${b.name}`)}
       <li>
         <button class="item" class:cur={b.current} disabled={merging && b.name === current} use:tooltip={b.current ? 'Branch corrente' : merging ? `Unisci ${b.name} in ${current ?? 'quello corrente'}` : b.remote ? 'Crea un branch locale che segue questo' : 'Passa a questo branch'} onclick={() => void pick(b)}>
-          <span class="mark">{b.current ? '✓' : ''}</span>
+          <span class="mark">{#if b.current}<Icon name="check" size={13} />{/if}</span>
           <span class="bname">{b.name}</span>
           {#if b.remote}<span class="tag">remoto</span>{/if}
         </button>
@@ -67,7 +68,7 @@
   </ul>
   <div class="foot">
     <button class="link" aria-pressed={merging} use:tooltip={'Il prossimo branch scelto verrà unito in quello corrente'} onclick={() => { merging = !merging; creating = false }}>
-      {merging ? '✓ ' : ''}Unisci in quello corrente…
+      {#if merging}<Icon name="check" size={13} />{/if} Unisci in quello corrente…
     </button>
     {#if !creating}
       <button class="link" use:tooltip={'Crea un nuovo branch a partire da quello corrente'} onclick={() => { creating = true; merging = false }}>Crea branch da qui…</button>
@@ -105,4 +106,6 @@
   .go:disabled { opacity: 0.45; cursor: not-allowed; }
   .err { color: var(--err); font-size: 11.5px; white-space: pre-wrap; }
   .note { color: var(--wait); font-size: 11.5px; }
+  .mark { display: inline-flex; align-items: center; gap: 4px; }
+  .link { display: inline-flex; align-items: center; gap: 4px; }
 </style>

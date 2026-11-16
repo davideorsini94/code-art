@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { activeLabel, waitingLabel } from '../lib/conv/order'
@@ -76,13 +77,13 @@
   {/if}
   {#if renameError}<span class="err" role="alert">{renameError}</span>{/if}
   {#if projectStore.branch}
-    <button class="branch" use:tooltip={'Cambia branch'} onclick={openPicker}>⎇ {projectStore.branch}</button>
+    <button class="branch" use:tooltip={'Cambia branch'} onclick={openPicker}><Icon name="branch" size={13} /> {projectStore.branch}</button>
   {/if}
   {#if conversations.active > 0}
     <div class="active" data-tauri-drag-region>{activeLabel(conversations.active)}</div>
   {/if}
   {#if projectStore.project}
-    <button class="pal" use:tooltip={{ text: 'Cerca file, conversazioni e comandi', shortcut: '⌘K' }} onclick={() => palette.show('all')}>⌘K &nbsp; Cerca file, conversazioni, comandi…</button>
+    <button class="pal" use:tooltip={{ text: 'Cerca file, conversazioni e comandi', shortcut: '⌘K' }} onclick={() => palette.show('all')}><Icon name="search" size={13} /> <span>⌘K</span> Cerca file, conversazioni, comandi…</button>
   {/if}
   {#if conversations.waiting > 0}
     <span class="chip" use:tooltip={'Conversazioni che aspettano una tua risposta'}><span class="dot"></span>{waitingLabel(conversations.waiting)}</span>
@@ -145,4 +146,6 @@
     font-size: 12px;
     cursor: pointer;
   }
+  .branch, .pal { display: inline-flex; align-items: center; gap: 4px; }
+  .pal { justify-content: center; }
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { tick } from 'svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
@@ -48,11 +49,11 @@
         onclick={(e) => {
           e.stopPropagation()
           conversations.close(c.sessionId)
-        }}>×</button
+        }}><Icon name="x" size={14} /></button
       >
     </div>
   {/each}
-  <button class="new" aria-label="Nuova conversazione" aria-disabled={untrusted} use:tooltip={untrusted ? UNTRUSTED_HINT : 'Nuova conversazione'} onclick={() => !untrusted && void conversations.create()}>＋</button>
+  <button class="new" aria-label="Nuova conversazione" aria-disabled={untrusted} use:tooltip={untrusted ? UNTRUSTED_HINT : 'Nuova conversazione'} onclick={() => !untrusted && void conversations.create()}><Icon name="plus" size={14} /></button>
 </div>
 
 <style>
@@ -86,4 +87,5 @@
   }
   .new:hover { color: var(--accent); background: var(--glass); }
   .new[aria-disabled='true'] { opacity: 0.45; }
+  .x, .new { display: inline-flex; align-items: center; justify-content: center; }
 </style>

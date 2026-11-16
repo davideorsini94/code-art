@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import ChatItem from './ChatItem.svelte'
   import AskBox from './AskBox.svelte'
   import PlainBlock from './PlainBlock.svelte'
@@ -72,7 +73,7 @@
     }
   }
 
-  const mark = (ok: boolean | null) => (ok === null ? '…' : ok ? '✓' : '✗')
+  const markIcon = (ok: boolean | null): 'loader' | 'check' | 'x' => (ok === null ? 'loader' : ok ? 'check' : 'x')
 </script>
 
 {#if item.kind === 'user'}
@@ -81,16 +82,16 @@
   <div class="msg ai md" use:links>{@html renderMarkdown(shown)}</div>
 {:else if item.kind === 'thinking'}
   <div class="think">
-    <button class="head" use:tooltip={open ? 'Nascondi il ragionamento' : 'Mostra il ragionamento di Claude'} aria-expanded={open} onclick={() => (open = !open)}>{open ? '▾' : '▸'} Ragionamento</button>
+    <button class="head" use:tooltip={open ? 'Nascondi il ragionamento' : 'Mostra il ragionamento di Claude'} aria-expanded={open} onclick={() => (open = !open)}><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /> Ragionamento</button>
     {#if open}{#if item.text}<PlainBlock text={item.text} />{:else}<span class="faint">Il testo del ragionamento non è disponibile.</span>{/if}{/if}
   </div>
 {:else if item.kind === 'tool' && isSubagent(item.name)}
   <div class="sub" class:err={item.ok === false}>
     <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} i passi del subagent: ${toolSummary(item.name, item.input)}`} aria-expanded={open} onclick={() => (open = !open)}>
-      <span class="caret">{open ? '▾' : '▸'}</span>
+      <span class="caret"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
       <span class="name">Subagent</span>
       <span class="arg">{toolSummary(item.name, item.input)}</span>
-      <span class="meta">{steps === 1 ? '1 passo' : `${steps} passi`} {mark(item.ok)}</span>
+      <span class="meta">{steps === 1 ? '1 passo' : `${steps} passi`} <Icon name={markIcon(item.ok)} size={12} /></span>
     </button>
     {#if open}
       <div class="body">
@@ -105,10 +106,10 @@
   <div class="tool" class:err={item.ok === false}>
     <div class="line">
       <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} input e risultato: ${item.name} ${toolSummary(item.name, item.input)}`} aria-expanded={open} onclick={() => (open = !open)}>
-        <span class="caret">{open ? '▾' : '▸'}</span>
+        <span class="caret"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
         <span class="name">{item.name}</span>
         <span class="arg">{toolSummary(item.name, item.input)}</span>
-        <span class="meta">{mark(item.ok)}</span>
+        <span class="meta"><Icon name={markIcon(item.ok)} size={12} /></span>
       </button>
       {#if action}<button class="diff" use:tooltip={action.type === 'diff' ? 'Apri le modifiche nell\'editor (diff)' : 'Apri il file nell\'editor'} onclick={openDiff}>{action.type === 'diff' ? 'Apri diff' : 'Apri file'}</button>{/if}
     </div>
@@ -131,7 +132,7 @@
   <div class="errnote" role="alert"><b>{ERROR_LABEL}</b><span class="txt">{item.json}</span></div>
 {:else if item.kind === 'raw'}
   <div class="tool raw">
-    <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} ${item.label}`} aria-expanded={open} onclick={() => (open = !open)}><span class="caret">{open ? '▾' : '▸'}</span><span class="name">{item.label}</span></button>
+    <button class="head" use:tooltip={`${open ? 'Nascondi' : 'Mostra'} ${item.label}`} aria-expanded={open} onclick={() => (open = !open)}><span class="caret"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span><span class="name">{item.label}</span></button>
     {#if open}<div class="body"><PlainBlock text={item.json} /></div>{/if}
   </div>
 {/if}
@@ -159,4 +160,6 @@
   .errtxt { color: var(--err); }
   .errnote { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; border-radius: 11px; border: 1px solid var(--err); background: var(--err-soft); color: var(--err); overflow-wrap: anywhere; }
   .errnote .txt { color: var(--txt); }
+  .caret, .meta { display: inline-flex; align-items: center; }
+  .head { align-items: center; gap: 6px; }
 </style>

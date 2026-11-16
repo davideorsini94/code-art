@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { tooltip } from '../lib/tooltip'
   import type { TodoItem } from '../lib/conv/reduce'
 
@@ -7,7 +8,7 @@
 
   const done = $derived(todos.filter((t) => t.status === 'completed').length)
   const current = $derived(todos.find((t) => t.status === 'in_progress') ?? todos.find((t) => t.status === 'pending'))
-  const MARK = { pending: '○', in_progress: '◐', completed: '●' } as const
+  const MARK = { pending: 'circle', in_progress: 'circleHalf', completed: 'circleCheck' } as const
   const label = (t: TodoItem) => t.text || `Attività ${t.id}`
 </script>
 
@@ -16,12 +17,12 @@
     <button class="head" use:tooltip={`${open ? 'Comprimi' : 'Espandi'} le attività (${done}/${todos.length}): ${current ? label(current) : 'tutto completato'}`} aria-expanded={open} onclick={() => (open = !open)}>
       <span class="count">{done}/{todos.length}</span>
       <span class="cur">{current ? label(current) : 'Tutto completato'}</span>
-      <span class="caret">{open ? '▾' : '▸'}</span>
+      <span class="caret"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     </button>
     {#if open}
       <ul>
         {#each todos as t (t.id)}
-          <li class={t.status}><span class="mk" aria-hidden="true">{MARK[t.status]}</span>{label(t)}</li>
+          <li class={t.status}><span class="mk" aria-hidden="true"><Icon name={MARK[t.status]} size={12} /></span>{label(t)}</li>
         {/each}
       </ul>
     {/if}
@@ -38,4 +39,7 @@
   li.in_progress { color: var(--txt); }
   li.completed { color: var(--faint); text-decoration: line-through; }
   .mk { display: inline-block; width: 16px; color: var(--work); }
+  .caret { display: inline-flex; }
+  .mk { vertical-align: middle; }
+  .mk :global(svg) { display: inline-block; vertical-align: middle; }
 </style>
