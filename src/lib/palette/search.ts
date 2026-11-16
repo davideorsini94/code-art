@@ -2,6 +2,7 @@ import { projectPickAndAddFolder, projectPickAndOpen } from '../ipc'
 import { conversations } from '../stores/conversations.svelte'
 import { projectStore } from '../stores/project.svelte'
 import { git } from '../stores/git.svelte'
+import { github } from '../stores/github.svelte'
 import { sidebar } from '../stores/sidebar.svelte'
 import type { GitRemoteOp } from '../types'
 import type { PickerMode } from '../stores/git.svelte'
@@ -193,5 +194,15 @@ export const commands: Command[] = [
   branchCmd('switch', 'switchBranch', 'Cambia branch'),
   branchCmd('create', 'createBranch', 'Crea branch'),
   branchCmd('merge', 'mergeBranch', 'Unisci branch…'),
+  {
+    id: 'github.newPr',
+    title: 'Nuova pull request',
+    run: onRepo((r) => {
+      sidebar.setView('git')
+      hooks.revealSidebar()
+      github.creating = r
+    }),
+  },
+  { id: 'github.clone', title: 'Clona da GitHub…', run: () => (github.cloneOpen = true) },
   { id: 'settings.permissionMode', title: 'Cambia modalità permessi predefinita', run: () => hooks.openModes() },
 ]

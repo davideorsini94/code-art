@@ -117,3 +117,26 @@ export const gitInit = (folder: string) => invoke<void>('git_init', { folder })
 /** Avvia fetch/pull/push: ritorna l'id; avanzamento su `git:progress`, fine su `git:op_done`. */
 export const gitRemoteOp = (repo: string, op: GitRemoteOp) => invoke<number>('git_remote_op', { repo, op })
 export const gitCancel = (id: number) => invoke<void>('git_cancel', { id })
+export const gitLog = (repo: string, limit: number) => invoke<GitCommit[]>('git_log', { repo, limit })
+
+// ---- GitHub (`gh`) ----
+import type { GhAccount, GitCommit, MergeMethod, Pr, PrCheck, PrState, RemoteRepo } from './types'
+
+export const projectSettingGet = (key: string) => invoke<string | null>('project_setting_get', { key })
+export const projectSettingSet = (key: string, value: string) => invoke<void>('project_setting_set', { key, value })
+export const ghAccounts = () => invoke<GhAccount[]>('gh_accounts')
+/** `account` vuoto = account attivo di `gh`. */
+export const ghRepoList = (account: string, limit: number) => invoke<RemoteRepo[]>('gh_repo_list', { account, limit })
+/** Il core chiede dove clonare (selettore nativo) e apre il progetto in una nuova finestra; annullato = nessun effetto. */
+export const ghClone = (nameWithOwner: string, account: string) => invoke<void>('gh_clone', { nameWithOwner, account })
+/** `proprietario/nome` del remoto `origin` su GitHub, o `null`. */
+export const ghRemote = (repo: string) => invoke<string | null>('gh_remote', { repo })
+export const ghRepoCreate = (repo: string, name: string, priv: boolean, description: string) =>
+  invoke<string>('gh_repo_create', { repo, name, private: priv, description })
+export const ghPrList = (repo: string, state: PrState) => invoke<Pr[]>('gh_pr_list', { repo, state })
+export const ghPrChecks = (repo: string, number: number) => invoke<PrCheck[]>('gh_pr_checks', { repo, number })
+export const ghPrCreate = (repo: string, title: string, body: string, base: string, draft: boolean) =>
+  invoke<Pr>('gh_pr_create', { repo, title, body, base, draft })
+/** `false` = annullato nella conferma nativa. */
+export const ghPrMerge = (repo: string, number: number, method: MergeMethod, deleteBranch: boolean) =>
+  invoke<boolean>('gh_pr_merge', { repo, number, method, deleteBranch })

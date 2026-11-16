@@ -58,6 +58,8 @@ describe('commands', () => {
         'Cambia branch',
         'Crea branch',
         'Unisci branch…',
+        'Nuova pull request',
+        'Clona da GitHub…',
       ]),
     )
   })

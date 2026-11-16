@@ -12,6 +12,8 @@
   import ConvList from './components/ConvList.svelte'
   import ConvPane from './components/ConvPane.svelte'
   import Palette from './components/Palette.svelte'
+  import CloneDialog from './components/CloneDialog.svelte'
+  import { github } from './lib/stores/github.svelte'
   import { palette } from './lib/palette/state.svelte'
   import { hooks } from './lib/palette/search'
   import { conversations } from './lib/stores/conversations.svelte'
@@ -173,6 +175,7 @@
       <div class="glass welcome-box">
         <h1>Code Art</h1>
         <button use:tooltip={{ text: 'Scegli una cartella da aprire come progetto', shortcut: '⌘O' }} onclick={() => projectPickAndOpen()}>Apri cartella</button>
+        <button use:tooltip={'Scegli un tuo repository GitHub da clonare e aprire'} onclick={() => (github.cloneOpen = true)}>Clona da GitHub…</button>
       </div>
     </main>
   {:else}
@@ -206,6 +209,7 @@
   {/if}
   <MissingFolder />
   <Palette />
+  <CloneDialog />
 </div>
 
 <style>

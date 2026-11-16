@@ -3,6 +3,7 @@
   import ChangeList from './ChangeList.svelte'
   import CommitBox from './CommitBox.svelte'
   import SyncBar from './SyncBar.svelte'
+  import GitHubPanel from './GitHubPanel.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { git, stagedEntries, unstagedEntries } from '../../lib/stores/git.svelte'
   import { projectStore } from '../../lib/stores/project.svelte'
@@ -48,6 +49,7 @@
           <ChangeList {repo} title="Modifiche in stage" entries={g.staged} staged={true} />
           <ChangeList {repo} title="Modifiche" entries={g.unstaged} staged={false} />
           {#if st.truncated}<div class="warn">Elenco troncato: ci sono troppe modifiche.</div>{/if}
+          <GitHubPanel {repo} />
         </section>
       {/if}
     {/each}

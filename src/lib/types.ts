@@ -104,3 +104,23 @@ export type GitRemoteOp = 'fetch' | 'pull' | 'push'
 export type GitChangedEvent = { repo: string }
 export type GitProgressEvent = { id: number; line: string }
 export type GitOpDoneEvent = { id: number; ok: boolean; message: string }
+export type GitCommit = { hash: string; short: string; subject: string; author: string; dateIso: string }
+
+// ---- GitHub (specchio di src-tauri/src/github.rs) ----
+export type GhAccount = { login: string; active: boolean }
+export type RemoteRepo = { nameWithOwner: string; description: string; private: boolean; updatedAt: string }
+export type ChecksSummary = { passing: number; failing: number; pending: number }
+export type PrState = 'open' | 'closed' | 'all'
+export type Pr = {
+  number: number
+  title: string
+  author: string
+  head: string
+  base: string
+  state: 'open' | 'closed' | 'merged'
+  isDraft: boolean
+  url: string
+  checks: ChecksSummary
+}
+export type PrCheck = { name: string; state: 'passing' | 'failing' | 'pending' | 'skipped'; url: string }
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
