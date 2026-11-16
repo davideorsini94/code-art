@@ -8,6 +8,7 @@
   import FileIcon from './FileIcon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { relativeToFolders } from '../lib/conv/paths'
+  import { parseConflicts, resolve, type Conflict, type Pick } from '../lib/conflicts'
 
   type Monaco = typeof import('monaco-editor')
   type IModel = import('monaco-editor').editor.ITextModel
@@ -256,6 +257,85 @@
     }
   })
 
+  // conflitti di unione del file attivo: decorazioni, riga di azioni sopra ogni conflitto (view zone costruita con nodi DOM) e contatore
+  let conflicts = $state.raw<Conflict[]>([])
+  let conflictAt = -1
+  let zoneIds: string[] = []
+  let decos: import('monaco-editor').editor.IEditorDecorationsCollection | undefined
+
+  function pickConflict(model: IModel, c: Conflict, pick: Pick) {
+    if (readOnly) return
+    const next = resolve(model.getValue(), c, pick)
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: next }], () => null)
+  }
+
+  function actionsNode(model: IModel, c: Conflict) {
+    const row = document.createElement('div')
+    row.className = 'ca-conflict-actions'
+    const defs: [Pick, string, string][] = [['ours', 'Tieni la tua', 'Tieni la versione del tuo branch'], ['theirs', 'Tieni l\'altra', 'Tieni la versione in arrivo'], ['both', 'Tieni entrambe', 'Tieni entrambe le versioni, la tua per prima']]
+    for (const [pick, label, tip] of defs) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.textContent = label
+      b.title = tip
+      b.addEventListener('click', () => pickConflict(model, c, pick))
+      row.appendChild(b)
+    }
+    return row
+  }
+
+  function paintConflicts(ed: ICode, model: IModel) {
+    const text = model.getValue()
+    const cs = text.includes('<<<<<<<') ? parseConflicts(text) : []
+    conflicts = cs
+    if (conflictAt >= cs.length) conflictAt = -1
+    const line = (a: number, b: number, cls: string) => ({ range: { startLineNumber: a, startColumn: 1, endLineNumber: b, endColumn: 1 }, options: { isWholeLine: true, className: cls } })
+    const list = cs.flatMap((c) => [
+      line(c.start, c.start, 'ca-conflict-mark'),
+      line(c.start + 1, (c.base ?? c.mid) - 1, 'ca-conflict-ours'),
+      ...(c.base ? [line(c.base, c.mid - 1, 'ca-conflict-base')] : []),
+      line(c.mid, c.mid, 'ca-conflict-mark'),
+      line(c.mid + 1, c.end - 1, 'ca-conflict-theirs'),
+      line(c.end, c.end, 'ca-conflict-mark'),
+    ].filter((d) => d.range.startLineNumber <= d.range.endLineNumber))
+    decos ??= ed.createDecorationsCollection()
+    decos.set(list)
+    ed.changeViewZones((acc) => {
+      zoneIds.forEach((id) => acc.removeZone(id))
+      zoneIds = cs.map((c) => acc.addZone({ afterLineNumber: c.start - 1, heightInPx: 26, domNode: actionsNode(model, c) }))
+    })
+  }
+
+  $effect(() => {
+    const m = monaco
+    void modelTick
+    const t = active
+    const model = t && isTextTab(t) ? models.get(t.id)?.model : undefined
+    if (!m || !main || !model) {
+      conflicts = []
+      return
+    }
+    const ed = main
+    conflictAt = -1
+    paintConflicts(ed, model)
+    const sub = model.onDidChangeContent(() => paintConflicts(ed, model))
+    return () => {
+      sub.dispose()
+      decos?.clear()
+      ed.changeViewZones((acc) => zoneIds.forEach((id) => acc.removeZone(id)))
+      zoneIds = []
+    }
+  })
+
+  function jump(dir: 1 | -1) {
+    if (!main || conflicts.length === 0) return
+    conflictAt = (conflictAt + dir + conflicts.length) % conflicts.length
+    const c = conflicts[conflictAt]
+    main.setPosition({ lineNumber: c.start, column: 1 })
+    main.revealLineInCenter(c.start)
+    main.focus()
+  }
+
   // "Apri su riga/colonna" (risultati di ricerca): dopo la sincronizzazione dei modelli, quando quello della scheda è nell'editor
   $effect(() => {
     const r = editor.reveal
@@ -288,6 +368,13 @@
       </div>
     {/each}
     <span class="grow"></span>
+    {#if conflicts.length > 0 && showCode}
+      <span class="conf" role="group" aria-label="Conflitti di unione">
+        <span class="conf-n">{conflicts.length} {conflicts.length === 1 ? 'conflitto' : 'conflitti'}</span>
+        <button aria-label="Conflitto precedente" use:tooltip={'Vai al conflitto precedente'} onclick={() => jump(-1)}>↑</button>
+        <button aria-label="Conflitto successivo" use:tooltip={'Vai al conflitto successivo'} onclick={() => jump(1)}>↓</button>
+      </span>
+    {/if}
     {#if editor.tabs.length > 0}
       <button class="tool" class:on={editor.split} use:tooltip={editor.split ? 'Chiudi la vista divisa' : 'Dividi l\'editor'} onclick={() => (editor.split = !editor.split)}>Dividi</button>
     {/if}
@@ -416,6 +503,18 @@
   .ed { flex: 1; min-width: 0; height: 100%; }
   .diff { position: absolute; inset: 0; }
   .editors .ed + .ed { border-left: 1px solid var(--edge-soft); }
+  .conf { display: inline-flex; align-items: center; gap: 2px; margin-right: 8px; font-size: 11px; color: var(--wait); }
+  .conf-n { padding: 0 6px; }
+  .conf button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--dim); font: inherit; cursor: default; }
+  .conf button:hover { background: var(--glass2); color: var(--txt); }
+  /* decorazioni e riga di azioni vivono dentro il DOM di Monaco: stili globali, solo token del tema */
+  :global(.ca-conflict-ours) { background: var(--accent-soft); }
+  :global(.ca-conflict-theirs) { background: var(--wait-soft); }
+  :global(.ca-conflict-base) { background: var(--glass); }
+  :global(.ca-conflict-mark) { background: var(--glass2); }
+  :global(.ca-conflict-actions) { display: flex; align-items: center; gap: 6px; height: 100%; padding-left: 12px; font-size: 11px; }
+  :global(.ca-conflict-actions button) { background: var(--glass2); border: 1px solid var(--edge-soft); color: var(--txt); border-radius: 6px; padding: 1px 9px; font: inherit; cursor: default; }
+  :global(.ca-conflict-actions button:hover) { border-color: var(--accent-line); }
   .hidden { display: none; }
   .empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--faint); font-size: 13px; pointer-events: none; }
 </style>

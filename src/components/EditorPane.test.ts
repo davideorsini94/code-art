@@ -13,16 +13,27 @@ vi.mock('../lib/ipc', () => ({
   asFsError: (e: unknown) => (e && typeof e === 'object' && 'code' in e ? e : { code: 'io', message: String(e) }),
 }))
 const diffOptions = vi.hoisted(() => vi.fn())
+const zones = vi.hoisted(() => ({ list: [] as { afterLineNumber: number; domNode: HTMLElement }[] }))
 vi.mock('../lib/monaco', () => {
   const model = () => {
     let v = ''
+    let ver = 1
+    const subs: (() => void)[] = []
     return {
-      getValue: () => v, setValue: (x: string) => (v = x), dispose() {}, getAlternativeVersionId: () => 1,
-      onDidChangeContent: () => ({ dispose() {} }),
+      getValue: () => v, setValue: (x: string) => { v = x; ver++; subs.forEach((f) => f()) }, dispose() {}, getAlternativeVersionId: () => ver,
+      onDidChangeContent: (f: () => void) => { subs.push(f); return { dispose() { subs.splice(subs.indexOf(f), 1) } } },
+      getFullModelRange: () => ({}),
+      pushEditOperations: (_s: unknown, ops: { text: string }[]) => { v = ops[0].text; ver++; subs.forEach((f) => f()); return null },
       init: (x: string) => (v = x),
     }
   }
-  const ed = () => ({ addCommand() {}, updateOptions() {}, setModel() {}, getModel: () => null, dispose() {}, setValue() {} })
+  const ed = () => ({
+    addCommand() {}, updateOptions() {}, setModel() {}, getModel: () => null, dispose() {}, setValue() {},
+    createDecorationsCollection: () => ({ set() {}, clear() {} }),
+    changeViewZones: (cb: (a: { addZone: (z: { afterLineNumber: number; domNode: HTMLElement }) => string; removeZone: (id: string) => void }) => void) =>
+      cb({ addZone: (z) => { zones.list.push(z); return String(zones.list.length) }, removeZone: () => { zones.list.length = 0 } }),
+    revealLineInCenter() {}, setPosition() {}, focus() {},
+  })
   return {
     monaco: {
       KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1 }, Uri: { file: (p: string) => p, parse: (p: string) => p },
@@ -147,5 +158,35 @@ describe('EditorPane diff tabs', () => {
     await waitFor(() => expect(diffOptions).toHaveBeenCalledWith({ readOnly: true, originalEditable: false }))
     await editor.save('/Users/dev/app/b.ts', editor.activeTab!.key)
     expect(fsWrite).not.toHaveBeenCalled()
+  })
+})
+
+describe('EditorPane merge conflicts', () => {
+  const marked = 'a\n<<<<<<< HEAD\nmia\n=======\nsua\n>>>>>>> f\nb\n'
+
+  it('shows the count and an actions row above each conflict; an action edits the text and marks the tab dirty', async () => {
+    zones.list.length = 0
+    vi.mocked(fsRead).mockResolvedValueOnce({ text: marked, mtimeMs: 1 })
+    render(EditorPane)
+    await editor.open('/Users/dev/app/m.ts')
+    flushSync()
+    await waitFor(() => expect(screen.getByText('1 conflitto')).toBeTruthy())
+    expect(zones.list).toHaveLength(1)
+    expect(zones.list[0].afterLineNumber).toBe(1)
+    const labels = [...zones.list[0].domNode.querySelectorAll('button')].map((b) => b.textContent)
+    expect(labels).toEqual(['Tieni la tua', 'Tieni l\'altra', 'Tieni entrambe'])
+    expect(editor.activeTab!.dirty).toBe(false)
+    zones.list[0].domNode.querySelectorAll('button')[0].click()
+    flushSync()
+    await waitFor(() => expect(editor.activeTab!.dirty).toBe(true))
+    await waitFor(() => expect(screen.queryByText('1 conflitto')).toBeNull())
+    expect(zones.list).toHaveLength(0)
+  })
+
+  it('shows no conflict controls for a file without markers', async () => {
+    render(EditorPane)
+    await editor.open('/Users/dev/app/clean.ts')
+    flushSync()
+    expect(screen.queryByText(/conflitt/)).toBeNull()
   })
 })

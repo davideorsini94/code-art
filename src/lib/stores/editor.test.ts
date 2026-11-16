@@ -129,6 +129,15 @@ describe('editor tabs with unsaved changes', () => {
     expect(editor.activeTab?.diff?.before).toBe('indice3')
   })
 
+  it('a disk change under unsaved (e.g. conflict-resolution) edits asks instead of overwriting', async () => {
+    const t = await dirtyFile('/p/a.ts')
+    fsRead.mockResolvedValueOnce({ text: 'rebase in corso', mtimeMs: 7 })
+    await editor.applyChanged(['/p/a.ts'])
+    expect(t.prompt).toBe(true)
+    expect(t.baseText).not.toBe('rebase in corso')
+    expect(t.dirty).toBe(true)
+  })
+
   it('closing a dirty tab asks first: Annulla keeps it, Scarta closes it', async () => {
     await dirtyFile('/p/a.ts')
     editor.requestClose('/p/a.ts')

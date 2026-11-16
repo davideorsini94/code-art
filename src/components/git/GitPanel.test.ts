@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const project = vi.hoisted(() => ({ project: { id: 'p1', name: 'app', folders: ['/Users/dev/app'] }, untrusted: [] as string[], acceptTrust: vi.fn() }))
 vi.mock('../../lib/stores/project.svelte', () => ({ projectStore: project }))
 vi.mock('../../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
-const ipc = vi.hoisted(() => ({ gitRepos: vi.fn(), gitStatus: vi.fn(), gitStage: vi.fn(), gitUnstage: vi.fn(), gitDiscard: vi.fn(), gitDiff: vi.fn(), gitInit: vi.fn(), gitRemoteOp: vi.fn(), gitCancel: vi.fn(), gitMergeAbort: vi.fn(), gitBranches: vi.fn() }))
+const ipc = vi.hoisted(() => ({ gitRepos: vi.fn(), gitStatus: vi.fn(), gitStage: vi.fn(), gitUnstage: vi.fn(), gitDiscard: vi.fn(), gitDiff: vi.fn(), gitInit: vi.fn(), gitRemoteOp: vi.fn(), gitCancel: vi.fn(), gitMergeAbort: vi.fn(), gitBranches: vi.fn(), fsRead: vi.fn() }))
 vi.mock('../../lib/ipc', () => ipc)
-const editor = vi.hoisted(() => ({ open: vi.fn(), openDiff: vi.fn() }))
+const editor = vi.hoisted(() => ({ open: vi.fn(), openDiff: vi.fn(), tabs: [] as { key: string; dirty: boolean }[] }))
 vi.mock('../../lib/stores/editor.svelte', () => ({ editor }))
 
 import GitPanel from './GitPanel.svelte'
@@ -170,5 +170,38 @@ describe('GitPanel', () => {
     render(GitPanel)
     expect(await screen.findByRole('region', { name: 'lib' })).toBeTruthy()
     expect(screen.getByRole('region', { name: 'app' })).toBeTruthy()
+  })
+})
+
+describe('GitPanel conflicts', () => {
+  const conf = () => status({ merging: true, entries: [e('a.ts', { conflict: true, staged: 'U', unstaged: 'U' })] })
+
+  const mark = () => screen.queryByRole('button', { name: 'Segna a.ts come risolto' })
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+  const MARKED = 'a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> f\n'
+
+  afterEach(() => { editor.tabs = [] })
+
+  it('no "Segna come risolto" while the file still has markers', async () => {
+    ipc.fsRead.mockResolvedValue({ text: MARKED, mtimeMs: 1 })
+    await mount(conf())
+    await settle()
+    expect(mark()).toBeNull()
+  })
+
+  it('no "Segna come risolto" while the resolved file has unsaved edits', async () => {
+    ipc.fsRead.mockResolvedValue({ text: 'risolto\n', mtimeMs: 2 })
+    editor.tabs = [{ key: `${REPO}/a.ts`, dirty: true }]
+    await mount(conf())
+    await settle()
+    expect(mark()).toBeNull()
+  })
+
+  it('"Segna come risolto" stages the file once saved and without markers', async () => {
+    ipc.gitStage.mockResolvedValue(undefined)
+    ipc.fsRead.mockResolvedValue({ text: 'risolto\n', mtimeMs: 2 })
+    await mount(conf())
+    await fireEvent.click(await screen.findByRole('button', { name: 'Segna a.ts come risolto' }))
+    expect(ipc.gitStage).toHaveBeenCalledWith(REPO, ['a.ts'])
   })
 })
