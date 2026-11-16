@@ -187,8 +187,14 @@ export class GitStore {
     return this.local(folder, 'init', () => ipc.gitInit(folder))
   }
 
-  /** Apre il diff di una voce nell'editor (sola lettura; per i file binari solo un avviso). */
+  /** Apre il diff di una voce nell'editor (sola lettura; per i file binari solo un avviso). Un file in conflitto
+   *  non ha un confronto con l'indice: si apre il file, dove compaiono i pulsanti di risoluzione. */
   async openDiff(repo: string, e: GitStatusEntry, staged: boolean) {
+    if (e.conflict && !staged) {
+      this.error = null
+      void editor.open(join(repo, e.path))
+      return
+    }
     let d: GitDiffText
     try {
       d = await ipc.gitDiff(repo, e.path, e.origPath, staged)

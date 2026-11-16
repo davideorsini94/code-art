@@ -204,6 +204,18 @@ describe('GitPanel conflicts', () => {
     expect(mark()).toBeNull()
   })
 
+  it('clicking a conflicted row opens the file (with the resolution widgets), not a diff', async () => {
+    ipc.fsRead.mockResolvedValue({ text: MARKED, mtimeMs: 1 })
+    ipc.gitDiff.mockRejectedValue("git: fatal: path 'a.ts' is in the index, but not at stage 0")
+    await mount(conf())
+    await fireEvent.click(screen.getByText('a.ts'))
+    await settle()
+    expect(editor.open).toHaveBeenCalledWith(`${REPO}/a.ts`)
+    expect(ipc.gitDiff).not.toHaveBeenCalled()
+    expect(editor.openDiff).not.toHaveBeenCalled()
+    expect(git.error).toBeNull()
+  })
+
   it('"Segna come risolto" stages the file once saved and without markers', async () => {
     ipc.gitStage.mockResolvedValue(undefined)
     ipc.fsRead.mockResolvedValue({ text: 'risolto\n', mtimeMs: 2 })
