@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import type { ChatItem } from '../lib/types'
   import { errorText } from '../lib/errors'
   import { multiAnswer, type Picked } from '../lib/conv/ask'
@@ -86,7 +87,7 @@
                 {@const on = picked[qi]?.options.includes(o.label)}
                 <button type="button" class="btn" class:on role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={!!on}
                   use:tooltip={o.description || (q.multiSelect ? `Aggiungi o togli: ${o.label}` : `Scegli: ${o.label}`)}
-                  aria-disabled={busy} onclick={() => !busy && toggle(qi, o.label, q.multiSelect)}>{q.multiSelect ? (on ? '☑ ' : '☐ ') : ''}{o.label}</button>
+                  aria-disabled={busy} onclick={() => !busy && toggle(qi, o.label, q.multiSelect)}>{#if q.multiSelect}<Icon name={on ? 'boxCheck' : 'box'} size={14} />{/if}{o.label}</button>
               {/each}
             </div>
             <input type="text" placeholder="Altro…" value={picked[qi]?.other ?? ''} disabled={busy} aria-label={`Altra risposta: ${q.question}`}
@@ -128,4 +129,5 @@
   .free input { flex: 1; min-width: 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--edge-soft); background: var(--well); color: inherit; font: inherit; font-size: 12px; }
   .err { color: var(--err); font-size: 11.5px; margin: 6px 0 0; }
   @media (prefers-reduced-motion: no-preference) { .ask { transition: opacity var(--dur); } }
+  .btn { display: inline-flex; align-items: center; gap: 4px; }
 </style>

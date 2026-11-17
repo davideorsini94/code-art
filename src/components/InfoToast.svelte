@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { tooltip } from '../lib/tooltip'
 
   /** Riga informativa generica: resta finché non si chiude. */
@@ -8,7 +9,7 @@
 {#if message}
   <div class="toast" role="status" aria-live="polite">
     <span class="msg">{message}</span>
-    <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={onclose}>×</button>
+    <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={onclose}><Icon name="x" size={14} /></button>
   </div>
 {/if}
 
@@ -19,4 +20,5 @@
   .x:hover { color: var(--txt); }
   @media (prefers-reduced-motion: no-preference) { .toast { animation: toast-in var(--dur) ease-out; } }
   @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+  .x { display: inline-flex; align-items: center; justify-content: center; }
 </style>

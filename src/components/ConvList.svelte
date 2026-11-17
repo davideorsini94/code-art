@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { onMount } from 'svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { windowRange, WINDOW_THRESHOLD } from '../lib/conv/order'
@@ -55,7 +56,7 @@
     <span>Conversazioni</span>
     <span class="actions">
       <button class="link" class:on={conversations.showArchived} use:tooltip={conversations.showArchived ? 'Torna a tutte le conversazioni' : 'Mostra solo le archiviate'} onclick={() => (conversations.showArchived = !conversations.showArchived)}>{conversations.showArchived ? '← Tutte' : 'Archiviate'}</button>
-      <button class="link" use:tooltip={untrusted ? UNTRUSTED_HINT : 'Nuova conversazione'} aria-disabled={untrusted} onclick={() => !untrusted && void conversations.create()}>＋ nuova</button>
+      <button class="link" use:tooltip={untrusted ? UNTRUSTED_HINT : 'Nuova conversazione'} aria-disabled={untrusted} onclick={() => !untrusted && void conversations.create()}><Icon name="plus" size={12} /> nuova</button>
     </span>
   </div>
   {#if conversations.notice}<p class="empty" role="status">{conversations.notice}</p>{/if}
@@ -137,4 +138,5 @@
     border-radius: 6px; font-size: 12.5px; cursor: default;
   }
   .menu button:hover { background: var(--glass2); }
+  .link { display: inline-flex; align-items: center; gap: 4px; }
 </style>

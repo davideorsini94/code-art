@@ -1,4 +1,4 @@
-export type ResizableCol = 'sidebar' | 'convlist' | 'conv'
+export type ResizableCol = 'sidebar' | 'conv'
 
 export interface LayoutState {
   widths: Record<ResizableCol, number>
@@ -8,13 +8,13 @@ export interface LayoutState {
 export const STORAGE_KEY = 'codeart.layout'
 export const MIN_WIDTH = 160
 export const DEFAULT_LAYOUT: LayoutState = {
-  widths: { sidebar: 218, convlist: 270, conv: 420 },
+  widths: { sidebar: 260, conv: 460 },
   collapsed: [],
 }
 
-/** Spazio orizzontale che non va alle colonne ridimensionabili: barra laterale (46), tre maniglie (6), margini
+/** Spazio orizzontale che non va alle colonne ridimensionabili: barra laterale (46), due maniglie (6), margini
  *  della griglia (20) e larghezza minima dell'editor (240, come `minmax(240px, 1fr)` in App). */
-export const EDITOR_RESERVE = 46 + 3 * 6 + 20 + 240
+export const EDITOR_RESERVE = 46 + 2 * 6 + 20 + 240
 
 /** Larghezze adattate alla finestra: se le colonne aperte non ci stanno (layout salvato su uno schermo più grande),
  *  si riducono in proporzione, mai sotto `MIN_WIDTH`. Le colonne chiuse restano com'erano. */
@@ -29,13 +29,6 @@ export function clampWidths(widths: Record<ResizableCol, number>, collapsed: Res
   return out
 }
 
-/** Almeno una tra `convlist` e `conv` deve restare aperta. */
-export function canCollapse(col: string, collapsed: Set<string>): boolean {
-  if (col === 'convlist') return !collapsed.has('conv')
-  if (col === 'conv') return !collapsed.has('convlist')
-  return true
-}
-
 export function loadLayout(storage: Pick<Storage, 'getItem'> = localStorage): LayoutState {
   try {
     const raw = storage.getItem(STORAGE_KEY)
@@ -46,12 +39,9 @@ export function loadLayout(storage: Pick<Storage, 'getItem'> = localStorage): La
       if (typeof p?.widths?.[k] === 'number') widths[k] = Math.max(MIN_WIDTH, p.widths[k])
     }
     const collapsed = Array.isArray(p?.collapsed)
-      ? (p.collapsed.filter((c: unknown) => c === 'sidebar' || c === 'convlist' || c === 'conv') as ResizableCol[])
+      ? (p.collapsed.filter((c: unknown) => c === 'sidebar' || c === 'conv') as ResizableCol[])
       : []
-    // stato salvato incoerente: non si possono avere chiuse entrambe
-    if (collapsed.includes('convlist') && collapsed.includes('conv')) {
-      return { widths, collapsed: collapsed.filter((c) => c !== 'conv') }
-    }
+    // la vecchia colonna `convlist` (ora vista laterale) viene ignorata
     return { widths, collapsed }
   } catch {
     return structuredClone(DEFAULT_LAYOUT)

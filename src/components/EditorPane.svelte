@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { onDestroy, untrack } from 'svelte'
   import { editor, type Tab } from '../lib/stores/editor.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
@@ -403,7 +404,7 @@
         {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
         {#if t.dirty}<span class="dot" role="img" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
-        <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.requestClose(t.key) }}>×</button>
+        <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.requestClose(t.key) }}><Icon name="x" size={14} /></button>
       </div>
     {/each}
     <span class="grow"></span>
@@ -413,8 +414,8 @@
     {#if conflicts.length > 0 && showCode}
       <span class="conf" role="group" aria-label="Conflitti di unione">
         <span class="conf-n">{conflicts.length} {conflicts.length === 1 ? 'conflitto' : 'conflitti'}</span>
-        <button aria-label="Conflitto precedente" use:tooltip={'Vai al conflitto precedente'} onclick={() => jump(-1)}>↑</button>
-        <button aria-label="Conflitto successivo" use:tooltip={'Vai al conflitto successivo'} onclick={() => jump(1)}>↓</button>
+        <button aria-label="Conflitto precedente" use:tooltip={'Vai al conflitto precedente'} onclick={() => jump(-1)}><Icon name="chevronUp" size={14} /></button>
+        <button aria-label="Conflitto successivo" use:tooltip={'Vai al conflitto successivo'} onclick={() => jump(1)}><Icon name="chevronDown" size={14} /></button>
       </span>
     {/if}
     {#if editor.tabs.length > 0}
@@ -565,4 +566,6 @@
   :global(.ca-conflict-actions button:hover) { border-color: var(--accent-line); }
   .hidden { display: none; }
   .empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--faint); font-size: 13px; pointer-events: none; }
+  .x { display: inline-flex; align-items: center; justify-content: center; }
+  .conf button { display: inline-flex; align-items: center; justify-content: center; }
 </style>

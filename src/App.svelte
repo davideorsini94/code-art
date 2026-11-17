@@ -9,7 +9,6 @@
   import EditorPane from './components/EditorPane.svelte'
   import TerminalPane from './components/TerminalPane.svelte'
   import ClaudeMissing from './components/ClaudeMissing.svelte'
-  import ConvList from './components/ConvList.svelte'
   import ConvPane from './components/ConvPane.svelte'
   import Palette from './components/Palette.svelte'
   import CloneDialog from './components/CloneDialog.svelte'
@@ -23,9 +22,9 @@
   import { editor } from './lib/stores/editor.svelte'
   import { search } from './lib/stores/search.svelte'
   import { guardWindowDrops } from './lib/dropguard'
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { tooltip } from './lib/tooltip'
-  import { canCollapse, clampWidths, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
+  import { clampWidths, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
 
@@ -65,13 +64,12 @@
   function toggle(col: ResizableCol) {
     const next = new Set(collapsed)
     if (next.has(col)) next.delete(col)
-    else if (canCollapse(col, collapsed)) next.add(col)
+    else next.add(col)
     collapsed = next
   }
 
   const cols: { col: ResizableCol; label: string }[] = [
     { col: 'sidebar', label: 'Pannello laterale' },
-    { col: 'convlist', label: 'Conversazioni' },
     { col: 'conv', label: 'Conversazione' },
   ]
 
@@ -101,9 +99,17 @@
     return () => window.removeEventListener('keydown', onKey, true)
   })
 
-  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
+  // aprire una conversazione (dall'elenco, da una notifica, dalla palette) riapre la sua colonna se era chiusa
+  let shownId: string | null = null
+  $effect(() => {
+    const id = conversations.activeId
+    if (id && id !== shownId && untrack(() => collapsed.has('conv'))) toggle('conv')
+    shownId = id
+  })
+
+  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git, ⌘⇧C Conversazioni: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
   onMount(() => {
-    const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git' }
+    const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git', c: 'convs' }
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey || !e.shiftKey || e.ctrlKey || e.altKey || !projectStore.project) return
       const view = views[e.key.toLowerCase()]
@@ -187,10 +193,9 @@
       {#if !collapsed.has(col)}
         <section class="glass col" data-slot={col} aria-label={label}>
           {#if col === 'sidebar'}<SidebarView />{/if}
-          {#if col === 'conv'}<ConvPane />{/if}
-          {#if col === 'convlist'}
+          {#if col === 'conv'}
             <ClaudeMissing onresult={(f) => (claudeFound = f)} />
-            {#if claudeFound}<ConvList />{/if}
+            {#if claudeFound}<ConvPane />{/if}
           {/if}
         </section>
         <!-- svelte-ignore a11y_no_static_element_interactions -->

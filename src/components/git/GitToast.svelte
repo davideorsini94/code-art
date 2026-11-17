@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../Icon.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { git, REMOTE_LABEL } from '../../lib/stores/git.svelte'
 
@@ -27,10 +28,10 @@
       <button class="link" use:tooltip={'Interrompe l’operazione'} onclick={() => void git.cancel()}>Annulla</button>
     {:else if git.error}
       <span class="msg err">{git.error}</span>
-      <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={() => (git.error = null)}>×</button>
+      <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={() => (git.error = null)}><Icon name="x" size={14} /></button>
     {:else if git.notice}
       <span class="msg">{git.notice}</span>
-      <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={() => (git.notice = null)}>×</button>
+      <button class="x" aria-label="Chiudi il messaggio" use:tooltip={'Chiudi il messaggio'} onclick={() => (git.notice = null)}><Icon name="x" size={14} /></button>
     {/if}
   </div>
 {/if}
@@ -44,4 +45,5 @@
   .x:hover { color: var(--txt); }
   @media (prefers-reduced-motion: no-preference) { .toast { animation: toast-in var(--dur) ease-out; } }
   @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+  .x { display: inline-flex; align-items: center; justify-content: center; }
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { tick } from 'svelte'
   import { tooltip } from '../lib/tooltip'
   import { errorText } from '../lib/errors'
@@ -93,7 +94,7 @@
   >
     <header>
       <h2>Clona da GitHub</h2>
-      <button class="x" aria-label="Chiudi" use:tooltip={'Chiudi (Esc)'} onclick={close}>×</button>
+      <button class="x" aria-label="Chiudi" use:tooltip={'Chiudi (Esc)'} onclick={close}><Icon name="x" size={14} /></button>
     </header>
     {#if github.missing}
       <div class="msg">{GH_MISSING}</div>
@@ -150,4 +151,5 @@
   .act:disabled { opacity: 0.45; cursor: not-allowed; }
   @media (prefers-reduced-motion: no-preference) { .dialog { animation: dlg-in var(--dur) ease-out; } }
   @keyframes dlg-in { from { opacity: 0; transform: translate(-50%, 6px); } }
+  .x { display: inline-flex; align-items: center; justify-content: center; }
 </style>

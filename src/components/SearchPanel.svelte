@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { onMount, tick } from 'svelte'
   import FileIcon from './FileIcon.svelte'
   import { tooltip } from '../lib/tooltip'
@@ -63,7 +64,7 @@
     </div>
   {/if}
   <button class="more" aria-expanded={filters} use:tooltip={filters ? 'Nascondi i filtri sui file' : 'Mostra i filtri sui file'} onclick={() => (filters = !filters)}>
-    {filters ? '▾' : '▸'} File da includere/escludere
+    <Icon name={filters ? 'chevronDown' : 'chevronRight'} size={12} /> File da includere/escludere
   </button>
   {#if filters}
     <input type="text" placeholder="Includi (es. *.ts, src/**)" aria-label="File da includere" bind:value={search.include} oninput={() => search.schedule()} />
@@ -90,7 +91,7 @@
       {@const spec = iconFor(name(g.path), false, false)}
       <li>
         <button class="gh" aria-expanded={!search.collapsed[g.path]} use:tooltip={relativeToFolders(g.path, folders)} onclick={() => search.toggleGroup(g.path)}>
-          <span class="chev">{search.collapsed[g.path] ? '▸' : '▾'}</span>
+          <span class="chev"><Icon name={search.collapsed[g.path] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
           <FileIcon id={spec.id} dim={spec.dim} size={14} />
           <span class="gname">{name(g.path)}</span>
           <span class="gdir">{dir(g.path)}</span>
@@ -147,4 +148,6 @@
   .more-hits { color: var(--accent); }
   mark { background: var(--wait-strong); color: var(--txt); border-radius: 2px; }
   @media (prefers-reduced-motion: no-preference) { .field, .tog { transition: border-color var(--dur), background var(--dur); } }
+  .more { display: inline-flex; align-items: center; gap: 4px; }
+  .chev { display: inline-flex; }
 </style>

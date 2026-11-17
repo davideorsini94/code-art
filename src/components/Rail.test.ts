@@ -72,10 +72,13 @@ describe('Rail views', () => {
     expect(ontoggle).toHaveBeenCalledWith('sidebar')
   })
 
-  it('keeps the conversation toggles', async () => {
+  it('Conversazioni è una vista laterale; la colonna della conversazione resta un interruttore', async () => {
     const ontoggle = vi.fn()
-    render(Rail, { collapsed: new Set<string>(), ontoggle })
+    render(Rail, { collapsed: new Set(['sidebar']), ontoggle })
     await fireEvent.click(screen.getByRole('button', { name: 'Conversazioni' }))
-    expect(ontoggle).toHaveBeenCalledWith('convlist')
+    expect(sidebar.view).toBe('convs')
+    expect(ontoggle).toHaveBeenCalledWith('sidebar')
+    await fireEvent.click(screen.getByRole('button', { name: 'Conversazione' }))
+    expect(ontoggle).toHaveBeenCalledWith('conv')
   })
 })

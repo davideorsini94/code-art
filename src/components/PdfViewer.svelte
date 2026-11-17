@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   // PDF con pdf.js (caricato al primo uso, worker locale). Le pagine si disegnano su <canvas> solo quando
   // entrano nella vista, una alla volta, con un tetto ai pixel del canvas. Niente testo selezionabile,
   // niente annotazioni né link: il contenuto del PDF non può far partire nulla.
@@ -209,9 +210,9 @@
   <div class="foot">
     <span>{status === 'ready' ? `pagina ${current} di ${count}` : ''}</span>
     <span class="grow"></span>
-    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => setZoom(zoom / 1.2)} aria-label="Riduci">−</button>
+    <button use:tooltip={{ text: 'Riduci', shortcut: '⌘−' }} onclick={() => setZoom(zoom / 1.2)} aria-label="Riduci"><Icon name="zoomOut" size={16} /></button>
     <span class="z">{Math.round(zoom * 100)}%</span>
-    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => setZoom(zoom * 1.2)} aria-label="Ingrandisci">+</button>
+    <button use:tooltip={{ text: 'Ingrandisci', shortcut: '⌘+' }} onclick={() => setZoom(zoom * 1.2)} aria-label="Ingrandisci"><Icon name="zoomIn" size={16} /></button>
     <button class:on={fitMode} use:tooltip={{ text: 'Adatta alla larghezza', shortcut: '⌘0' }} onclick={() => setZoom(fitZoom(), true)}>Adatta</button>
     <button use:tooltip={'Dimensione reale (100%)'} onclick={() => setZoom(1)}>100%</button>
   </div>
@@ -228,4 +229,5 @@
   button { background: var(--glass); border: 1px solid var(--edge-soft); color: var(--dim); border-radius: 6px; padding: 2px 9px; font-size: 11px; cursor: default; }
   button:hover { color: var(--txt); background: var(--glass2); }
   button.on { color: var(--accent); border-color: var(--accent); }
+  button { display: inline-flex; align-items: center; justify-content: center; }
 </style>

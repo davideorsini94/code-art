@@ -1,6 +1,7 @@
 <script lang="ts">
   import FileTree from './FileTree.svelte'
   import SearchPanel from './SearchPanel.svelte'
+  import ConvList from './ConvList.svelte'
   import { sidebar } from '../lib/stores/sidebar.svelte'
 </script>
 
@@ -8,6 +9,8 @@
   <FileTree />
 {:else if sidebar.view === 'search'}
   <SearchPanel />
+{:else if sidebar.view === 'convs'}
+  <ConvList />
 {:else}
   {#await import('./git/GitPanel.svelte') then m}
     <m.default />

@@ -3,6 +3,7 @@
   import ChatItem from './ChatItem.svelte'
   import TodoStrip from './TodoStrip.svelte'
   import Composer from './Composer.svelte'
+  import ConvTabs from './ConvTabs.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { chat } from '../lib/stores/chat.svelte'
   import { convMarkViewed } from '../lib/ipc'
@@ -128,8 +129,9 @@
 </script>
 
 <div class="pane">
+  <ConvTabs />
   {#if !id || !conv}
-    <p class="empty">Scegli una conversazione dall'elenco o creane una nuova.</p>
+    <p class="empty">Apri una conversazione dall'elenco o premi ＋ per crearne una nuova.</p>
   {:else}
     <header>
       <div class="chatH">

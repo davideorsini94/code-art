@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../Icon.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { git, REMOTE_LABEL } from '../../lib/stores/git.svelte'
   import type { GitRemoteOp, GitRepoStatus } from '../../lib/types'
@@ -18,10 +19,10 @@
 <div class="sync">
   {#if !compact}
   <button class="branch" use:tooltip={'Cambia branch'} onclick={() => git.openPicker('switch', repo)}>
-    ⎇ {status.branch ?? (status.detached ? 'HEAD staccato' : 'nessun branch')}
+    <Icon name="branch" size={13} /> {status.branch ?? (status.detached ? 'HEAD staccato' : 'nessun branch')}
   </button>
   {#if status.ahead > 0 || status.behind > 0}
-    <span class="ab" use:tooltip={`${status.ahead} commit da inviare, ${status.behind} da scaricare`}>↑{status.ahead} ↓{status.behind}</span>
+    <span class="ab" use:tooltip={`${status.ahead} commit da inviare, ${status.behind} da scaricare`}><Icon name="arrowUp" size={12} />{status.ahead} <Icon name="arrowDown" size={12} />{status.behind}</span>
   {/if}
   {/if}
   <span class="spacer"></span>
@@ -49,4 +50,6 @@
   .line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cancel { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
   @media (prefers-reduced-motion: no-preference) { .branch, .op { transition: background var(--dur); } }
+  .branch, .ab { display: inline-flex; align-items: center; gap: 4px; }
+  .ab { gap: 2px; }
 </style>
