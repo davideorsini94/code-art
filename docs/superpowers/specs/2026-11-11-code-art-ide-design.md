@@ -72,9 +72,9 @@ di mano nella stessa finestra.
 | Claude | **CLI `claude` già installata** (v2.1.x in `~/.local/bin`), pilotata in modalità streaming JSON | riusa login, impostazioni, MCP e sessioni esistenti dell'utente; nessuna chiave API |
 | Git | `git` di sistema | affidabile, zero dipendenze |
 | GitHub | CLI `gh` già installata e autenticata | PR e repo senza gestire token |
-| SSH/SFTP | crate Rust `russh` + `russh-sftp` | nessun processo esterno, trasferimenti con avanzamento |
+| SSH | `ssh` di sistema (OpenSSH del Mac) con connessione condivisa (ControlMaster) | scelta dell'utente il 2026-11-19 al posto di `russh` (installare librerie nuove era bloccato): legge già `~/.ssh/config`, ssh-agent e `known_hosts`; file e trasferimenti passano da comandi POSIX sul server con argomenti quotati, avanzamento contato dall'app |
 | Database | `tokio-postgres`, `mongodb`, `oracle` (richiede Oracle Instant Client) | driver nativi |
-| Segreti | Portachiavi macOS | password SSH/DB mai su file |
+| Segreti | Portachiavi macOS (Security.framework via `core-foundation`, già fra le dipendenze) | password SSH/DB mai su file; a `ssh` la password arriva dall'app stessa usata come `SSH_ASKPASS` |
 | Dati dell'app | SQLite in `~/Library/Application Support/CodeArt/` | titoli, stati, progetti, connessioni |
 
 Ambiente verificato sulla macchina: macOS 27.2, `cargo`, `node` 24, `pnpm`,
