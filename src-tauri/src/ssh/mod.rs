@@ -4,8 +4,10 @@
 pub mod askpass;
 pub mod config;
 pub mod conn;
+pub mod fs;
 pub mod keychain;
 
+use crate::fs_tree::FsError;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -349,6 +351,80 @@ pub async fn ssh_disconnect(app: AppHandle, window: WebviewWindow, id: String) -
 pub async fn ssh_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<conn::StateEvent>, String> {
     trusted_store(&app, &window)?;
     Ok(app.state::<Arc<conn::Connections>>().states())
+}
+
+/// File sul server: fiducia, server, lavoro bloccante fuori dal thread principale; `f` riceve il server e il modo di
+/// eseguire uno script sulla sua connessione condivisa.
+async fn remote<T: Send + 'static>(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: String,
+    f: impl FnOnce(&Server, fs::Runner) -> Result<T, FsError> + Send + 'static,
+) -> Result<T, FsError> {
+    let store = trusted_store(&app, &window).map_err(|e| FsError::new("io", e))?;
+    let conns = app.state::<Arc<conn::Connections>>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let server = find_server(&store, read_user_config().as_deref(), &id).map_err(|e| FsError::new("io", e))?;
+        let run = |script: &str, args: &[&str], stdin: Option<Vec<u8>>| conns.run(&server, script, args, stdin);
+        f(&server, &run)
+    })
+    .await
+    .map_err(|e| FsError::new("io", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn ssh_home(app: AppHandle, window: WebviewWindow, id: String) -> Result<String, FsError> {
+    remote(app, window, id, |_, r| fs::home(r)).await
+}
+
+#[tauri::command]
+pub async fn ssh_list(app: AppHandle, window: WebviewWindow, id: String, dir: String) -> Result<fs::RemoteListing, FsError> {
+    remote(app, window, id, move |_, r| fs::list(r, &fs::resolve(r, &dir)?)).await
+}
+
+#[tauri::command]
+pub async fn ssh_read(app: AppHandle, window: WebviewWindow, id: String, path: String) -> Result<fs::RemoteContent, FsError> {
+    remote(app, window, id, move |_, r| fs::read(r, &fs::resolve(r, &path)?)).await
+}
+
+/// `version` = quella letta (`size:mtime`); vuota = crea un file nuovo. Restituisce la nuova versione.
+#[tauri::command]
+pub async fn ssh_write(app: AppHandle, window: WebviewWindow, id: String, path: String, text: String, version: String) -> Result<String, FsError> {
+    remote(app, window, id, move |_, r| fs::write(r, &fs::resolve(r, &path)?, &text, &version)).await
+}
+
+#[tauri::command]
+pub async fn ssh_mkdir(app: AppHandle, window: WebviewWindow, id: String, path: String) -> Result<(), FsError> {
+    remote(app, window, id, move |_, r| fs::mkdir(r, &fs::resolve(r, &path)?)).await
+}
+
+#[tauri::command]
+pub async fn ssh_rename(app: AppHandle, window: WebviewWindow, id: String, from: String, to: String) -> Result<(), FsError> {
+    remote(app, window, id, move |_, r| fs::rename(r, &fs::resolve(r, &from)?, &fs::resolve(r, &to)?)).await
+}
+
+/// Elimina sul server dopo una conferma nativa del core (titolo fisso, "Annulla" predefinito): nessuna conferma passa
+/// dalla WebView.
+#[tauri::command]
+pub async fn ssh_delete(app: AppHandle, window: WebviewWindow, id: String, path: String) -> Result<(), FsError> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    let dialogs = app.clone();
+    let win = window.clone();
+    remote(app, window, id, move |server, r| {
+        let confirm = |message: &str| {
+            let answer = dialogs
+                .dialog()
+                .message(message)
+                .title(fs::DELETE_TITLE)
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(conn::BTN_CANCEL.into(), fs::BTN_DELETE.into()))
+                .parent(&win)
+                .blocking_show_with_result();
+            matches!(answer, MessageDialogResult::Custom(l) if l == fs::BTN_DELETE)
+        };
+        fs::delete(r, &server.name, &fs::resolve(r, &path)?, &confirm)
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -151,6 +151,12 @@ export type Server = {
   hasPassword: boolean
 }
 export type SshConnState = 'connecting' | 'connected' | 'disconnected' | 'error'
+/** Voce di una cartella sul server; un link a una cartella ha `isDir` e `isLink`. */
+export type RemoteEntry = { name: string; path: string; isDir: boolean; isLink: boolean }
+/** Cartelle prima, poi per nome; `truncated` oltre 10 000 voci. */
+export type RemoteListing = { entries: RemoteEntry[]; truncated: boolean }
+/** `version` = `size:mtime` del file, da ridare a `sshWrite`. */
+export type RemoteContent = { text: string; version: string }
 /** Evento `ssh:state` e voce di `sshStates` (specchio di `ssh::conn::StateEvent`). */
 export type SshStateEvent = { id: string; state: SshConnState; message?: string }
 /** Campi modificabili di un server salvato; `id` assente = nuovo server. */

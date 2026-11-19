@@ -162,3 +162,17 @@ export const sshConnect = (id: string) => invoke<void>('ssh_connect', { id })
 export const sshDisconnect = (id: string) => invoke<void>('ssh_disconnect', { id })
 /** Stato delle connessioni note in questo avvio; un server assente è `disconnected`. */
 export const sshStates = () => invoke<SshStateEvent[]>('ssh_states')
+
+import type { RemoteListing, RemoteContent } from './types'
+/** File sul server (via SSH). I percorsi sono assoluti sul server; `~` e `~/…` li risolve il core. Errori: `FsError`
+ *  (`conflict`, `too_large`, `not_text`, `io`). */
+export const sshHome = (id: string) => invoke<string>('ssh_home', { id })
+export const sshList = (id: string, dir: string) => invoke<RemoteListing>('ssh_list', { id, dir })
+export const sshRead = (id: string, path: string) => invoke<RemoteContent>('ssh_read', { id, path })
+/** `version` = quella di `sshRead`; stringa vuota = crea un file nuovo. Restituisce la nuova versione. */
+export const sshWrite = (id: string, path: string, text: string, version: string) =>
+  invoke<string>('ssh_write', { id, path, text, version })
+export const sshMkdir = (id: string, path: string) => invoke<void>('ssh_mkdir', { id, path })
+export const sshRename = (id: string, from: string, to: string) => invoke<void>('ssh_rename', { id, from, to })
+/** Il core chiede la conferma con un dialogo nativo («Elimina sul server»); annullata = errore `io`. */
+export const sshDelete = (id: string, path: string) => invoke<void>('ssh_delete', { id, path })

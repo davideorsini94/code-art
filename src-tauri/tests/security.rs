@@ -325,7 +325,8 @@ const TRUST_GATED: &[&str] = &[
     "git_checkout", "git_create_branch", "git_delete_branch", "git_merge", "git_merge_abort", "git_init", "git_remote_op",
     "gh_remote", "gh_repo_create", "gh_pr_list", "gh_pr_checks", "gh_pr_create", "gh_pr_merge", "lsp_start", "lsp_send",
     "search_replace", "ssh_servers", "ssh_server_save", "ssh_server_delete", "ssh_password_set", "ssh_password_clear",
-    "ssh_connect", "ssh_disconnect", "ssh_states",
+    "ssh_connect", "ssh_disconnect", "ssh_states", "ssh_home", "ssh_list", "ssh_read", "ssh_write", "ssh_mkdir", "ssh_rename",
+    "ssh_delete",
 ];
 /// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel` e `lsp_stop`
 /// fermano soltanto processi già avviati dalla finestra stessa.
