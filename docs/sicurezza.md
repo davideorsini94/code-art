@@ -154,9 +154,11 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
-| `ssh_servers` | — | progetto fidato; elenco dei server salvati più gli alias concreti di `$HOME/.ssh/config` (sola lettura, ≤ 256 KB, file assente o illeggibile = nessuno); voci con host, utente o alias non validi scartate | finestra | F (lettura) |
+| `ssh_servers` | — | progetto fidato; elenco dei server salvati più gli alias concreti di `$HOME/.ssh/config` (sola lettura, ≤ 256 KB, file assente o illeggibile = nessuno); voci con host, utente o alias non validi scartate; `hasPassword` = esiste l'elemento nel Portachiavi (controllo senza leggere il segreto) | finestra | F (lettura), Portachiavi (esistenza) |
 | `ssh_server_save` | `input` | progetto fidato; `validate_server` (host e utente non vuoti, senza spazi né caratteri di controllo né `-` iniziale; porta 1–65535; nome ≤ 100); mai i server `config:` | finestra | — |
-| `ssh_server_delete` | `id` | progetto fidato; mai i server `config:` | finestra | — |
+| `ssh_server_delete` | `id` | progetto fidato; mai i server `config:`; elimina prima la password dal Portachiavi (assente = già fatto), poi il server | finestra | Portachiavi |
+| `ssh_password_set` | `id`, `password` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; password non vuota, ≤ 1024 byte, senza a capo né caratteri nulli; la password non compare mai in log, eventi, errori né torna alla WebView | finestra | Portachiavi (servizio `Code Art SSH`, account = id del server) |
+| `ssh_password_clear` | `id` | progetto fidato; `id` come `ssh_password_set`; assente = già fatto | finestra | Portachiavi |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
@@ -327,6 +329,15 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   (`ghp_`, `gho_`, `github_pat_`…), `GH_TOKEN`/`GITHUB_TOKEN` dell'ambiente di login, errori di serde e percorsi della home (`/Users/<nome>` → `~`). Test:
   `token_never_in_debug_or_errors`, `clean_hides_tokens_and_home_paths`.
 - Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
+- Password SSH (`ssh/keychain.rs`): solo nel Portachiavi di macOS, elementi "password generica" del servizio
+  `Code Art SSH` con account = id del server (FFI a mano verso `SecItem*`, tutto l'`unsafe` nel modulo `sys`). La
+  password arriva al core una volta (`ssh_password_set`) e non torna mai alla pagina: l'elenco dice solo se c'è
+  (`hasPassword`, controllo d'esistenza che non legge il segreto). Gli errori riportano operazione e codice
+  `OSStatus`, mai il segreto. La legge solo l'app stessa rilanciata da `ssh` come `SSH_ASKPASS` (`ssh/askpass.rs`):
+  con `CODEART_ASKPASS_ACCOUNT` nell'ambiente `main()` non avvia Tauri, risponde solo a prompt che finiscono con
+  `password:` (mai passphrase né domande sì/no sulla chiave del server) stampando la password su stdout ed esce 0,
+  altrimenti esce 1 senza stampare nulla. Test: `answers_only_password_prompts`, `password_rules_never_echo_the_secret`,
+  `keychain_round_trip` (ignorato: richiede il Portachiavi di login sbloccato).
 
 ## Dipendenze (2026-11-11)
 
@@ -379,3 +390,8 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 - Eventi di progetto: una pagina compromessa che conosce l'UUID di un altro progetto può ascoltarne gli eventi
   (vedi "Come arrivano gli eventi di un progetto").
 - La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).
+- **L'eseguibile dell'app consegna le password SSH a chi lo avvia in modalità askpass.** Un processo dell'utente
+  che lancia l'app con `CODEART_ASKPASS_ACCOUNT=<id>` e un prompt `…password:` ottiene la password su stdout, senza
+  la richiesta del Portachiavi che avrebbe leggendola direttamente (l'elemento è dell'app). Chi esegue codice come
+  l'utente ha comunque molte altre strade; il confine resta quello del modello di minaccia (pagina, non processi
+  locali).

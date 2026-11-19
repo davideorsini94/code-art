@@ -514,6 +514,7 @@ name = "code-art"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "core-foundation",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

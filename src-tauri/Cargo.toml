@@ -54,6 +54,8 @@ strip = "none"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSDockTile"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+# Portachiavi (Security.framework, FFI dichiarata a mano in ssh/keychain.rs); già nel Cargo.lock come dipendenza indiretta
+core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = "3.27.0"

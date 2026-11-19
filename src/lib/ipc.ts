@@ -151,3 +151,6 @@ import type { Server, ServerInput } from './types'
 export const sshServers = () => invoke<Server[]>('ssh_servers')
 export const sshServerSave = (input: ServerInput) => invoke<Server>('ssh_server_save', { input })
 export const sshServerDelete = (id: string) => invoke<void>('ssh_server_delete', { id })
+/** La password va solo nel Portachiavi del Mac (il core non la restituisce mai); `hasPassword` dice se c'è. */
+export const sshPasswordSet = (id: string, password: string) => invoke<void>('ssh_password_set', { id, password })
+export const sshPasswordClear = (id: string) => invoke<void>('ssh_password_clear', { id })

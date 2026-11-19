@@ -1,6 +1,8 @@
 //! SSH con l'`ssh` di sistema (nessuna libreria). Questo modulo: elenco dei server, salvati nel database dell'app
-//! oltre a quelli letti (sola lettura) da `~/.ssh/config`.
+//! oltre a quelli letti (sola lettura) da `~/.ssh/config`, e le loro password (solo nel Portachiavi).
+pub mod askpass;
 pub mod config;
+pub mod keychain;
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,30 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Dimensione massima di `~/.ssh/config` che si legge.
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+/// Lunghezza massima di una password salvata.
+const MAX_PASSWORD_BYTES: usize = 1024;
+
+/// Dove stanno le password dei server (account = id del server): il Portachiavi nell'app, una mappa nei test.
+pub trait Secrets {
+    fn has(&self, id: &str) -> Result<bool, String>;
+    fn set(&self, id: &str, secret: &str) -> Result<(), String>;
+    fn clear(&self, id: &str) -> Result<(), String>;
+}
+
+/// Il Portachiavi di macOS (servizio `Code Art SSH`).
+pub struct Keychain;
+
+impl Secrets for Keychain {
+    fn has(&self, id: &str) -> Result<bool, String> {
+        keychain::exists(id)
+    }
+    fn set(&self, id: &str, secret: &str) -> Result<(), String> {
+        keychain::set(id, secret)
+    }
+    fn clear(&self, id: &str) -> Result<(), String> {
+        keychain::delete(id)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,7 +121,7 @@ fn non_empty(v: &Option<String>) -> Option<String> {
 }
 
 /// Crea o aggiorna un server salvato (mai uno da config: il suo id inizia con `config:`).
-pub fn save_server(store: &Store, input: &ServerInput) -> Result<Server, String> {
+pub fn save_server(store: &Store, secrets: &dyn Secrets, input: &ServerInput) -> Result<Server, String> {
     validate_server(input)?;
     let id = match input.id.as_deref() {
         Some(id) if id.starts_with("config:") => return Err("I server di ~/.ssh/config non si modificano qui".into()),
@@ -107,6 +133,7 @@ pub fn save_server(store: &Store, input: &ServerInput) -> Result<Server, String>
         }
         None => uuid::Uuid::new_v4().to_string(),
     };
+    let has_password = input.id.is_some() && secrets.has(&id).unwrap_or(false);
     let server = Server {
         id,
         name: input.name.trim().to_string(),
@@ -116,17 +143,61 @@ pub fn save_server(store: &Store, input: &ServerInput) -> Result<Server, String>
         identity_file: non_empty(&input.identity_file),
         start_dir: non_empty(&input.start_dir),
         source: ServerSource::Saved,
-        has_password: false,
+        has_password,
     };
     store.ssh_server_upsert(&server)?;
     Ok(server)
 }
 
-pub fn delete_server(store: &Store, id: &str) -> Result<(), String> {
+/// Elimina un server salvato e la sua password: prima il Portachiavi, così non restano segreti senza server.
+pub fn delete_server(store: &Store, secrets: &dyn Secrets, id: &str) -> Result<(), String> {
     if id.starts_with("config:") {
         return Err("I server di ~/.ssh/config non si eliminano qui".into());
     }
+    secrets.clear(id)?;
     store.ssh_server_delete(id)
+}
+
+/// Password non vuota, al massimo 1024 byte, senza a capo né caratteri nulli (`ssh` legge una riga da askpass).
+/// I messaggi non riportano mai la password.
+pub fn validate_password(password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("Password: campo obbligatorio".into());
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(format!("Password: al massimo {MAX_PASSWORD_BYTES} byte"));
+    }
+    if password.contains(['\n', '\r', '\0']) {
+        return Err("Password: a capo e caratteri nulli non sono ammessi".into());
+    }
+    Ok(())
+}
+
+/// Le password si gestiscono solo per server esistenti: salvati, o alias attuali di `~/.ssh/config`.
+fn ensure_known(store: &Store, config_text: Option<&str>, id: &str) -> Result<(), String> {
+    let known = if id.starts_with("config:") {
+        config_text.map(config_servers).unwrap_or_default().iter().any(|s| s.id == id)
+    } else {
+        store.ssh_server_exists(id)?
+    };
+    if known { Ok(()) } else { Err("Server non trovato".into()) }
+}
+
+pub fn set_password(
+    store: &Store,
+    secrets: &dyn Secrets,
+    config_text: Option<&str>,
+    id: &str,
+    password: &str,
+) -> Result<(), String> {
+    ensure_known(store, config_text, id)?;
+    validate_password(password)?;
+    secrets.set(id, password)
+}
+
+pub fn clear_password(store: &Store, secrets: &dyn Secrets, config_text: Option<&str>, id: &str) -> Result<(), String> {
+    ensure_known(store, config_text, id)?;
+    secrets.clear(id)
 }
 
 fn config_servers(text: &str) -> Vec<Server> {
@@ -152,9 +223,13 @@ fn config_servers(text: &str) -> Vec<Server> {
 }
 
 /// Salvati (per nome) seguiti da quelli della config; `config_text` = contenuto di `~/.ssh/config`, se c'è.
-pub fn list_servers(store: &Store, config_text: Option<&str>) -> Result<Vec<Server>, String> {
+/// `has_password` dal Portachiavi (senza leggere il segreto; Portachiavi non accessibile = nessuna password).
+pub fn list_servers(store: &Store, secrets: &dyn Secrets, config_text: Option<&str>) -> Result<Vec<Server>, String> {
     let mut out = store.ssh_servers()?;
     out.extend(config_text.map(config_servers).unwrap_or_default());
+    for s in &mut out {
+        s.has_password = secrets.has(&s.id).unwrap_or(false);
+    }
     Ok(out)
 }
 
@@ -182,19 +257,32 @@ fn trusted_store(app: &AppHandle, window: &WebviewWindow) -> Result<Store, Strin
 #[tauri::command]
 pub async fn ssh_servers(app: AppHandle, window: WebviewWindow) -> Result<Vec<Server>, String> {
     let store = trusted_store(&app, &window)?;
-    crate::projects::off_main(move || list_servers(&store, read_user_config().as_deref())).await
+    crate::projects::off_main(move || list_servers(&store, &Keychain, read_user_config().as_deref())).await
 }
 
 #[tauri::command]
 pub async fn ssh_server_save(app: AppHandle, window: WebviewWindow, input: ServerInput) -> Result<Server, String> {
     let store = trusted_store(&app, &window)?;
-    crate::projects::off_main(move || save_server(&store, &input)).await
+    crate::projects::off_main(move || save_server(&store, &Keychain, &input)).await
 }
 
 #[tauri::command]
 pub async fn ssh_server_delete(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
     let store = trusted_store(&app, &window)?;
-    crate::projects::off_main(move || delete_server(&store, &id)).await
+    crate::projects::off_main(move || delete_server(&store, &Keychain, &id)).await
+}
+
+/// Salva la password di un server nel Portachiavi; la password non torna mai alla WebView.
+#[tauri::command]
+pub async fn ssh_password_set(app: AppHandle, window: WebviewWindow, id: String, password: String) -> Result<(), String> {
+    let store = trusted_store(&app, &window)?;
+    crate::projects::off_main(move || set_password(&store, &Keychain, read_user_config().as_deref(), &id, &password)).await
+}
+
+#[tauri::command]
+pub async fn ssh_password_clear(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    let store = trusted_store(&app, &window)?;
+    crate::projects::off_main(move || clear_password(&store, &Keychain, read_user_config().as_deref(), &id)).await
 }
 
 #[cfg(test)]
@@ -203,6 +291,23 @@ mod tests {
 
     fn input(name: &str, host: &str) -> ServerInput {
         ServerInput { name: name.into(), host: host.into(), ..Default::default() }
+    }
+
+    /// Portachiavi finto in memoria.
+    #[derive(Default)]
+    struct Fake(std::cell::RefCell<std::collections::HashMap<String, String>>);
+    impl Secrets for Fake {
+        fn has(&self, id: &str) -> Result<bool, String> {
+            Ok(self.0.borrow().contains_key(id))
+        }
+        fn set(&self, id: &str, secret: &str) -> Result<(), String> {
+            self.0.borrow_mut().insert(id.into(), secret.into());
+            Ok(())
+        }
+        fn clear(&self, id: &str) -> Result<(), String> {
+            self.0.borrow_mut().remove(id);
+            Ok(())
+        }
     }
 
     fn store() -> (tempfile::TempDir, Store) {
@@ -243,38 +348,38 @@ mod tests {
     #[test]
     fn save_update_list_delete() {
         let (_d, st) = store();
-        let a = save_server(&st, &input(" Beta ", "b.example.test")).unwrap();
+        let a = save_server(&st, &Fake::default(), &input(" Beta ", "b.example.test")).unwrap();
         assert_eq!(a.name, "Beta");
         let mut second = input("Alfa", "a.example.test");
         second.port = Some(2200);
         second.user = Some("dev".into());
         second.start_dir = Some("/home/dev".into());
-        let b = save_server(&st, &second).unwrap();
+        let b = save_server(&st, &Fake::default(), &second).unwrap();
         assert_ne!(a.id, b.id);
-        let names: Vec<_> = list_servers(&st, None).unwrap().into_iter().map(|s| s.name).collect();
+        let names: Vec<_> = list_servers(&st, &Fake::default(), None).unwrap().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["Alfa", "Beta"]);
         let mut upd = input("Alfa 2", "a2.example.test");
         upd.id = Some(b.id.clone());
-        let u = save_server(&st, &upd).unwrap();
+        let u = save_server(&st, &Fake::default(), &upd).unwrap();
         assert_eq!(u.id, b.id);
-        let all = list_servers(&st, None).unwrap();
+        let all = list_servers(&st, &Fake::default(), None).unwrap();
         assert_eq!(all.len(), 2);
         let got = all.iter().find(|s| s.id == b.id).unwrap();
         assert_eq!((got.host.as_str(), got.user.clone(), got.port), ("a2.example.test", None, None));
-        delete_server(&st, &a.id).unwrap();
-        assert_eq!(list_servers(&st, None).unwrap().len(), 1);
+        delete_server(&st, &Fake::default(), &a.id).unwrap();
+        assert_eq!(list_servers(&st, &Fake::default(), None).unwrap().len(), 1);
         let mut ghost = input("X", "x.example.test");
         ghost.id = Some("manca".into());
-        assert!(save_server(&st, &ghost).is_err());
-        assert!(save_server(&st, &input("X", "-bad")).is_err());
+        assert!(save_server(&st, &Fake::default(), &ghost).is_err());
+        assert!(save_server(&st, &Fake::default(), &input("X", "-bad")).is_err());
     }
 
     #[test]
     fn config_servers_are_listed_read_only() {
         let (_d, st) = store();
-        save_server(&st, &input("Mio", "m.example.test")).unwrap();
+        save_server(&st, &Fake::default(), &input("Mio", "m.example.test")).unwrap();
         let cfg = "Host web\n HostName w.example.test\n User dev\nHost solo\nHost -bad\n";
-        let all = list_servers(&st, Some(cfg)).unwrap();
+        let all = list_servers(&st, &Fake::default(), Some(cfg)).unwrap();
         let ids: Vec<_> = all.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(&ids[1..], ["config:web", "config:solo"]);
         assert_eq!(all[1].source, ServerSource::Config);
@@ -282,8 +387,53 @@ mod tests {
         assert_eq!(all[2].host, "solo");
         let mut edit = input("X", "x.example.test");
         edit.id = Some("config:web".into());
-        assert!(save_server(&st, &edit).is_err());
-        assert!(delete_server(&st, "config:web").is_err());
+        assert!(save_server(&st, &Fake::default(), &edit).is_err());
+        assert!(delete_server(&st, &Fake::default(), "config:web").is_err());
+    }
+
+    #[test]
+    fn passwords_live_in_secrets_for_known_servers_only() {
+        let (_d, st) = store();
+        let k = Fake::default();
+        let a = save_server(&st, &k, &input("A", "a.example.test")).unwrap();
+        assert!(!a.has_password);
+        let cfg = Some("Host web\n HostName w.example.test\n");
+        set_password(&st, &k, cfg, &a.id, "pàss word").unwrap();
+        set_password(&st, &k, cfg, "config:web", "altra").unwrap();
+        assert_eq!(k.0.borrow().get(&a.id).map(String::as_str), Some("pàss word"));
+        let all = list_servers(&st, &k, cfg).unwrap();
+        assert!(all.iter().all(|s| s.has_password));
+        // aggiornare un server conserva la password e lo dice
+        let mut upd = input("A2", "a.example.test");
+        upd.id = Some(a.id.clone());
+        assert!(save_server(&st, &k, &upd).unwrap().has_password);
+        // server sconosciuti: né salvati né alias attuali della config
+        for id in ["manca", "config:altro", ""] {
+            assert_eq!(set_password(&st, &k, cfg, id, "x").unwrap_err(), "Server non trovato");
+            assert_eq!(clear_password(&st, &k, cfg, id).unwrap_err(), "Server non trovato");
+        }
+        assert!(set_password(&st, &k, None, "config:web", "x").is_err());
+        clear_password(&st, &k, cfg, "config:web").unwrap();
+        assert!(!list_servers(&st, &k, cfg).unwrap()[1].has_password);
+        // eliminare il server elimina anche la password
+        delete_server(&st, &k, &a.id).unwrap();
+        assert!(k.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn password_rules_never_echo_the_secret() {
+        let (_d, st) = store();
+        let k = Fake::default();
+        let a = save_server(&st, &k, &input("A", "a.example.test")).unwrap();
+        let long = "s".repeat(1025);
+        for bad in ["", long.as_str(), "segreto\nriga", "segreto\r", "segreto\0"] {
+            let e = set_password(&st, &k, None, &a.id, bad).unwrap_err();
+            assert!(!e.contains("segreto") && !e.contains("sss"), "{e}");
+            assert!(e.starts_with("Password: "), "{e}");
+        }
+        assert!(k.0.borrow().is_empty());
+        set_password(&st, &k, None, &a.id, &"s".repeat(1024)).unwrap();
+        assert!(validate_password("è").is_ok());
     }
 
     #[test]

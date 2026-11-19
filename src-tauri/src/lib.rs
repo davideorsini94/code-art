@@ -143,6 +143,8 @@ pub fn run() {
             ssh::ssh_servers,
             ssh::ssh_server_save,
             ssh::ssh_server_delete,
+            ssh::ssh_password_set,
+            ssh::ssh_password_clear,
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,
