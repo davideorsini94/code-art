@@ -137,6 +137,27 @@ export type LspExitEvent = { id: number; code: number }
 /** Branch mostrato nella barra del titolo e repository a cui appartiene. */
 export type ProjectBranch = { repo: string; name: string }
 
+// ---- Database (specchio di src-tauri/src/db/mod.rs) ----
+export type DbKind = 'postgres' | 'mongo'
+export type DbTls = 'prefer' | 'require' | 'disable'
+export type DbConnection = {
+  id: string
+  kind: DbKind
+  name: string
+  host: string
+  port: number
+  user: string | null
+  database: string | null
+  tls: DbTls
+  acceptInvalidCerts: boolean
+  /** Server SSH (salvato o alias di `~/.ssh/config`) da cui passa il tunnel. */
+  sshServerId: string | null
+  hasPassword: boolean
+}
+/** `id` assente = nuova connessione; `port` assente = quella predefinita del tipo (5432 / 27017). */
+export type DbConnectionInput = Omit<DbConnection, 'id' | 'port' | 'hasPassword'> & { id?: string; port?: number | null }
+export type DbHistoryEntry = { id: number; text: string; atMs: number }
+
 // ---- SSH (specchio di src-tauri/src/ssh/mod.rs) ----
 export type ServerSource = 'saved' | 'config'
 export type Server = {

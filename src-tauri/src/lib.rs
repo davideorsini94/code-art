@@ -9,6 +9,7 @@ mod lsp;
 mod projects;
 mod pty;
 pub mod search;
+pub mod db;
 pub mod ssh;
 pub mod store;
 mod tools;
@@ -150,6 +151,13 @@ pub fn run() {
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
+            db::db_connections,
+            db::db_connection_save,
+            db::db_connection_delete,
+            db::db_password_set,
+            db::db_password_clear,
+            db::db_history,
+            db::db_history_add,
             ssh::ssh_servers,
             ssh::ssh_server_save,
             ssh::ssh_server_delete,

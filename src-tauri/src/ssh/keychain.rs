@@ -1,9 +1,11 @@
-//! Password dei server SSH nel Portachiavi di macOS: elementi "password generica" del servizio `Code Art SSH`, con
-//! account = id del server. Unico posto in cui stanno i segreti (mai SQLite, file, log, eventi). I messaggi d'errore
+//! Password nel Portachiavi di macOS: elementi "password generica" di un servizio (`Code Art SSH` per i server SSH,
+//! `Code Art DB` per i database), con account = id del server o della connessione. Unico posto in cui stanno i segreti (mai SQLite, file, log, eventi). I messaggi d'errore
 //! riportano solo l'operazione e il codice `OSStatus`, mai il segreto. Tutto il codice `unsafe` sta in `sys`.
 
-/// Servizio degli elementi del Portachiavi.
+/// Servizio delle password dei server SSH.
 pub const SERVICE: &str = "Code Art SSH";
+/// Servizio delle password delle connessioni ai database.
+pub const DB_SERVICE: &str = "Code Art DB";
 
 const ERR_SEC_SUCCESS: i32 = 0;
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -30,14 +32,14 @@ fn check_account(account: &str) -> Result<(), String> {
 }
 
 /// Salva (o sostituisce) la password di `account`.
-pub fn set(account: &str, secret: &str) -> Result<(), String> {
+pub fn set(service: &str, account: &str, secret: &str) -> Result<(), String> {
     check_account(account)?;
-    match sys::update(account, secret.as_bytes()) {
+    match sys::update(service, account, secret.as_bytes()) {
         ERR_SEC_SUCCESS => Ok(()),
-        ERR_SEC_ITEM_NOT_FOUND => match sys::add(account, secret.as_bytes()) {
+        ERR_SEC_ITEM_NOT_FOUND => match sys::add(service, account, secret.as_bytes()) {
             ERR_SEC_SUCCESS => Ok(()),
             // creato nel frattempo da un altro processo: si riprova l'aggiornamento
-            ERR_SEC_DUPLICATE_ITEM => match sys::update(account, secret.as_bytes()) {
+            ERR_SEC_DUPLICATE_ITEM => match sys::update(service, account, secret.as_bytes()) {
                 ERR_SEC_SUCCESS => Ok(()),
                 s => Err(status_error("salvare", s)),
             },
@@ -48,9 +50,9 @@ pub fn set(account: &str, secret: &str) -> Result<(), String> {
 }
 
 /// Password di `account`, `None` se non c'è.
-pub fn get(account: &str) -> Result<Option<String>, String> {
+pub fn get(service: &str, account: &str) -> Result<Option<String>, String> {
     check_account(account)?;
-    match sys::copy_data(account) {
+    match sys::copy_data(service, account) {
         Ok(None) => Ok(None),
         Ok(Some(bytes)) => String::from_utf8(bytes).map(Some).map_err(|_| status_error("leggere", ERR_SEC_DECODE)),
         Err(s) => Err(status_error("leggere", s)),
@@ -58,9 +60,9 @@ pub fn get(account: &str) -> Result<Option<String>, String> {
 }
 
 /// `true` se `account` ha una password; non legge il segreto (nessuna richiesta di accesso al dato).
-pub fn exists(account: &str) -> Result<bool, String> {
+pub fn exists(service: &str, account: &str) -> Result<bool, String> {
     check_account(account)?;
-    match sys::exists(account) {
+    match sys::exists(service, account) {
         ERR_SEC_SUCCESS => Ok(true),
         ERR_SEC_ITEM_NOT_FOUND => Ok(false),
         s => Err(status_error("controllare", s)),
@@ -68,9 +70,9 @@ pub fn exists(account: &str) -> Result<bool, String> {
 }
 
 /// Elimina la password di `account`; assente = già fatto.
-pub fn delete(account: &str) -> Result<(), String> {
+pub fn delete(service: &str, account: &str) -> Result<(), String> {
     check_account(account)?;
-    match sys::delete(account) {
+    match sys::delete(service, account) {
         ERR_SEC_SUCCESS | ERR_SEC_ITEM_NOT_FOUND => Ok(()),
         s => Err(status_error("eliminare", s)),
     }
@@ -79,7 +81,7 @@ pub fn delete(account: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 mod sys {
     //! FFI minima verso Security.framework (`SecItem*`), dizionari costruiti con `core-foundation`.
-    use super::{ERR_SEC_DECODE, ERR_SEC_ITEM_NOT_FOUND, ERR_SEC_SUCCESS, SERVICE};
+    use super::{ERR_SEC_DECODE, ERR_SEC_ITEM_NOT_FOUND, ERR_SEC_SUCCESS};
     use core_foundation::base::{CFType, CFTypeRef, OSStatus, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
@@ -114,14 +116,14 @@ mod sys {
     }
 
     /// Classe, servizio e account: identificano l'elemento.
-    fn base(account: &str) -> Vec<(CFType, CFType)> {
+    fn base(service: &str, account: &str) -> Vec<(CFType, CFType)> {
         // SAFETY (per le letture delle costanti `extern`): sono simboli di sola lettura di Security.framework,
         // inizializzati dal loader prima di `main`.
-        let (class, generic, service, acct) =
+        let (class, generic, k_service, acct) =
             unsafe { (kSecClass, kSecClassGenericPassword, kSecAttrService, kSecAttrAccount) };
         vec![
             (konst(class), konst(generic)),
-            (konst(service), CFString::new(SERVICE).into_CFType()),
+            (konst(k_service), CFString::new(service).into_CFType()),
             (konst(acct), CFString::new(account).into_CFType()),
         ]
     }
@@ -138,8 +140,8 @@ mod sys {
         pairs.push((konst(limit), konst(one)));
     }
 
-    pub fn add(account: &str, secret: &[u8]) -> OSStatus {
-        let mut pairs = base(account);
+    pub fn add(service: &str, account: &str, secret: &[u8]) -> OSStatus {
+        let mut pairs = base(service, account);
         pairs.push(value(secret));
         let attrs = Dict::from_CFType_pairs(&pairs);
         // SAFETY: `attrs` è un CFDictionary valido per tutta la chiamata; `result` nullo è ammesso (non serve
@@ -147,15 +149,15 @@ mod sys {
         unsafe { SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut()) }
     }
 
-    pub fn update(account: &str, secret: &[u8]) -> OSStatus {
-        let query = Dict::from_CFType_pairs(&base(account));
+    pub fn update(service: &str, account: &str, secret: &[u8]) -> OSStatus {
+        let query = Dict::from_CFType_pairs(&base(service, account));
         let changes = Dict::from_CFType_pairs(&[value(secret)]);
         // SAFETY: entrambi i dizionari sono validi per tutta la chiamata, che non ne prende possesso.
         unsafe { SecItemUpdate(query.as_concrete_TypeRef(), changes.as_concrete_TypeRef()) }
     }
 
-    pub fn exists(account: &str) -> OSStatus {
-        let mut pairs = base(account);
+    pub fn exists(service: &str, account: &str) -> OSStatus {
+        let mut pairs = base(service, account);
         match_one(&mut pairs);
         let query = Dict::from_CFType_pairs(&pairs);
         // SAFETY: nessun `kSecReturn*` nella richiesta e `result` nullo: la funzione dice solo se l'elemento c'è,
@@ -163,8 +165,8 @@ mod sys {
         unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), ptr::null_mut()) }
     }
 
-    pub fn copy_data(account: &str) -> Result<Option<Vec<u8>>, OSStatus> {
-        let mut pairs = base(account);
+    pub fn copy_data(service: &str, account: &str) -> Result<Option<Vec<u8>>, OSStatus> {
+        let mut pairs = base(service, account);
         match_one(&mut pairs);
         // SAFETY: vedi `base`.
         let ret = unsafe { kSecReturnData };
@@ -186,8 +188,8 @@ mod sys {
         }
     }
 
-    pub fn delete(account: &str) -> OSStatus {
-        let query = Dict::from_CFType_pairs(&base(account));
+    pub fn delete(service: &str, account: &str) -> OSStatus {
+        let query = Dict::from_CFType_pairs(&base(service, account));
         // SAFETY: `query` è valido per tutta la chiamata, che non ne prende possesso.
         unsafe { SecItemDelete(query.as_concrete_TypeRef()) }
     }
@@ -199,19 +201,19 @@ mod sys {
     use super::ERR_SEC_ITEM_NOT_FOUND;
     /// errSecUnimplemented
     const UNIMPLEMENTED: i32 = -4;
-    pub fn add(_: &str, _: &[u8]) -> i32 {
+    pub fn add(_: &str, _: &str, _: &[u8]) -> i32 {
         UNIMPLEMENTED
     }
-    pub fn update(_: &str, _: &[u8]) -> i32 {
+    pub fn update(_: &str, _: &str, _: &[u8]) -> i32 {
         ERR_SEC_ITEM_NOT_FOUND
     }
-    pub fn exists(_: &str) -> i32 {
+    pub fn exists(_: &str, _: &str) -> i32 {
         ERR_SEC_ITEM_NOT_FOUND
     }
-    pub fn copy_data(_: &str) -> Result<Option<Vec<u8>>, i32> {
+    pub fn copy_data(_: &str, _: &str) -> Result<Option<Vec<u8>>, i32> {
         Ok(None)
     }
-    pub fn delete(_: &str) -> i32 {
+    pub fn delete(_: &str, _: &str) -> i32 {
         ERR_SEC_ITEM_NOT_FOUND
     }
 }
@@ -221,14 +223,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn services_are_fixed_and_distinct() {
+        assert_eq!(SERVICE, "Code Art SSH");
+        assert_eq!(DB_SERVICE, "Code Art DB");
+    }
+
+    #[test]
     fn errors_name_the_operation_and_code_only() {
         let e = status_error("salvare", -25308);
         assert_eq!(e, "Portachiavi: impossibile salvare la password (Portachiavi bloccato o non accessibile, codice -25308)");
         assert!(status_error("leggere", -1).contains("codice -1"));
-        assert!(set("", "x").is_err());
-        assert!(get("").is_err());
-        assert!(exists("").is_err());
-        assert!(delete("").is_err());
+        assert!(set(SERVICE, "", "x").is_err());
+        assert!(get(SERVICE, "").is_err());
+        assert!(exists(SERVICE, "").is_err());
+        assert!(delete(SERVICE, "").is_err());
     }
 
     /// Usa il Portachiavi vero: serve il Portachiavi di login sbloccato (sessione utente di macOS, non CI né sandbox
@@ -238,16 +246,16 @@ mod tests {
     #[ignore = "richiede il Portachiavi di login sbloccato"]
     fn keychain_round_trip() {
         let account = format!("codeart-test-{}", uuid::Uuid::new_v4());
-        assert_eq!(get(&account).unwrap(), None);
-        assert!(!exists(&account).unwrap());
-        set(&account, "prima-è").unwrap();
-        assert!(exists(&account).unwrap());
-        assert_eq!(get(&account).unwrap().as_deref(), Some("prima-è"));
-        set(&account, "seconda").unwrap();
-        assert_eq!(get(&account).unwrap().as_deref(), Some("seconda"));
-        delete(&account).unwrap();
-        assert_eq!(get(&account).unwrap(), None);
-        assert!(!exists(&account).unwrap());
-        delete(&account).unwrap();
+        assert_eq!(get(SERVICE, &account).unwrap(), None);
+        assert!(!exists(SERVICE, &account).unwrap());
+        set(SERVICE, &account, "prima-è").unwrap();
+        assert!(exists(SERVICE, &account).unwrap());
+        assert_eq!(get(SERVICE, &account).unwrap().as_deref(), Some("prima-è"));
+        set(SERVICE, &account, "seconda").unwrap();
+        assert_eq!(get(SERVICE, &account).unwrap().as_deref(), Some("seconda"));
+        delete(SERVICE, &account).unwrap();
+        assert_eq!(get(SERVICE, &account).unwrap(), None);
+        assert!(!exists(SERVICE, &account).unwrap());
+        delete(SERVICE, &account).unwrap();
     }
 }

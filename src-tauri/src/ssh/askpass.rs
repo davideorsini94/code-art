@@ -96,7 +96,7 @@ fn run(account: Option<&str>, host: Option<&str>, prompt: &str) -> i32 {
     if !parent_path().is_some_and(|p| parent_ok(&p)) {
         return 1;
     }
-    let secret = keychain::get(account).ok().flatten();
+    let secret = keychain::get(keychain::SERVICE, account).ok().flatten();
     let Some(answer) = answer_for(prompt, host, secret.as_deref()) else {
         return 1;
     };

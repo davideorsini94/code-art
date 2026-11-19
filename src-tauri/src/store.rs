@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use crate::claude::Conversation;
+use crate::db::{DbConnection, DbKind, DbTls, HistoryEntry, HISTORY_KEEP};
 use crate::ssh::{Server, ServerSource};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -80,7 +81,29 @@ CREATE TABLE ssh_servers (
 );
 ";
 
-const MIGRATIONS: &[&str] = &[SCHEMA, SSH_SERVERS];
+const DB_CONNECTIONS: &str = "
+CREATE TABLE db_connections (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  user TEXT,
+  database TEXT,
+  tls TEXT NOT NULL,
+  accept_invalid_certs INTEGER NOT NULL DEFAULT 0,
+  ssh_server_id TEXT
+);
+CREATE TABLE db_history (
+  id INTEGER PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  at_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_db_history_connection ON db_history(connection_id, id);
+";
+
+const MIGRATIONS: &[&str] = &[SCHEMA, SSH_SERVERS, DB_CONNECTIONS];
 
 /// Applica le migrazioni mancanti, ciascuna in una transazione insieme al nuovo `user_version`. Un database di una
 /// versione più recente (app tornata indietro) resta com'è.
@@ -478,6 +501,108 @@ impl Store {
     pub fn ssh_server_delete(&self, id: &str) -> Result<()> {
         self.conn().execute("DELETE FROM ssh_servers WHERE id = ?1", [id]).map_err(err)?;
         Ok(())
+    }
+
+    pub fn db_connections(&self) -> Result<Vec<DbConnection>> {
+        let conn = self.conn();
+        let mut st = conn
+            .prepare(
+                "SELECT id, kind, name, host, port, user, database, tls, accept_invalid_certs, ssh_server_id
+                 FROM db_connections ORDER BY name COLLATE NOCASE, id",
+            )
+            .map_err(err)?;
+        let rows = st
+            .query_map([], |r| {
+                let kind: String = r.get(1)?;
+                let tls: String = r.get(7)?;
+                Ok(DbConnection {
+                    id: r.get(0)?,
+                    kind: DbKind::parse(&kind).unwrap_or(DbKind::Postgres),
+                    name: r.get(2)?,
+                    host: r.get(3)?,
+                    port: r.get(4)?,
+                    user: r.get(5)?,
+                    database: r.get(6)?,
+                    tls: DbTls::parse(&tls).unwrap_or(DbTls::Prefer),
+                    accept_invalid_certs: r.get(8)?,
+                    ssh_server_id: r.get(9)?,
+                    has_password: false,
+                })
+            })
+            .map_err(err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err)
+    }
+
+    pub fn db_connection_exists(&self, id: &str) -> Result<bool> {
+        self.conn()
+            .query_row("SELECT 1 FROM db_connections WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(err)
+    }
+
+    pub fn db_connection_upsert(&self, c: &DbConnection) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO db_connections(id, kind, name, host, port, user, database, tls, accept_invalid_certs, ssh_server_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, host = excluded.host,
+                   port = excluded.port, user = excluded.user, database = excluded.database, tls = excluded.tls,
+                   accept_invalid_certs = excluded.accept_invalid_certs, ssh_server_id = excluded.ssh_server_id",
+                params![c.id, c.kind.as_str(), c.name, c.host, c.port, c.user, c.database, c.tls.as_str(), c.accept_invalid_certs, c.ssh_server_id],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Elimina la connessione e la sua cronologia, in una transazione.
+    pub fn db_connection_delete(&self, id: &str) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute("DELETE FROM db_history WHERE connection_id = ?1", [id]).map_err(err)?;
+        tx.execute("DELETE FROM db_connections WHERE id = ?1", [id]).map_err(err)?;
+        tx.commit().map_err(err)
+    }
+
+    /// Cronologia della connessione, dalla più recente.
+    pub fn db_history(&self, connection_id: &str) -> Result<Vec<HistoryEntry>> {
+        let conn = self.conn();
+        let mut st = conn
+            .prepare("SELECT id, text, at_ms FROM db_history WHERE connection_id = ?1 ORDER BY id DESC")
+            .map_err(err)?;
+        let rows = st
+            .query_map([connection_id], |r| Ok(HistoryEntry { id: r.get(0)?, text: r.get(1)?, at_ms: r.get(2)? }))
+            .map_err(err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err)
+    }
+
+    /// Aggiunge `text` alla cronologia, salvo che sia uguale alla voce più recente; tiene le ultime `HISTORY_KEEP`
+    /// (le più vecchie si tolgono nella stessa transazione).
+    pub fn db_history_add(&self, connection_id: &str, text: &str, at_ms: i64) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(err)?;
+        let last: Option<String> = tx
+            .query_row(
+                "SELECT text FROM db_history WHERE connection_id = ?1 ORDER BY id DESC LIMIT 1",
+                [connection_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        if last.as_deref() != Some(text) {
+            tx.execute(
+                "INSERT INTO db_history(connection_id, text, at_ms) VALUES (?1, ?2, ?3)",
+                params![connection_id, text, at_ms],
+            )
+            .map_err(err)?;
+            tx.execute(
+                "DELETE FROM db_history WHERE connection_id = ?1 AND id NOT IN
+                 (SELECT id FROM db_history WHERE connection_id = ?1 ORDER BY id DESC LIMIT ?2)",
+                params![connection_id, HISTORY_KEEP as i64],
+            )
+            .map_err(err)?;
+        }
+        tx.commit().map_err(err)
     }
 
     pub fn setting_get(&self, key: &str) -> Result<Option<String>> {

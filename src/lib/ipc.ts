@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Project, ProjectBranch } from './types'
+import type { DbConnection, DbConnectionInput, DbHistoryEntry, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -186,3 +186,14 @@ export const sshUpload = (id: string, localPaths: string[], remoteDir: string) =
 export const sshDownload = (id: string, remotePaths: string[], localDir: string) =>
   invoke<string>('ssh_download', { id, remotePaths, localDir })
 export const sshTransferCancel = (transferId: string) => invoke<void>('ssh_transfer_cancel', { transferId })
+
+// ---- Database: connessioni salvate (le password stanno solo nel Portachiavi e non tornano mai qui) ----
+export const dbConnections = () => invoke<DbConnection[]>('db_connections')
+export const dbConnectionSave = (input: DbConnectionInput) => invoke<DbConnection>('db_connection_save', { input })
+export const dbConnectionDelete = (id: string) => invoke<void>('db_connection_delete', { id })
+export const dbPasswordSet = (id: string, password: string) => invoke<void>('db_password_set', { id, password })
+export const dbPasswordClear = (id: string) => invoke<void>('db_password_clear', { id })
+/** Dalla più recente; al massimo 200 voci. */
+export const dbHistory = (id: string) => invoke<DbHistoryEntry[]>('db_history', { id })
+/** Testo ≤ 100 KB; uguale alla voce più recente = non ripetuto. */
+export const dbHistoryAdd = (id: string, text: string) => invoke<void>('db_history_add', { id, text })
