@@ -557,6 +557,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tempfile",
+ "tokio",
  "tokio-postgres",
  "trash",
  "unicode-normalization",

@@ -20,6 +20,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const APPLICATION_NAME: &str = "Code Art";
 pub const NO_TLS: &str = "Il server non accetta TLS";
 pub const UNREACHABLE: &str = "Server non raggiungibile";
+pub const TIMED_OUT: &str = "Server non raggiungibile (tempo scaduto)";
 pub const LOST: &str = "Connessione al database persa";
 
 /// Dati per aprire una connessione (senza password e senza tunnel: quelli si passano a parte).
@@ -125,7 +126,7 @@ pub fn classify(sqlstate: Option<&str>, text: &str, password: Option<&str>) -> S
     clean
 }
 
-fn error_text(e: &tokio_postgres::Error) -> String {
+pub(super) fn error_text(e: &tokio_postgres::Error) -> String {
     use std::error::Error;
     let mut s = e.to_string();
     let mut src = e.source();
@@ -137,7 +138,7 @@ fn error_text(e: &tokio_postgres::Error) -> String {
     s
 }
 
-fn map_error(e: &tokio_postgres::Error, password: Option<&str>) -> String {
+pub(super) fn map_error(e: &tokio_postgres::Error, password: Option<&str>) -> String {
     classify(e.code().map(|c| c.code()), &error_text(e), password)
 }
 
@@ -146,6 +147,20 @@ type ConnFuture = Pin<Box<dyn Future<Output = Result<(), tokio_postgres::Error>>
 /// Apre il `Client` e la future della sua connessione (da far girare con `spawn`). Con la password esplicita
 /// (i test non passano dal Portachiavi).
 pub async fn open_client(p: &PgParams, password: Option<&str>, local_port: Option<u16>) -> Result<(Client, ConnFuture), String> {
+    // TCP + TLS + autenticazione, tutto entro il timeout
+    tokio::time::timeout(CONNECT_TIMEOUT, open_client_inner(p, password, local_port)).await.unwrap_or_else(|_| Err(TIMED_OUT.into()))
+}
+
+/// Il connettore TLS con le stesse regole della connessione (anche per l'annullamento delle query).
+pub fn tls_connector(p: &PgParams) -> Result<postgres_native_tls::MakeTlsConnector, String> {
+    let mut b = native_tls::TlsConnector::builder();
+    if p.accept_invalid_certs {
+        b.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true);
+    }
+    Ok(postgres_native_tls::MakeTlsConnector::new(b.build().map_err(|e| format!("Errore TLS: {e}"))?))
+}
+
+async fn open_client_inner(p: &PgParams, password: Option<&str>, local_port: Option<u16>) -> Result<(Client, ConnFuture), String> {
     let cfg = build_config(p, password, local_port);
     match p.tls {
         DbTls::Disable => {
@@ -153,12 +168,7 @@ pub async fn open_client(p: &PgParams, password: Option<&str>, local_port: Optio
             Ok((client, Box::pin(conn)))
         }
         DbTls::Prefer | DbTls::Require => {
-            let mut b = native_tls::TlsConnector::builder();
-            if p.accept_invalid_certs {
-                b.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true);
-            }
-            let tls = postgres_native_tls::MakeTlsConnector::new(b.build().map_err(|e| format!("Errore TLS: {e}"))?);
-            let (client, conn) = cfg.connect(tls).await.map_err(|e| map_error(&e, password))?;
+            let (client, conn) = cfg.connect(tls_connector(p)?).await.map_err(|e| map_error(&e, password))?;
             Ok((client, Box::pin(conn)))
         }
     }
@@ -169,8 +179,19 @@ struct Session {
     message: Option<String>,
     generation: u64,
     client: Option<Arc<Client>>,
+    cancel: Option<tokio_postgres::CancelToken>,
+    params: Option<PgParams>,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
     tunnel: Option<Tunnel>,
+}
+
+/// Una sessione viva, per eseguire query. `generation` cambia a ogni nuova connessione.
+#[derive(Clone)]
+pub struct Handle {
+    pub client: Arc<Client>,
+    pub cancel: tokio_postgres::CancelToken,
+    pub params: PgParams,
+    pub generation: u64,
 }
 
 pub type Emitter = Arc<dyn Fn(StateEvent) + Send + Sync>;
@@ -203,6 +224,16 @@ impl Sessions {
         }
     }
 
+    /// Tutto quel che serve per una query: client, token di annullamento, parametri (per il TLS) e generazione.
+    pub fn handle(&self, id: &str) -> Result<Handle, String> {
+        match lock(&self.map).get(id) {
+            Some(Session { state: ConnState::Connected, client: Some(c), cancel: Some(t), params: Some(p), generation, .. }) => {
+                Ok(Handle { client: c.clone(), cancel: t.clone(), params: p.clone(), generation: *generation })
+            }
+            _ => Err("Non connesso al database".into()),
+        }
+    }
+
     fn emit(&self, id: &str, state: ConnState, message: Option<String>) {
         (self.emit)(StateEvent { id: id.to_string(), state, message });
     }
@@ -211,7 +242,7 @@ impl Sessions {
     /// Restituisce la generazione e la vecchia voce, da chiudere fuori dal lucchetto.
     fn replace(&self, id: &str, state: ConnState, message: Option<String>) -> (u64, Option<Session>) {
         let generation = self.next.fetch_add(1, Ordering::Relaxed);
-        let old = lock(&self.map).insert(id.to_string(), Session { state, message, generation, client: None, task: None, tunnel: None });
+        let old = lock(&self.map).insert(id.to_string(), Session { state, message, generation, client: None, cancel: None, params: None, task: None, tunnel: None });
         (generation, old)
     }
 
@@ -244,7 +275,7 @@ impl Sessions {
             let generation = self.next.fetch_add(1, Ordering::Relaxed);
             map.insert(
                 id.to_string(),
-                Session { state: ConnState::Connecting, message: None, generation, client: None, task: None, tunnel: None },
+                Session { state: ConnState::Connecting, message: None, generation, client: None, cancel: None, params: None, task: None, tunnel: None },
             );
             generation
         };
@@ -326,6 +357,8 @@ impl Sessions {
             Some(s) if s.generation == generation => {
                 s.state = ConnState::Connected;
                 s.message = None;
+                s.cancel = Some(client.cancel_token());
+                s.params = Some(p.clone());
                 s.client = Some(Arc::new(client));
                 s.task = Some(task);
             }
@@ -348,6 +381,7 @@ impl Sessions {
                     s.state = ConnState::Disconnected;
                     s.message = Some(err.map(|e| format!("{LOST}: {}", sanitize(&e, None))).unwrap_or_else(|| LOST.into()));
                     s.client = None;
+                    s.cancel = None;
                     s.task = None;
                     s.tunnel.take()
                 }
@@ -449,7 +483,7 @@ mod tests {
     #[test]
     #[ignore = "avvia un cluster Postgres temporaneo (initdb e pg_ctl nel PATH)"]
     fn live_cluster_disable_and_password() {
-        let Some(cluster) = Cluster::start() else {
+        let Some(cluster) = crate::db::testutil::Cluster::start() else {
             eprintln!("initdb/pg_ctl non trovati: saltato");
             return;
         };
@@ -502,62 +536,5 @@ mod tests {
             }
             assert_eq!(sessions.states().iter().find(|s| s.id == "c3").unwrap().state, ConnState::Disconnected);
         });
-    }
-
-    /// Cluster temporaneo: `initdb` + `pg_ctl` in una cartella temporanea, porta libera, socket nella stessa cartella.
-    struct Cluster {
-        dir: tempfile::TempDir,
-        port: u16,
-        pg_ctl: std::path::PathBuf,
-    }
-
-    fn find_bin(name: &str) -> Option<std::path::PathBuf> {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path).chain([std::path::PathBuf::from("/opt/homebrew/bin")]).map(|d| d.join(name)).find(|p| p.is_file())
-    }
-
-    impl Cluster {
-        fn start() -> Option<Cluster> {
-            use std::process::Command;
-            let initdb = find_bin("initdb")?;
-            let pg_ctl = find_bin("pg_ctl")?;
-            let dir = tempfile::tempdir().unwrap();
-            let pw = dir.path().join("pw");
-            std::fs::write(&pw, "test-pass\n").unwrap();
-            let data = dir.path().join("data");
-            let st = Command::new(initdb)
-                .env("LC_ALL", "en_US.UTF-8")
-                .args(["-D"]).arg(&data)
-                .args(["-U", "codeart", "--auth=scram-sha-256", "--locale=en_US.UTF-8"])
-                .arg(format!("--pwfile={}", pw.display()))
-                .output()
-                .unwrap();
-            assert!(st.status.success(), "initdb: {}", String::from_utf8_lossy(&st.stderr));
-            let port = super::tunnel::pick_port().unwrap();
-            let opts = format!("-p {port} -k {} -c listen_addresses=127.0.0.1", dir.path().display());
-            let st = Command::new(&pg_ctl)
-                .env("LC_ALL", "en_US.UTF-8")
-                .args(["-D"]).arg(&data)
-                .args(["-o", &opts, "-w", "-l"]).arg(dir.path().join("log"))
-                .arg("start")
-                .output()
-                .unwrap();
-            assert!(st.status.success(), "pg_ctl start: {} {}", String::from_utf8_lossy(&st.stderr), std::fs::read_to_string(dir.path().join("log")).unwrap_or_default());
-            Some(Cluster { dir, port, pg_ctl })
-        }
-
-        fn stop(&self) {
-            let _ = std::process::Command::new(&self.pg_ctl)
-                .env("LC_ALL", "en_US.UTF-8")
-                .args(["-D"]).arg(self.dir.path().join("data"))
-                .args(["-m", "immediate", "-w", "stop"])
-                .output();
-        }
-    }
-
-    impl Drop for Cluster {
-        fn drop(&mut self) {
-            self.stop();
-        }
     }
 }

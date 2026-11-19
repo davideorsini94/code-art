@@ -2,6 +2,9 @@
 //! password (solo nel Portachiavi, servizio `Code Art DB`) e la cronologia delle query. Niente rete qui: le sessioni
 //! stanno nei moduli dei driver.
 pub mod pg;
+pub mod pg_query;
+#[cfg(test)]
+pub mod testutil;
 pub mod tunnel;
 
 use crate::ssh::{self, keychain, Secrets};
@@ -342,6 +345,66 @@ pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) ->
 pub async fn db_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<ssh::conn::StateEvent>, String> {
     ssh::trusted_store(&app, &window)?;
     Ok(app.state::<Arc<pg::Sessions>>().states())
+}
+
+/// Schemi, tabelle e viste della connessione (esclusi gli schemi di sistema).
+#[tauri::command]
+pub async fn db_pg_tree(app: AppHandle, window: WebviewWindow, id: String) -> Result<pg_query::PgTree, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    pg_query::tree(&sessions, &id).await
+}
+
+#[tauri::command]
+pub async fn db_pg_columns(app: AppHandle, window: WebviewWindow, id: String, schema: String, table: String) -> Result<Vec<pg_query::PgColumn>, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    pg_query::columns(&sessions, &id, &schema, &table).await
+}
+
+/// Esegue un testo SQL. `UPDATE`/`DELETE` senza `WHERE`, `DROP` e `TRUNCATE` (controllo lessicale di aiuto) chiedono
+/// prima una conferma nativa del core (titolo fisso, «Annulla» predefinito): rifiutata = `Err("annullato")`, nulla eseguito.
+#[tauri::command]
+pub async fn db_query(app: AppHandle, window: WebviewWindow, id: String, text: String) -> Result<pg_query::QueryResult, String> {
+    ssh::trusted_store(&app, &window)?;
+    let flags = pg_query::destructive(&text);
+    if !flags.is_empty() {
+        let message = pg_query::confirm_message(&flags);
+        let confirm = crate::git::write::NativeConfirm { app: app.clone(), window: window.clone() };
+        let ok = crate::projects::off_main(move || {
+            use crate::git::write::Confirm;
+            Ok(confirm.confirm(pg_query::DESTRUCTIVE_TITLE, &message, pg_query::BTN_RUN))
+        })
+        .await?;
+        if !ok {
+            return Err(pg_query::DECLINED.into());
+        }
+    }
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    app.state::<Arc<pg_query::Queries>>().inner().clone().query(&sessions, &id, &text).await
+}
+
+/// Pagina successiva di un risultato con cursore aperto.
+#[tauri::command]
+pub async fn db_query_more(app: AppHandle, window: WebviewWindow, result_id: u64) -> Result<pg_query::QueryPage, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    app.state::<Arc<pg_query::Queries>>().inner().clone().more(&sessions, result_id).await
+}
+
+#[tauri::command]
+pub async fn db_query_close(app: AppHandle, window: WebviewWindow, result_id: u64) -> Result<(), String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    app.state::<Arc<pg_query::Queries>>().inner().clone().close(&sessions, result_id).await
+}
+
+/// Annulla la query in corso sulla connessione (`CancelToken`, stesso TLS).
+#[tauri::command]
+pub async fn db_query_cancel(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    pg_query::cancel(&sessions, &id).await
 }
 
 #[cfg(test)]

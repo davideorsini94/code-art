@@ -96,6 +96,7 @@ pub fn run() {
                 let _ = handle.emit("db:state", e);
             });
             app.manage(Arc::new(db::pg::Sessions::new(ssh_conns, db_emit)));
+            app.manage(Arc::new(db::pg_query::Queries::new()));
             app.manage(Arc::new(ssh::transfer::Transfers::default()));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
@@ -169,6 +170,12 @@ pub fn run() {
             db::db_connect,
             db::db_disconnect,
             db::db_states,
+            db::db_pg_tree,
+            db::db_pg_columns,
+            db::db_query,
+            db::db_query_more,
+            db::db_query_close,
+            db::db_query_cancel,
             ssh::ssh_servers,
             ssh::ssh_server_save,
             ssh::ssh_server_delete,

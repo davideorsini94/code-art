@@ -205,3 +205,18 @@ export type ServerInput = {
   identityFile?: string | null
   startDir?: string | null
 }
+
+// ---- Postgres: albero e risultati ----
+export type PgTable = { name: string; kind: 'table' | 'view' }
+export type PgSchema = { name: string; tables: PgTable[] }
+export type PgTree = { schemas: PgSchema[] }
+export type PgColumn = { name: string; type: string; nullable: boolean; isPk: boolean }
+/** Il protocollo semplice non dà il tipo delle colonne: solo il nome. */
+export type DbQueryColumn = { name: string }
+/**
+ * Una pagina di righe: valori già testo, `null` = NULL (distinto da ''). Le celle oltre 64 KB arrivano troncate e
+ * sono elencate in `truncated` come coppie `[riga della pagina, colonna]`.
+ */
+export type DbQueryPage = { rows: (string | null)[][]; hasMore: boolean; truncated?: [number, number][]; notices?: string[] }
+/** `resultId` c'è solo se restano righe (cursore aperto); `affected` = conteggio di ogni istruzione (senza cursore). */
+export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[] }
