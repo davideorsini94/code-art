@@ -7,6 +7,7 @@
   import GitHubPanel from './GitHubPanel.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { git, stagedEntries, unstagedEntries } from '../../lib/stores/git.svelte'
+  import { terminals } from '../../lib/stores/terminals.svelte'
   import { projectStore } from '../../lib/stores/project.svelte'
 
   const trusted = $derived(projectStore.untrusted.length === 0)
@@ -62,10 +63,18 @@
               {#if st.entries.length > 0}
                 <span class="count" use:tooltip={`${st.entries.length} ${st.entries.length === 1 ? 'modifica' : 'modifiche'}`}>{st.entries.length}</span>
               {/if}
+              <button class="term" aria-label={`Apri un terminale in ${title(repo)}`} use:tooltip={`Apri un terminale in ${title(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
             </div>
           {/if}
           {#if open}
-          <SyncBar {repo} status={st} compact={!plain} />
+          {#if plain}
+            <div class="syncrow">
+              <div class="syncgrow"><SyncBar {repo} status={st} compact={false} /></div>
+              <button class="term" aria-label={`Apri un terminale in ${title(repo)}`} use:tooltip={`Apri un terminale in ${title(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
+            </div>
+          {:else}
+            <SyncBar {repo} status={st} compact={true} />
+          {/if}
           {#if st.merging}
             {@const n = st.entries.filter((e) => e.conflict).length}
             <div class="merge" role="status">
@@ -104,6 +113,10 @@
   .ab { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .count { padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--txt); font-size: 10.5px; font-variant-numeric: tabular-nums; }
   @media (prefers-reduced-motion: no-preference) { .toggle, .branch { transition: background var(--dur); } }
+  .syncrow { display: flex; align-items: center; gap: 6px; }
+  .syncgrow { flex: 1; min-width: 0; }
+  .term { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 4px; border: 0; border-radius: 6px; background: none; color: var(--dim); cursor: pointer; }
+  .term:hover { background: var(--glass); color: var(--txt); }
   .msg { color: var(--dim); }
   .norepo { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
   .err { color: var(--err); padding: 4px 8px; border-radius: 8px; background: var(--err-soft); white-space: pre-wrap; }

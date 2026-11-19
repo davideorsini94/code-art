@@ -10,14 +10,19 @@ vi.mock('../lib/ipc', () => ({
   fsTrash: vi.fn(),
   asFsError: (e: unknown) => ({ code: 'io', message: String(e) }),
 }))
-vi.mock('../lib/stores/project.svelte', () => ({
-  projectStore: { project: { id: 'p1', name: 'app', folders: ['/Users/dev/app'] }, untrusted: [] },
-}))
+const project = vi.hoisted(() => ({ project: { id: 'p1', name: 'app', folders: ['/Users/dev/app'] }, untrusted: [] as string[] }))
+vi.mock('../lib/stores/project.svelte', () => ({ projectStore: project }))
+const terminalsMock = vi.hoisted(() => ({ open: vi.fn() }))
+vi.mock('../lib/stores/terminals.svelte', () => ({ terminals: terminalsMock }))
 vi.mock('../lib/stores/editor.svelte', () => ({ editor: { active: null, open: vi.fn(), repath: vi.fn(), closeUnder: vi.fn() } }))
 
 import FileTree from './FileTree.svelte'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  project.untrusted = []
+  vi.clearAllMocks()
+})
 
 describe('FileTree project root', () => {
   it('cannot be renamed, trashed or dragged; a subfolder can', async () => {
@@ -37,5 +42,40 @@ describe('FileTree project root', () => {
     await fireEvent.contextMenu(sub)
     expect(screen.getByText('Rinomina')).toBeTruthy()
     expect(screen.getByText('Sposta nel Cestino')).toBeTruthy()
+  })
+})
+
+describe('FileTree: Apri terminale qui', () => {
+  it('opens a terminal in the root folder and in a subfolder', async () => {
+    render(FileTree)
+    await fireEvent.contextMenu(screen.getByText('app').closest('[role="treeitem"]')!)
+    await fireEvent.click(screen.getByText('Apri terminale qui'))
+    expect(terminalsMock.open).toHaveBeenCalledWith('/Users/dev/app')
+
+    await waitFor(() => expect(screen.getByText('src')).toBeTruthy())
+    await fireEvent.contextMenu(screen.getByText('src').closest('[role="treeitem"]')!)
+    await fireEvent.click(screen.getByText('Apri terminale qui'))
+    expect(terminalsMock.open).toHaveBeenLastCalledWith('/Users/dev/app/src')
+  })
+
+  it('opens the containing folder for a file', async () => {
+    const ipc = await import('../lib/ipc')
+    vi.mocked(ipc.fsList).mockImplementation(async (dir: string) =>
+      dir === '/Users/dev/app' ? [{ name: 'a.ts', path: '/Users/dev/app/a.ts', isDir: false, ignored: false }] : [])
+    render(FileTree)
+    await waitFor(() => expect(screen.getByText('a.ts')).toBeTruthy())
+    await fireEvent.contextMenu(screen.getByText('a.ts').closest('[role="treeitem"]')!)
+    await fireEvent.click(screen.getByText('Apri terminale qui'))
+    expect(terminalsMock.open).toHaveBeenCalledWith('/Users/dev/app')
+  })
+
+  it('is disabled for an untrusted project', async () => {
+    project.untrusted = ['/Users/dev/app']
+    render(FileTree)
+    await fireEvent.contextMenu(screen.getByText('app').closest('[role="treeitem"]')!)
+    const item = screen.getByText('Apri terminale qui')
+    expect(item.getAttribute('aria-disabled')).toBe('true')
+    await fireEvent.click(item)
+    expect(terminalsMock.open).not.toHaveBeenCalled()
   })
 })

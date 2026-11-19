@@ -121,6 +121,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            pty::pty_pick_cwd,
             claude::sessions::conv_list,
             claude::sessions::conv_history,
             claude::sessions::conv_search,

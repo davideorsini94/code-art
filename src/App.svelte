@@ -23,6 +23,7 @@
   import { search } from './lib/stores/search.svelte'
   import { guardWindowDrops } from './lib/dropguard'
   import { onMount, untrack } from 'svelte'
+  import { terminals } from './lib/stores/terminals.svelte'
   import { tooltip } from './lib/tooltip'
   import { clampWidths, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
@@ -78,7 +79,6 @@
     ['46px', ...cols.flatMap(({ col }) => (collapsed.has(col) ? ['0px', '0px'] : [`${widths[col]}px`, '6px'])), 'minmax(240px, 1fr)'].join(' '),
   )
 
-  let termVisible = $state(false)
   let termHeight = $state(240)
   const MIN_TERM = 100
 
@@ -88,11 +88,11 @@
       if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
         e.preventDefault()
         e.stopPropagation()
-        termVisible = !termVisible
+        terminals.toggle()
       }
     }
     window.addEventListener('keydown', onKey, true)
-    hooks.toggleTerminal = () => (termVisible = !termVisible)
+    hooks.toggleTerminal = () => terminals.toggle()
     hooks.revealSidebar = () => {
       if (collapsed.has('sidebar')) toggle('sidebar')
     }
@@ -207,8 +207,8 @@
     <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor">
       <div class="editor-area"><EditorPane /></div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="vhandle" class:hidden={!termVisible} use:tooltip={'Trascina per ridimensionare il terminale'} onpointerdown={startTermResize}></div>
-      <div class="term-area" class:hidden={!termVisible} style:height="{termHeight}px"><TerminalPane visible={termVisible} /></div>
+      <div class="vhandle" class:hidden={!terminals.visible} use:tooltip={'Trascina per ridimensionare il terminale'} onpointerdown={startTermResize}></div>
+      <div class="term-area" class:hidden={!terminals.visible} style:height="{termHeight}px"><TerminalPane visible={terminals.visible} /></div>
     </section>
   </main>
   {/if}

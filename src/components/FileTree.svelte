@@ -5,6 +5,7 @@
   import { tooltip } from '../lib/tooltip'
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
+  import { terminals } from '../lib/stores/terminals.svelte'
   import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
   import FileIcon from './FileIcon.svelte'
   import { iconFor } from '../lib/fileicons'
@@ -76,7 +77,7 @@
 
   // il menu resta dentro la finestra (come quello delle conversazioni)
   const MENU_W = 180
-  const MENU_H = 150
+  const MENU_H = 180
   const menuAt = (x: number, y: number) => ({
     x: Math.max(4, Math.min(x, window.innerWidth - MENU_W - 4)),
     y: Math.max(4, Math.min(y, window.innerHeight - MENU_H - 4)),
@@ -129,6 +130,11 @@
       })
     }
     for (const d of Object.keys(children)) void load(d)
+  }
+
+  function openTerminal(e: DirEntry) {
+    menu = null
+    terminals.open(e.isDir ? e.path : parentOf(e.path))
   }
 
   async function trash(e: DirEntry) {
@@ -246,6 +252,7 @@
       <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Cambia il nome'} onclick={() => !readOnly && startRename(menu!.entry)}>Rinomina</button>
       <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: sola lettura' : 'Sposta nel Cestino (si può recuperare)'} onclick={() => !readOnly && void trash(menu!.entry)}>Sposta nel Cestino</button>
     {/if}
+    <button role="menuitem" aria-disabled={readOnly} use:tooltip={readOnly ? 'Cartella non fidata: terminale disattivato' : 'Apri un terminale in questa cartella'} onclick={() => !readOnly && openTerminal(menu!.entry)}>Apri terminale qui</button>
   </div>
 {/if}
 

@@ -22,7 +22,8 @@ All of it in a dark "liquid glass" theme, with editor, file previews, terminal, 
 |---|---|---|
 | 1. The core | Per-project windows, file tree, editor, terminal, Claude conversations with living titles and statuses, file previews, liquid glass theme | done |
 | 2. Developer tools | Git and GitHub (commit, branch, merge, pull requests, repo creation), project-wide search and replace, language servers (completion, hover, definitions, diagnostics) | done |
-| 3. SSH | Saved servers, remote folders in the tree, drag and drop between Mac and server, remote terminal | planned |
+| 3a. Terminals | Open a terminal in any folder or repository of the project (file tree, Git view, folder picker), tabs titled with folder and branch, rename and reorder | done |
+| 3b. SSH | Saved servers, remote folders in the tree, drag and drop between Mac and server, remote terminal | planned |
 | 4. Databases | PostgreSQL, MongoDB, Oracle: queries, editable result grid | planned |
 
 The full design is in [`docs/superpowers/specs`](docs/superpowers/specs/2026-11-11-code-art-ide-design.md) and the stage 1 plan in [`docs/superpowers/plans`](docs/superpowers/plans/2026-11-11-code-art-tappa-1-il-cuore.md) (both in Italian).

@@ -48,6 +48,7 @@ export const ptySpawn = (cwd: string, cols: number, rows: number) => invoke<{ id
 export const ptyWrite = (id: number, data: string) => invoke<void>('pty_write', { id, data })
 export const ptyResize = (id: number, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
 export const ptyKill = (id: number) => invoke<void>('pty_kill', { id })
+export const ptyPickCwd = () => invoke<string | null>('pty_pick_cwd')
 
 // ---- conversazioni ----
 import type { ChatItem, Conversation } from './types'

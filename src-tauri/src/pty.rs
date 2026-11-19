@@ -228,6 +228,28 @@ pub async fn pty_kill(window: WebviewWindow, ptys: State<'_, Ptys>, id: u32) -> 
     blocking(move || p.kill(&l, id)).await
 }
 
+/// Valida la cartella scelta per un terminale: dentro le cartelle del progetto (symlink risolti) e davvero una cartella.
+fn validate_cwd(roots: &[PathBuf], picked: &Path) -> Result<PathBuf, String> {
+    let cwd = ensure_inside(roots, picked).map_err(|_| "La cartella deve stare dentro il progetto".to_string())?;
+    if !cwd.is_dir() {
+        return Err("cartella inesistente".into());
+    }
+    Ok(cwd)
+}
+
+/// Selettore nativo di cartella per il terminale, a partire dalla cartella principale del progetto.
+/// `None` = annullato. Restituisce il percorso validato (non concede fiducia: `pty_spawn` la richiede).
+#[tauri::command]
+pub async fn pty_pick_cwd(app: AppHandle, window: WebviewWindow, store: State<'_, Store>) -> Result<Option<String>, String> {
+    let roots = roots_of(&window, &store).map_err(|e| e.message)?;
+    let start = roots.first().cloned();
+    let Some(picked) = crate::projects::pick_folder_in(&app, &window, "Apri un terminale in…", start).await? else {
+        return Ok(None);
+    };
+    let cwd = blocking(move || validate_cwd(&roots, Path::new(&picked))).await?;
+    Ok(Some(cwd.to_string_lossy().into_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +345,26 @@ mod tests {
         let (id, _o, _rx) = start(&p, "w1");
         assert!(p.resize("w1", id, 80, 0).is_err());
         p.kill_owner("w1");
+    }
+
+    #[test]
+    fn validate_cwd_accepts_subfolder_and_rejects_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("proj");
+        let out = d.path().join("fuori");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(root.join("f.txt"), "x").unwrap();
+        let roots = vec![root.clone()];
+        let ok = validate_cwd(&roots, &root.join("sub")).unwrap();
+        assert!(ok.ends_with("sub"));
+        assert!(validate_cwd(&roots, &out).is_err());
+        assert_eq!(validate_cwd(&roots, &out).unwrap_err(), "La cartella deve stare dentro il progetto");
+        assert_eq!(validate_cwd(&roots, &root.join("f.txt")).unwrap_err(), "cartella inesistente");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&out, root.join("link")).unwrap();
+            assert!(validate_cwd(&roots, &root.join("link")).is_err());
+        }
     }
 }

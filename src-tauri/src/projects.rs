@@ -93,13 +93,15 @@ fn head_branch(root: &str) -> Option<String> {
     }
 }
 
-/// Branch per la barra del titolo: con un solo repository nel progetto, il suo; con più repository, quello che
+/// Branch per la barra del titolo: con un solo repository nel progetto, il suo (senza `file`, o se `file` ci sta dentro); con più repository, quello che
 /// contiene `file` (il file attivo nell'editor; usato solo come prefisso di percorso); altrimenti nessuno.
 pub fn branch(store: &Store, id: &str, file: Option<&str>) -> Result<Option<ProjectBranch>> {
     let p = must_get(store, id)?;
     let repos = crate::git::repos_in(&p.folders);
     let repo = match (repos.as_slice(), file) {
-        ([one], _) => one,
+        ([one], None) => one,
+        ([one], Some(f)) if Path::new(f).starts_with(one) => one,
+        ([_], Some(_)) => return Ok(None),
         ([], _) | (_, None) => return Ok(None),
         (many, Some(f)) => match many.iter().filter(|r| Path::new(f).starts_with(r)).max_by_key(|r| r.len()) {
             Some(r) => r,
@@ -290,7 +292,20 @@ async fn pick_folder_for(app: &AppHandle, window: &WebviewWindow, title: &str) -
 
 /// Selettore nativo di cartella come foglio della finestra, senza concedere fiducia. `None` = annullato.
 pub(crate) async fn pick_folder(app: &AppHandle, window: &WebviewWindow, title: &str) -> Result<Option<String>> {
-    let dialog = app.dialog().file().set_title(title).set_parent(window);
+    pick_folder_in(app, window, title, None).await
+}
+
+/// Come `pick_folder`, partendo da `start` se indicata.
+pub(crate) async fn pick_folder_in(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    title: &str,
+    start: Option<std::path::PathBuf>,
+) -> Result<Option<String>> {
+    let mut dialog = app.dialog().file().set_title(title).set_parent(window);
+    if let Some(dir) = start {
+        dialog = dialog.set_directory(dir);
+    }
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
         .await
         .map_err(|e| e.to_string())?;
@@ -719,6 +734,23 @@ mod tests {
     }
 
     #[test]
+    fn branch_accepts_a_directory_and_picks_the_deepest_repo() {
+        let (d, s) = store();
+        let ws = d.path().join("ws");
+        for (r, b) in [("a", "dev"), ("b", "main")] {
+            std::fs::create_dir_all(ws.join(r).join(".git")).unwrap();
+            std::fs::write(ws.join(r).join(".git/HEAD"), format!("ref: refs/heads/{b}\n")).unwrap();
+        }
+        std::fs::create_dir_all(ws.join("b/src/deep")).unwrap();
+        let p = open_folder(&s, ws.to_str().unwrap()).unwrap();
+        let root = p.folders[0].clone();
+        let got = branch(&s, &p.id, Some(&format!("{root}/b/src/deep"))).unwrap().unwrap();
+        assert_eq!((got.repo.as_str(), got.name.as_str()), (format!("{root}/b").as_str(), "main"));
+        let got = branch(&s, &p.id, Some(&format!("{root}/a"))).unwrap().unwrap();
+        assert_eq!(got.name, "dev");
+    }
+
+    #[test]
     fn branch_with_nested_repos_follows_the_active_file() {
         let (d, s) = store();
         let ws = d.path().join("ws");
@@ -737,6 +769,23 @@ mod tests {
         // un solo repository: il suo, con o senza file
         std::fs::remove_dir_all(ws.join("a")).unwrap();
         crate::git::forget_nested();
+        assert_eq!(branch(&s, &p.id, None).unwrap().map(|b| b.name).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn branch_with_one_repo_requires_containment_when_a_path_is_given() {
+        let (d, s) = store();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(ws.join("api/.git")).unwrap();
+        std::fs::write(ws.join("api/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(ws.join("api/src")).unwrap();
+        std::fs::create_dir_all(ws.join("docs")).unwrap();
+        crate::git::forget_nested();
+        let p = open_folder(&s, ws.to_str().unwrap()).unwrap();
+        let root = p.folders[0].clone();
+        assert_eq!(branch(&s, &p.id, Some(&format!("{root}/docs"))).unwrap(), None);
+        assert_eq!(branch(&s, &p.id, Some(&format!("{root}/api-old"))).unwrap(), None);
+        assert_eq!(branch(&s, &p.id, Some(&format!("{root}/api/src"))).unwrap().map(|b| b.name).as_deref(), Some("main"));
         assert_eq!(branch(&s, &p.id, None).unwrap().map(|b| b.name).as_deref(), Some("main"));
     }
 }
