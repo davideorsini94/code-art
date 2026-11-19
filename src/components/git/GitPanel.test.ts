@@ -10,6 +10,9 @@ vi.mock('../../lib/ipc', () => ipc)
 const editor = vi.hoisted(() => ({ open: vi.fn(), openDiff: vi.fn(), tabs: [] as { key: string; dirty: boolean }[] }))
 vi.mock('../../lib/stores/editor.svelte', () => ({ editor }))
 
+const terminalsMock = vi.hoisted(() => ({ open: vi.fn() }))
+vi.mock('../../lib/stores/terminals.svelte', () => ({ terminals: terminalsMock }))
+
 import GitPanel from './GitPanel.svelte'
 import { git } from '../../lib/stores/git.svelte'
 import { resetTooltipForTests } from '../../lib/tooltip'
@@ -256,9 +259,9 @@ describe('GitPanel nested repositories', () => {
     await mountWs([BE, WEB], { [BE]: dirty, [WEB]: clean })
     const be = screen.getByRole('region', { name: 'suis-be' })
     const web = screen.getByRole('region', { name: 'apps/web' })
-    expect(within(be).getByRole('button', { name: /suis-be/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(within(be).getByRole('button', { name: /^suis-be/ }).getAttribute('aria-expanded')).toBe('true')
     expect(within(be).getByText('x.ts')).toBeTruthy()
-    const toggle = within(web).getByRole('button', { name: /apps\/web/ })
+    const toggle = within(web).getByRole('button', { name: /^apps\/web/ })
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(within(web).queryByRole('button', { name: 'Fetch' })).toBeNull()
     // intestazione compatta: branch, ahead/behind e numero di modifiche
@@ -268,7 +271,7 @@ describe('GitPanel nested repositories', () => {
     await fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(within(web).getByRole('button', { name: 'Fetch' })).toBeTruthy()
-    await fireEvent.click(within(be).getByRole('button', { name: /suis-be/ }))
+    await fireEvent.click(within(be).getByRole('button', { name: /^suis-be/ }))
     expect(within(be).queryByText('x.ts')).toBeNull()
   })
 
@@ -286,5 +289,26 @@ describe('GitPanel nested repositories', () => {
     render(GitPanel)
     expect(await screen.findByRole('button', { name: 'Inizializza docs' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Inizializza ws' })).toBeNull()
+  })
+})
+
+describe('GitPanel: terminale', () => {
+  it('single repo: the button next to the sync bar opens a terminal in the repo', async () => {
+    await mount()
+    const btn = screen.getByRole('button', { name: 'Apri un terminale in app' })
+    expect(tipText(btn)).toBe('Apri un terminale in app')
+    await fireEvent.click(btn)
+    expect(terminalsMock.open).toHaveBeenCalledWith(REPO)
+  })
+
+  it('multiple repos: each header has its own button', async () => {
+    const R2 = '/Users/dev/app/api'
+    ipc.gitRepos.mockResolvedValue([REPO, R2])
+    ipc.gitStatus.mockImplementation(async (r: string) => status({ root: r }))
+    render(GitPanel)
+    const btn = await screen.findByRole('button', { name: 'Apri un terminale in api' })
+    await fireEvent.click(btn)
+    expect(terminalsMock.open).toHaveBeenCalledWith(R2)
+    expect(screen.getAllByRole('button', { name: /Apri un terminale in/ }).length).toBe(2)
   })
 })
