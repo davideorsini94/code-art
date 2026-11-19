@@ -9,6 +9,7 @@ mod lsp;
 mod projects;
 mod pty;
 pub mod search;
+pub mod ssh;
 pub mod store;
 mod tools;
 mod trasher;
@@ -78,6 +79,15 @@ pub fn run() {
             app.manage(titles);
             app.manage(store.clone());
             app.manage(life.clone());
+            // connessioni SSH: valgono per tutta l'app (un server può comparire in più finestre), quindi `ssh:state`
+            // va a tutte le finestre; non contiene segreti (id del server, stato, messaggio d'errore di ssh)
+            let handle = app.handle().clone();
+            let emit: ssh::conn::Emitter = Arc::new(move |e: ssh::conn::StateEvent| {
+                use tauri::Emitter;
+                let _ = handle.emit("ssh:state", e);
+            });
+            app.manage(Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit)));
+            app.manage(Arc::new(ssh::transfer::Transfers::default()));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
             projects::rebuild_menu(app.handle())?;
@@ -122,6 +132,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_pick_cwd,
+            pty::pty_spawn_ssh,
             claude::sessions::conv_list,
             claude::sessions::conv_history,
             claude::sessions::conv_search,
@@ -139,6 +150,24 @@ pub fn run() {
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
+            ssh::ssh_servers,
+            ssh::ssh_server_save,
+            ssh::ssh_server_delete,
+            ssh::ssh_password_set,
+            ssh::ssh_password_clear,
+            ssh::ssh_connect,
+            ssh::ssh_disconnect,
+            ssh::ssh_states,
+            ssh::ssh_home,
+            ssh::ssh_list,
+            ssh::ssh_read,
+            ssh::ssh_write,
+            ssh::ssh_mkdir,
+            ssh::ssh_rename,
+            ssh::ssh_delete,
+            ssh::transfer::ssh_upload,
+            ssh::transfer::ssh_download,
+            ssh::transfer::ssh_transfer_cancel,
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,
@@ -199,6 +228,10 @@ pub fn run() {
                 app.state::<Arc<lsp::Lsp>>().stop_all();
                 // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
                 app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                // connessioni SSH condivise: `ssh -O exit` prima di fermare i processi (servono `run_tool`)
+                if let Some(c) = app.try_state::<Arc<ssh::conn::Connections>>() {
+                    c.close_all();
+                }
                 tools::stop_all();
             }
             _ => {}

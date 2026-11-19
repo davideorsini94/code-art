@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
@@ -9,6 +9,7 @@ vi.mock('../lib/ipc', () => ({
   fsRename: vi.fn(),
   fsTrash: vi.fn(),
   asFsError: (e: unknown) => ({ code: 'io', message: String(e) }),
+  sshDownload: vi.fn(async () => 't1'),
 }))
 const project = vi.hoisted(() => ({ project: { id: 'p1', name: 'app', folders: ['/Users/dev/app'] }, untrusted: [] as string[] }))
 vi.mock('../lib/stores/project.svelte', () => ({ projectStore: project }))
@@ -16,6 +17,7 @@ const terminalsMock = vi.hoisted(() => ({ open: vi.fn() }))
 vi.mock('../lib/stores/terminals.svelte', () => ({ terminals: terminalsMock }))
 vi.mock('../lib/stores/editor.svelte', () => ({ editor: { active: null, open: vi.fn(), repath: vi.fn(), closeUnder: vi.fn() } }))
 
+import * as ipc from '../lib/ipc'
 import FileTree from './FileTree.svelte'
 
 afterEach(() => {
@@ -77,5 +79,18 @@ describe('FileTree: Apri terminale qui', () => {
     expect(item.getAttribute('aria-disabled')).toBe('true')
     await fireEvent.click(item)
     expect(terminalsMock.open).not.toHaveBeenCalled()
+  })
+})
+
+describe('FileTree drops from the server', () => {
+  it('downloads a dragged remote entry into the folder it is dropped on', async () => {
+    vi.mocked(ipc.fsList).mockImplementation((async (dir: string) => (dir === '/Users/dev/app' ? [{ name: 'src', path: '/Users/dev/app/src', isDir: true, ignored: false }] : [])) as never)
+    vi.mocked(ipc.sshDownload).mockResolvedValue('t1')
+    render(FileTree)
+    const dir = (await screen.findByText('src')).closest('[role="treeitem"]')!
+    const drop = createEvent.drop(dir)
+    Object.defineProperty(drop, 'dataTransfer', { value: { getData: (t: string) => (t === 'application/x-codeart-remote' ? JSON.stringify({ serverId: 's1', path: '/home/dev/a.ts' }) : '') } })
+    await fireEvent(dir, drop)
+    await waitFor(() => expect(ipc.sshDownload).toHaveBeenCalledWith('s1', ['/home/dev/a.ts'], '/Users/dev/app/src'))
   })
 })

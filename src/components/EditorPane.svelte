@@ -10,6 +10,7 @@
   import { tooltip } from '../lib/tooltip'
   import { relativeToFolders } from '../lib/conv/paths'
   import { lspStore } from '../lib/stores/lsp.svelte'
+  import { ssh } from '../lib/stores/ssh.svelte'
   import { LANG_LABEL, languageForPath } from '../lib/lsp/languages'
   import InfoToast from './InfoToast.svelte'
   import { parseConflicts, resolveEdit, type Conflict, type Pick } from '../lib/conflicts'
@@ -41,7 +42,7 @@
   const mdMode = $derived<MarkdownMode>(mdActive ? editor.modeOf(mdActive.path) : 'edit')
   const showCode = $derived(!!active && isTextTab(active) && (!mdActive || mdMode !== 'preview'))
   const showPreview = $derived(!!mdActive && mdMode !== 'edit')
-  const showBinary = $derived(!!active && !active.diff && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
+  const showBinary = $derived(!!active && !active.diff && !active.remote && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
   const showViewer = $derived(!!active && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
   const MODES: [MarkdownMode, string, string][] = [['preview', 'Anteprima', 'Mostra solo l\'anteprima'], ['edit', 'Modifica', 'Mostra solo il codice'], ['split', 'Affiancate', 'Codice e anteprima affiancati']]
 
@@ -209,15 +210,17 @@
     })
   }
   onDestroy(() => lspMod?.dispose())
-  const lspLang = $derived(active && isTextTab(active) ? languageForPath(active.path) : null)
+  const lspLang = $derived(active && !active.remote && isTextTab(active) ? languageForPath(active.path) : null)
   const lspInfo = $derived(lspLang ? lspStore.status[lspLang] : undefined)
   const lspTip = $derived(
     !lspLang || !lspInfo ? '' : lspInfo.state === 'pronto' ? `${LANG_LABEL[lspLang]}: language server pronto` : lspInfo.state === 'avvio' ? `${LANG_LABEL[lspLang]}: avvio del language server…` : (lspInfo.detail ?? `${LANG_LABEL[lspLang]}: language server fermo`),
   )
 
   function create(m: Monaco, t: Tab, text: string, dirty: boolean) {
-    const model = m.editor.createModel(text, undefined, m.Uri.file(t.path))
-    lspAttach(m, model, t.path)
+    // file del server: URI `ssh://<server>/<percorso>` (mai in collisione con i file locali) e niente language server
+    const uri = t.remote ? m.Uri.from({ scheme: 'ssh', authority: t.remote.serverId, path: t.path }) : m.Uri.file(t.path)
+    const model = m.editor.createModel(text, undefined, uri)
+    if (!t.remote) lspAttach(m, model, t.path)
     const entry: Entry = { model, path: t.path, rev: t.rev, savedVersion: dirty ? -1 : model.getAlternativeVersionId() }
     models.set(t.id, entry)
     const id = t.id
@@ -398,7 +401,7 @@
 <div class="pane">
   <div class="tabs" role="tablist">
     {#each editor.tabs as t (t.id)}
-      <div class="tab" class:on={t.key === editor.active} role="tab" use:tooltip={t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.key === editor.active} tabindex="0"
+      <div class="tab" class:on={t.key === editor.active} role="tab" use:tooltip={t.remote ? `${ssh.servers.find((x) => x.id === t.remote!.serverId)?.name ?? 'server'}:${t.path}` : t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.key === editor.active} tabindex="0"
         onclick={() => (editor.active = t.key)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.key)}
         onauxclick={(e) => { if (e.button === 1) { e.preventDefault(); editor.requestClose(t.key) } }}>
         {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
@@ -440,12 +443,25 @@
     </div>
   {/if}
 
-  {#if active?.prompt}
+  {#if active?.prompt && active.remote}
+    <div class="bar" role="alert">
+      <span>Il file è cambiato sul server</span>
+      <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal server'} onclick={() => void editor.reload(active.path, active.key)}>Ricarica</button>
+      <button use:tooltip={'Scrive la tua versione sul server al posto di quella attuale'} onclick={() => void editor.keepMine(active.path, active.key)}>Sovrascrivi</button>
+      <button use:tooltip={'Chiudi la barra: le tue modifiche restano nella scheda'} onclick={() => editor.dismissPrompt(active.key)}>Annulla</button>
+    </div>
+  {:else if active?.prompt}
     <div class="bar" role="alert">
       <span>Cambiato su disco</span>
       <button use:tooltip={'Scarta le tue modifiche e rileggi il file dal disco'} onclick={() => void editor.reload(active.path, active.key)}>Ricarica</button>
       <button use:tooltip={'Tieni la tua versione: il prossimo salvataggio sovrascrive il disco'} onclick={() => void editor.keepMine(active.path, active.key)}>Tieni il mio</button>
     </div>
+  {/if}
+
+  {#if active?.remote && !active.error && active.message}
+    <div class="bar" role="alert"><span>Salvataggio non riuscito: {active.message}</span></div>
+  {:else if active?.remote && !active.error && active.notice}
+    <div class="bar" role="status"><span>{active.notice}</span></div>
   {/if}
 
   <div class="body">
@@ -457,8 +473,10 @@
       {/await}
     {:else if active?.error === 'forbidden'}
       <p class="empty">Percorso fuori dal progetto</p>
+    {:else if active?.error === 'remote_preview'}
+      <p class="empty">Anteprima non disponibile per i file remoti</p>
     {:else if active?.error}
-      <p class="empty">Impossibile aprire il file</p>
+      <p class="empty">{active.remote && active.message ? `Impossibile aprire il file: ${active.message}` : 'Impossibile aprire il file'}</p>
     {/if}
     <div class="editors" class:hidden={!showCode} data-testid="editors">
       <div class="ed" bind:this={mainEl}></div>

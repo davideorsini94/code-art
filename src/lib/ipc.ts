@@ -45,6 +45,8 @@ export function asFsError(e: unknown): FsError {
 
 // ---- terminale ----
 export const ptySpawn = (cwd: string, cols: number, rows: number) => invoke<{ id: number; shell: string }>('pty_spawn', { cwd, cols, rows })
+export const ptySpawnSsh = (serverId: string, dir: string, cols: number, rows: number) =>
+  invoke<{ id: number; shell: string }>('pty_spawn_ssh', { serverId, dir, cols, rows })
 export const ptyWrite = (id: number, data: string) => invoke<void>('pty_write', { id, data })
 export const ptyResize = (id: number, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
 export const ptyKill = (id: number) => invoke<void>('pty_kill', { id })
@@ -146,3 +148,41 @@ export const ghPrMerge = (repo: string, number: number, method: MergeMethod, del
 export const lspStart = (lang: string) => invoke<{ id: number; rootUri: string }>('lsp_start', { lang })
 export const lspSend = (id: number, message: string) => invoke<void>('lsp_send', { id, message })
 export const lspStop = (id: number) => invoke<void>('lsp_stop', { id })
+
+import type { Server, ServerInput } from './types'
+export const sshServers = () => invoke<Server[]>('ssh_servers')
+export const sshServerSave = (input: ServerInput) => invoke<Server>('ssh_server_save', { input })
+export const sshServerDelete = (id: string) => invoke<void>('ssh_server_delete', { id })
+/** La password va solo nel Portachiavi del Mac (il core non la restituisce mai); `hasPassword` dice se c'è. */
+export const sshPasswordSet = (id: string, password: string) => invoke<void>('ssh_password_set', { id, password })
+export const sshPasswordClear = (id: string) => invoke<void>('ssh_password_clear', { id })
+import type { SshStateEvent } from './types'
+/** Connessione condivisa (una per server, per tutte le finestre). Server nuovo: il core mostra le impronte della sua
+ *  chiave in un dialogo nativo. Errore `'auth'` = serve una password (`sshPasswordSet`, poi di nuovo `sshConnect`).
+ *  Gli aggiornamenti arrivano con l'evento `ssh:state` (vedi `listenSshState`). */
+export const sshConnect = (id: string) => invoke<void>('ssh_connect', { id })
+export const sshDisconnect = (id: string) => invoke<void>('ssh_disconnect', { id })
+/** Stato delle connessioni note in questo avvio; un server assente è `disconnected`. */
+export const sshStates = () => invoke<SshStateEvent[]>('ssh_states')
+
+import type { RemoteListing, RemoteContent } from './types'
+/** File sul server (via SSH). I percorsi sono assoluti sul server; `~` e `~/…` li risolve il core. Errori: `FsError`
+ *  (`conflict`, `too_large`, `not_text`, `io`). */
+export const sshHome = (id: string) => invoke<string>('ssh_home', { id })
+export const sshList = (id: string, dir: string) => invoke<RemoteListing>('ssh_list', { id, dir })
+export const sshRead = (id: string, path: string) => invoke<RemoteContent>('ssh_read', { id, path })
+/** `version` = quella di `sshRead`; stringa vuota = crea un file nuovo. Restituisce la nuova versione. */
+export const sshWrite = (id: string, path: string, text: string, version: string) =>
+  invoke<string>('ssh_write', { id, path, text, version })
+export const sshMkdir = (id: string, path: string) => invoke<void>('ssh_mkdir', { id, path })
+export const sshRename = (id: string, from: string, to: string) => invoke<void>('ssh_rename', { id, from, to })
+/** Il core chiede la conferma con un dialogo nativo («Elimina sul server»); annullata = errore `io`. */
+export const sshDelete = (id: string, path: string) => invoke<void>('ssh_delete', { id, path })
+
+/** Trasferimenti: ritornano l'id; avanzamento su `ssh:transfer` (vedi `listenProject`). I percorsi locali devono stare
+ *  dentro il progetto. Una destinazione che esiste non si sovrascrive mai: è un errore di quella voce. */
+export const sshUpload = (id: string, localPaths: string[], remoteDir: string) =>
+  invoke<string>('ssh_upload', { id, localPaths, remoteDir })
+export const sshDownload = (id: string, remotePaths: string[], localDir: string) =>
+  invoke<string>('ssh_download', { id, remotePaths, localDir })
+export const sshTransferCancel = (transferId: string) => invoke<void>('ssh_transfer_cancel', { transferId })

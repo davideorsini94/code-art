@@ -136,3 +136,49 @@ export type LspExitEvent = { id: number; code: number }
 
 /** Branch mostrato nella barra del titolo e repository a cui appartiene. */
 export type ProjectBranch = { repo: string; name: string }
+
+// ---- SSH (specchio di src-tauri/src/ssh/mod.rs) ----
+export type ServerSource = 'saved' | 'config'
+export type Server = {
+  id: string
+  name: string
+  host: string
+  user: string | null
+  port: number | null
+  identityFile: string | null
+  startDir: string | null
+  source: ServerSource
+  hasPassword: boolean
+}
+export type SshConnState = 'connecting' | 'connected' | 'disconnected' | 'error'
+/** Voce di una cartella sul server; un link a una cartella ha `isDir` e `isLink`. */
+export type RemoteEntry = { name: string; path: string; isDir: boolean; isLink: boolean }
+/** Cartelle prima, poi per nome; `truncated` oltre 10 000 voci. */
+export type RemoteListing = { entries: RemoteEntry[]; truncated: boolean }
+/** `version` = `size:mtime` del file, da ridare a `sshWrite`. */
+export type RemoteContent = { text: string; version: string }
+/** Evento `ssh:state` e voce di `sshStates` (specchio di `ssh::conn::StateEvent`). */
+export type SshStateEvent = { id: string; state: SshConnState; message?: string }
+/** Evento `ssh:transfer` (specchio di `ssh::transfer::TransferEvent`). `errors` e `message` solo nell'ultimo
+ *  (stato diverso da `running`); i file già completati restano a destinazione anche se `cancelled`. */
+export type TransferState = 'running' | 'done' | 'cancelled' | 'error'
+export type TransferError = { path: string; message: string }
+export type TransferEvent = {
+  transferId: string
+  done: number
+  total: number
+  file: string
+  state: TransferState
+  errors?: TransferError[]
+  message?: string
+}
+/** Campi modificabili di un server salvato; `id` assente = nuovo server. */
+export type ServerInput = {
+  id?: string | null
+  name: string
+  host: string
+  user?: string | null
+  port?: number | null
+  identityFile?: string | null
+  startDir?: string | null
+}

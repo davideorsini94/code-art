@@ -3,13 +3,14 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte'
   import { listenProject } from '../lib/events'
   import { openExternal } from '../lib/external'
-  import { projectBranch, ptyKill, ptyPickCwd, ptyResize, ptySpawn, ptyWrite } from '../lib/ipc'
+  import { projectBranch, ptyKill, ptyPickCwd, ptyResize, ptySpawn, ptySpawnSsh, ptyWrite } from '../lib/ipc'
   import { UNTRUSTED } from '../lib/errors'
   import { PtyInbox } from '../lib/pty-inbox'
   import { xtermTheme } from '../lib/theme'
   import { projectStore } from '../lib/stores/project.svelte'
   import { git } from '../lib/stores/git.svelte'
   import { editor } from '../lib/stores/editor.svelte'
+  import { ssh } from '../lib/stores/ssh.svelte'
   import { terminals } from '../lib/stores/terminals.svelte'
   import { relativeToFolders } from '../lib/conv/paths'
   import { folderLabel, moveTab, tabTitle } from '../lib/terminal/tabs'
@@ -20,7 +21,8 @@
   type Fit = import('@xterm/addon-fit').FitAddon
   type Mods = { Terminal: typeof import('@xterm/xterm').Terminal; FitAddon: typeof import('@xterm/addon-fit').FitAddon; WebLinksAddon: typeof import('@xterm/addon-web-links').WebLinksAddon }
 
-  type Tab = { key: number; cwd: string; repo: string | null; openBranch: string | null; custom: string | null; shell: string; id: number | null; exited: boolean }
+  type Remote = { serverId: string; dir: string }
+  type Tab = { key: number; cwd: string; remote: Remote | null; repo: string | null; openBranch: string | null; custom: string | null; shell: string; id: number | null; exited: boolean }
   type Live = { term: XTerm; fit: Fit; el: HTMLDivElement; id: number | null }
 
   let { visible }: { visible: boolean } = $props()
@@ -125,11 +127,14 @@
         .catch(() => {})
     }
   }
-  const titleOf = (t: Tab) => tabTitle({ cwd: t.cwd, branch: branchOf(t), custom: t.custom }, folders)
-  const hint = (t: Tab) => `${relativeToFolders(t.cwd, folders)}${t.shell ? ` · ${t.shell}` : ''}${t.exited ? ' (terminato)' : ''}`
+  const serverName = (id: string) => ssh.servers.find((s) => s.id === id)?.name ?? 'server'
+  const remoteBase = (dir: string) => dir.split('/').filter(Boolean).pop() ?? '~'
+  const titleOf = (t: Tab) =>
+    t.remote && !t.custom ? `${serverName(t.remote.serverId)}:${remoteBase(t.remote.dir)}` : tabTitle({ cwd: t.cwd, branch: branchOf(t), custom: t.custom }, folders)
+  const hint = (t: Tab) => t.remote ? `${serverName(t.remote.serverId)}:${t.remote.dir}${t.exited ? ' (terminato)' : ''}` : `${relativeToFolders(t.cwd, folders)}${t.shell ? ` · ${t.shell}` : ''}${t.exited ? ' (terminato)' : ''}`
 
   /** Accoda l'apertura di schede, una dopo l'altra. */
-  function enqueue(cwds: (string | undefined)[]) {
+  function enqueue(cwds: (string | undefined | Remote)[]) {
     busy++
     chain = chain
       .then(async () => {
@@ -145,8 +150,9 @@
       .finally(() => busy--)
   }
 
-  async function newTab(where?: string) {
-    const cwd = where ?? projectStore.project?.folders[0]
+  async function newTab(where?: string | Remote) {
+    const remote = typeof where === 'object' ? where : null
+    const cwd = remote ? remote.dir : ((where as string | undefined) ?? projectStore.project?.folders[0])
     if (!cwd || !host) return
     void git.ensure().catch(() => {})
     const m = await load()
@@ -183,22 +189,23 @@
     }
     const l: Live = { term, fit, el, id: null }
     live.set(key, l)
-    tabs.push({ key, cwd, repo: null, openBranch: null, custom: null, shell: '', id: null, exited: false })
-    void projectBranch(cwd)
-      .then((r) => {
-        const t = tabs.find((x) => x.key === key)
-        if (t && r) {
-          t.repo = r.repo
-          t.openBranch = r.name
-        }
-      })
-      .catch(() => {})
+    tabs.push({ key, cwd, remote, repo: null, openBranch: null, custom: null, shell: '', id: null, exited: false })
+    if (!remote)
+      void projectBranch(cwd)
+        .then((r) => {
+          const t = tabs.find((x) => x.key === key)
+          if (t && r) {
+            t.repo = r.repo
+            t.openBranch = r.name
+          }
+        })
+        .catch(() => {})
     pickError = null
     select(key)
     await tick()
     fit.fit()
     try {
-      const { id, shell } = await ptySpawn(cwd, term.cols, term.rows)
+      const { id, shell } = await (remote ? ptySpawnSsh(remote.serverId, remote.dir, term.cols, term.rows) : ptySpawn(cwd, term.cols, term.rows))
       if (destroyed || !live.has(key)) {
         // scheda chiusa (o pannello distrutto) mentre la shell partiva: niente PTY orfano
         inbox.close(id)
@@ -264,7 +271,7 @@
   $effect(() => {
     if (!host || terminals.requests.length === 0) return
     const reqs = untrack(() => terminals.take())
-    enqueue(reqs.map((r) => r.cwd))
+    enqueue(reqs.map((r) => (r.kind === 'remote' ? { serverId: r.serverId, dir: r.dir } : r.cwd)))
   })
 
   // xterm si carica e la prima scheda parte alla prima apertura del pannello
@@ -410,6 +417,7 @@
             onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') renaming = null }}
             onblur={commitRename} />
         {:else}
+          {#if t.remote}<Icon name="server" size={13} />{/if}
           <span>{titleOf(t)}</span>
         {/if}
         <button class="x" aria-label="Chiudi {titleOf(t)}" use:tooltip={'Chiudi terminale'} onclick={(e) => { e.stopPropagation(); void close(t.key) }}><Icon name="x" size={14} /></button>

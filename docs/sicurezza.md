@@ -154,8 +154,27 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
+| `ssh_servers` | — | progetto fidato; elenco dei server salvati più gli alias concreti di `$HOME/.ssh/config` (sola lettura, ≤ 256 KB, file assente o illeggibile = nessuno); voci con host, utente o alias non validi scartate; `hasPassword` = esiste l'elemento nel Portachiavi (controllo senza leggere il segreto) | finestra | F (lettura), Portachiavi (esistenza) |
+| `ssh_server_save` | `input` | progetto fidato; `validate_server` (host e utente non vuoti, senza spazi né caratteri di controllo né `-` iniziale; host solo lettere e cifre ASCII, `.`, `-`, `_`, `:`, nomi internazionali in punycode; porta 1–65535; nome ≤ 100); mai i server `config:` | finestra | — |
+| `ssh_server_delete` | `id` | progetto fidato; mai i server `config:`; elimina prima la password dal Portachiavi (assente = già fatto), poi il server | finestra | Portachiavi |
+| `ssh_password_set` | `id`, `password` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; password non vuota, ≤ 1024 byte, senza a capo né caratteri nulli; la password non compare mai in log, eventi, errori né torna alla WebView | finestra | Portachiavi (servizio `Code Art SSH`, account = id del server) |
+| `ssh_password_clear` | `id` | progetto fidato; `id` come `ssh_password_set`; assente = già fatto | finestra | Portachiavi |
+| `ssh_connect` | `id` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; destinazione e utente ri-validati (`check_server`, host con `validate_host`); già connesso o in connessione = nulla (decisione e iscrizione sotto un solo lucchetto: niente secondo dialogo né secondo master); socket già usato da un altro server connesso = rifiutato; server sconosciuto (`ssh-keygen -F` su `~/.ssh/known_hosts`, `<dati app>/known_hosts`, `/etc/ssh/ssh_known_hosts*`, con nome e porta reali da `ssh -G`) → `ssh-keyscan`, impronte SHA256 in un dialogo nativo del core (titolo fisso «Nuovo server SSH», «Annulla» predefinito), solo con conferma le righe (tipi noti, base64) si aggiungono a `<dati app>/known_hosts` (0600; mai `~/.ssh`); chiave cambiata = errore senza conferma possibile; errore `auth` = serve una password | globale (connessione condivisa da tutte le finestre; evento `ssh:state` a tutte) | processi `/usr/bin/ssh`, `ssh-keygen`, `ssh-keyscan`; socket 0700 nei dati dell'app; Portachiavi (via askpass) |
+| `ssh_disconnect` | `id` | progetto fidato; `ssh -O exit` sul socket; connessione assente = già fatto | globale | processo `ssh` |
+| `ssh_states` | — | progetto fidato; solo id, stato e messaggio d'errore di ssh (nessun segreto) | globale | — |
+| `ssh_home` | `id` | progetto fidato; `printf %s "$HOME"` sul server; solo risposta assoluta, senza NUL | finestra | processo `ssh` (connessione condivisa) |
+| `ssh_list` | `id`, `dir` | progetto fidato; `~` risolto dal core con la home del server; percorso assoluto, senza NUL, ≤ 4096 byte; script costante (glob della shell, niente `ls`), percorso solo in `$1`; ≤ 10 000 voci (`truncated`); nomi con a capo o `-` iniziale intatti (record NUL) | finestra | processo `ssh` |
+| `ssh_read` | `id`, `path` | come `ssh_list`; file ≤ 5 MB (deciso sul server prima di leggere) e solo UTF-8 (`too_large`, `not_text`); risponde con testo e versione `size:mtime` | finestra | processo `ssh` |
+| `ssh_write` | `id`, `path`, `text`, `version` | come `ssh_list`; `version` vuota o `size:mtime`; lo script ricontrolla la versione sul server (diversa = `conflict`, vuota = il file non deve esistere); scrive in `<path>.codeart-tmp` poi `mv -f` (permessi copiati con `cp -p`; un link si scrive attraverso); il testo passa da stdin, mai nello script | finestra | processo `ssh` |
+| `ssh_mkdir` | `id`, `path` | come `ssh_list`; `mkdir --` (esistente = errore) | finestra | processo `ssh` |
+| `ssh_rename` | `id`, `from`, `to` | come `ssh_list` su entrambi; destinazione esistente (anche un link rotto) = errore «esiste già»; `mv --` | finestra | processo `ssh` |
+| `ssh_delete` | `id`, `path` | come `ssh_list`; mai `/`, la home, né percorsi con `.` o `..`; il core legge il tipo, mostra un dialogo nativo (titolo fisso «Elimina sul server», nome del server e del file con i caratteri di controllo sostituiti, per le cartelle «e tutto il suo contenuto», «Annulla» predefinito) e solo con conferma esegue `rm -rf --`; nessuna conferma dalla WebView; un link si toglie senza seguirlo | finestra | processo `ssh` |
+| `ssh_upload` | `id`, `local_paths`, `remote_dir` | progetto fidato; ogni sorgente locale passa da `ensure_inside` sulle cartelle del progetto della finestra (symlink risolti); `remote_dir` come `ssh_list`; cartelle percorse senza seguire i link (i link sono saltati e riportati), `O_NOFOLLOW` sull'apertura; ogni file va in `<nome>.codeart-part` (mai sopra un file esistente: `set -C` e controllo) e si rinomina solo se la destinazione non esiste (`esiste già` = errore per quella voce, le altre continuano); byte da stdin di `cat`, mai nello script; nessun massimo di dimensione (≤ 100 000 voci); un thread per trasferimento; evento `ssh:transfer` (≤ 10 al secondo) solo alla finestra del progetto | finestra | processo `ssh` (connessione condivisa), F (lettura) |
+| `ssh_download` | `id`, `remote_paths`, `local_dir` | progetto fidato e cartelle scrivibili; `local_dir` esistente e dentro il progetto (`ensure_inside`); percorsi remoti come `ssh_list`; albero elencato da uno script costante (link e speciali saltati e riportati); nomi relativi controllati (niente `.`, `..`, componenti vuoti) prima di scrivere in locale; file in `<nome>.codeart-part` (`create_new`) poi rinomina solo se la destinazione non esiste; destinazione esistente = errore per quella voce; evento `ssh:transfer` solo alla finestra del progetto | finestra | processo `ssh`, F (scrittura) |
+| `ssh_transfer_cancel` | `transfer_id` | nessuna fiducia richiesta (come `git_cancel`: ferma solo processi già avviati); solo un trasferimento avviato dallo stesso progetto, altrimenti nulla; uccide il gruppo del processo `ssh` in corso, cancella il `.codeart-part` (in locale o con `rm -f --` sul server), i file già completati restano; stato `cancelled` | finestra | — |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
+| `pty_spawn_ssh` | `server_id`, `dir`, `cols`, `rows` | progetto fidato; server noto e `connected`; `dir` assoluta dopo `~` (validata); 1–1000; ≤ 16 per finestra (stesso registro); la cartella è solo l'argomento quotato `$1` di uno script costante | finestra | P (`ssh -t` sulla connessione condivisa) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
 | `pty_resize` | `id`, `cols`, `rows` | PTY della stessa finestra; 1–1000 | finestra | P |
 | `pty_kill` | `id` | PTY della stessa finestra | finestra | P |
@@ -324,6 +343,50 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   (`ghp_`, `gho_`, `github_pat_`…), `GH_TOKEN`/`GITHUB_TOKEN` dell'ambiente di login, errori di serde e percorsi della home (`/Users/<nome>` → `~`). Test:
   `token_never_in_debug_or_errors`, `clean_hides_tokens_and_home_paths`.
 - Le immagini incollate restano in `$TMPDIR/CodeArt/images` (0700/0600), cancellate dopo 24 ore.
+- Password SSH (`ssh/keychain.rs`): solo nel Portachiavi di macOS, elementi "password generica" del servizio
+  `Code Art SSH` con account = id del server (FFI a mano verso `SecItem*`, tutto l'`unsafe` nel modulo `sys`). La
+  password arriva al core una volta (`ssh_password_set`) e non torna mai alla pagina: l'elenco dice solo se c'è
+  (`hasPassword`, controllo d'esistenza che non legge il segreto). Gli errori riportano operazione e codice
+  `OSStatus`, mai il segreto. La legge solo l'app stessa rilanciata da `ssh` come `SSH_ASKPASS` (`ssh/askpass.rs`):
+  con `CODEART_ASKPASS_ACCOUNT` nell'ambiente `main()` non avvia Tauri, risponde solo a prompt di password che
+  nominano l'host atteso (`utente@host's password:` o, keyboard-interactive, `(utente@host) …password:`, con `host`
+  uguale a `CODEART_ASKPASS_HOST`, impostato da `ssh_connect` con `HostKeyAlias` o il nome reale da `ssh -G`; mai un
+  `Password:` senza host, mai il prompt di un salto ProxyJump, mai passphrase né domande sì/no) stampando la password
+  su stdout ed esce 0, altrimenti esce 1 senza stampare nulla; prima di leggere il Portachiavi verifica anche che il
+  processo padre sia `/usr/bin/ssh` (`getppid` + `proc_pidpath`). Test: `answers_only_password_prompts_for_the_expected_host`,
+  `only_system_ssh_may_ask`, `password_rules_never_echo_the_secret`, `keychain_round_trip` (ignorato: richiede il
+  Portachiavi di login sbloccato).
+- Connessioni SSH (`ssh/conn.rs`): sempre `/usr/bin/ssh`, `/usr/bin/ssh-keygen`, `/usr/bin/ssh-keyscan` (mai dal
+  `PATH`) con lista di argomenti; un master per server (`ControlMaster`, `-N`, `ControlPersist=600`: si chiude da solo
+  dopo 10 minuti senza client anche se l'app termina male) con socket in `<dati app>/s/<16 hex>` (cartella 0700; se il
+  percorso è troppo lungo per un socket Unix, `$TMPDIR/codeart-<uid>/`, poi `/tmp/codeart-<uid>/`, cartella 0700 di
+  proprietà dell'utente, mai un link simbolico). `StrictHostKeyChecking=yes` con
+  `UserKnownHostsFile="~/.ssh/known_hosts" "<dati app>/known_hosts"`. Le operazioni sono client del master
+  (`ControlMaster=no`, `-T`, `RequestTTY=no`, `ClearAllForwardings=yes`, `RemoteCommand=none` contro un
+  `RemoteCommand` della config) e girano solo se lo stato è `connected`; hanno anche
+  `BatchMode=yes` e `PreferredAuthentications=none`: se il master è sparito OpenSSH ripiegherebbe su una connessione
+  diretta, che così non può autenticarsi (un client del master non si autentica mai). Un client del master non
+  controlla la destinazione: salvare o eliminare un server connesso lo disconnette prima (`ssh -O exit`; i terminali
+  remoti terminano da soli), e ogni operazione (`run`, trasferimenti, terminale) confronta destinazione, host, utente,
+  porta e chiave del server con quelli della connessione: se sono cambiati (anche in `~/.ssh/config`) la connessione si
+  chiude («Server modificato: riconnetti») e l'operazione è rifiutata. Test: `a_server_changed_after_connect_is_disconnected_and_refused`,
+  `saving_or_deleting_an_existing_server_disconnects_it_first`. Un'uscita 255 conta come
+  connessione persa solo con un messaggio di ssh riconosciuto e il master che non risponde a `-O check`; il controllo
+  periodico dichiara `disconnected` dopo due `-O check` falliti di fila. All'interfaccia arrivano solo messaggi
+  italiani fissi, mai lo stderr grezzo di ssh (banner del server compresi). Socket con 16 cifre esadecimali (FNV-1a a
+  64 bit dell'id); due server connessi con lo stesso socket: il secondo è rifiutato. Host e alias: solo lettere e cifre
+  ASCII, `.`, `-`, `_`, `:` (`validate_host`, anche per gli alias della config e per `hostname`/`hostkeyalias` di
+  `ssh -G`); il nome scritto in known_hosts è `host` o `[host]:porta` con quei caratteri (niente jolly, liste,
+  marcatori); al massimo 8 chiavi e 16 KB da `ssh-keyscan`, oltre la connessione è rifiutata; sul server l'unica
+  shell è `sh -c '<script costante>' _ <argomenti>` con ogni argomento passato da `quote_sh`; gli script sono su una
+  riga e senza `!`, così passano anche da una shell di login csh/tcsh (test `every_remote_script_is_one_line_without_bang`,
+  `csh_login_shells_run_every_script`). Il file temporaneo del salvataggio remoto si crea solo se non esiste (né come
+  link) e in modo esclusivo (`set -C`). I download accettano dal server solo un albero coerente (primo record = la
+  sorgente, ogni voce dentro una cartella già annunciata) e non scrivono mai attraverso un collegamento simbolico
+  locale (`symlink_metadata` della destinazione e delle cartelle create): test
+  `hostile_walker_output_never_writes_outside_the_destination`, `write_never_follows_a_planted_temp_file`. All'uscita dall'app `ssh -O exit` per ogni connessione, poi il registro dei processi.
+  Test: `quote_sh_survives_hostile_names` (eseguito con `/bin/sh`), `option_values_with_spaces_quotes_and_percent_reach_openssh_intact`,
+  `classifies_real_openssh_errors`, `keyscan_lines_are_filtered_and_renamed`, `known_hosts_lookup_append_and_hashed_entries`.
 
 ## Dipendenze (2026-11-11)
 
@@ -376,3 +439,11 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 - Eventi di progetto: una pagina compromessa che conosce l'UUID di un altro progetto può ascoltarne gli eventi
   (vedi "Come arrivano gli eventi di un progetto").
 - La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).
+- **L'eseguibile dell'app consegna le password SSH a chi lo avvia in modalità askpass da `/usr/bin/ssh`.** Il
+  controllo del padre (`/usr/bin/ssh`) e dell'host nel prompt non prova con quale server parli davvero quel `ssh`: un
+  processo dell'utente può avviare `/usr/bin/ssh` verso un proprio server con `SSH_ASKPASS=<app>`,
+  `CODEART_ASKPASS_ACCOUNT=<id>`, `CODEART_ASKPASS_HOST=<host>` e `HostKeyAlias=<host>` (o un `HostName` falso in un
+  proprio `-F`), e ricevere la password senza la richiesta del Portachiavi che avrebbe leggendola direttamente
+  (l'elemento è dell'app). Contro un processo dello stesso utente non c'è un confine vero (può anche leggere la
+  memoria dell'app o sostituirne le scelte); il modello di minaccia resta la pagina, non i processi locali. Il
+  controllo dell'host chiude invece il caso reale di un salto ProxyJump che chiede la propria password.
