@@ -2,14 +2,24 @@
 import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const ctl = vi.hoisted(() => ({ failTerm: false, writes: [] as unknown[] }))
+
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
+    constructor() {
+      if (ctl.failTerm) {
+        ctl.failTerm = false
+        throw new Error('boom')
+      }
+    }
     cols = 80
     rows = 24
     loadAddon() {}
     attachCustomKeyEventHandler() {}
     open() {}
-    write() {}
+    write(d: unknown) {
+      ctl.writes.push(d)
+    }
     focus() {}
     dispose() {}
     onData() {}
@@ -113,5 +123,30 @@ describe('TerminalPane', () => {
     await fireEvent(b, over)
     await fireEvent.drop(b)
     await waitFor(() => expect(tabs().map((t) => t.textContent)).toEqual([expect.stringContaining('web'), expect.stringContaining('api')]))
+  })
+
+  it('keeps serving later requests after one tab fails to open', async () => {
+    ctl.failTerm = true
+    terminals.open('/Users/dev/app/api')
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    terminals.open('/Users/dev/app/web')
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    expect(vi.mocked(ipc.ptySpawn).mock.calls.map((c) => c[0])).toEqual(['/Users/dev/app/web'])
+  })
+
+  it('kills the PTY when the tab is closed while the shell is still starting', async () => {
+    let resolve!: (v: { id: number; shell: string }) => void
+    vi.mocked(ipc.ptySpawn).mockImplementationOnce(() => new Promise((r) => (resolve = r)))
+    vi.mocked(ipc.ptyKill).mockClear()
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    await waitFor(() => expect(ipc.ptySpawn).toHaveBeenCalled())
+    ctl.writes.length = 0
+    await fireEvent.click(screen.getByLabelText(/^Chiudi/))
+    await waitFor(() => expect(tabs()).toHaveLength(0))
+    resolve({ id: 42, shell: 'zsh' })
+    await waitFor(() => expect(ipc.ptyKill).toHaveBeenCalledWith(42))
+    expect(ctl.writes).toEqual([])
   })
 })

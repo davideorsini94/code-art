@@ -34,6 +34,7 @@
   let mods: Mods | undefined
   let loading: Promise<Mods> | undefined
   let nextKey = 1
+  let destroyed = false
   let busy = 0 // schede in apertura: evita che la scheda di default si sommi a quelle richieste
   let chain: Promise<void> = Promise.resolve()
   let unlisten: (() => void)[] = []
@@ -72,6 +73,8 @@
           live.get(key)?.term.write(bytes)
         }
       }),
+      // i repository fuori da git.status (es. "Altra cartella…") rileggono il branch qui
+      listenProject('git:changed', pid, () => refreshOrphans()),
       listenProject<{ id: number }>('pty:exit', pid, ({ payload }) => {
         if (!byPty.has(payload.id)) pendingExit.add(payload.id)
         else markExited(payload.id)
@@ -97,7 +100,21 @@
   const folders = $derived(projectStore.project?.folders ?? [])
 
   /** Il branch segue il repository (da git.status), con il nome letto all'apertura come ripiego. */
-  const branchOf = (t: Tab) => (t.repo ? (git.status[t.repo]?.branch ?? t.openBranch) : t.openBranch)
+  const statusOf = (repo: string) => git.status[repo] ?? git.status[repo.replace(/\/+$/, '')]
+  const branchOf = (t: Tab) => (t.repo ? (statusOf(t.repo)?.branch ?? t.openBranch) : t.openBranch)
+
+  function refreshOrphans() {
+    for (const t of tabs) {
+      if (!t.repo || statusOf(t.repo)) continue
+      const key = t.key
+      void projectBranch(t.cwd)
+        .then((r) => {
+          const x = tabs.find((y) => y.key === key)
+          if (x && r) x.openBranch = r.name
+        })
+        .catch(() => {})
+    }
+  }
   const titleOf = (t: Tab) => tabTitle({ cwd: t.cwd, branch: branchOf(t), custom: t.custom }, folders)
   const hint = (t: Tab) => `${relativeToFolders(t.cwd, folders)}${t.shell ? ` · ${t.shell}` : ''}${t.exited ? ' (terminato)' : ''}`
 
@@ -106,7 +123,14 @@
     busy++
     chain = chain
       .then(async () => {
-        for (const c of cwds) await newTab(c)
+        for (const c of cwds) {
+          try {
+            await newTab(c)
+          } catch (e) {
+            // un errore di caricamento non deve bloccare le richieste successive
+            pickError = typeof e === 'string' && e ? e : 'Impossibile aprire il terminale'
+          }
+        }
       })
       .finally(() => busy--)
   }
@@ -157,6 +181,13 @@
     fit.fit()
     try {
       const { id, shell } = await ptySpawn(cwd, term.cols, term.rows)
+      if (destroyed || !live.has(key)) {
+        // scheda chiusa (o pannello distrutto) mentre la shell partiva: niente PTY orfano
+        inbox.close(id)
+        pendingExit.delete(id)
+        void ptyKill(id).catch(() => {})
+        return
+      }
       l.id = id
       const t = tabs.find((x) => x.key === key)
       if (t) {
@@ -169,6 +200,7 @@
       term.onData((d) => void ptyWrite(id, d).catch(() => {}))
       term.onResize(({ cols, rows }) => void ptyResize(id, cols, rows).catch(() => {}))
     } catch (e) {
+      if (!live.has(key)) return
       // il messaggio del core (cartella inesistente o fuori dal progetto) si mostra così com'è
       term.write(
         String(e) === UNTRUSTED
@@ -285,6 +317,10 @@
   function plusClick(e: MouseEvent) {
     e.stopPropagation()
     pickError = null
+    if (menu) {
+      menu = null
+      return
+    }
     const items = menuItems()
     if (e.metaKey || onlyPrimary(items)) {
       menu = null
@@ -330,6 +366,7 @@
   })
 
   onDestroy(() => {
+    destroyed = true
     unlisten.forEach((u) => u())
     for (const l of live.values()) {
       if (l.id != null) void ptyKill(l.id).catch(() => {})
@@ -339,13 +376,14 @@
 </script>
 
 <div class="term-pane">
-  <div class="tabs" role="tablist">
+  <!-- svelte-ignore a11y_interactive_supports_focus (le schede sono focalizzabili) -->
+  <div class="tabs" role="tablist" ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dropSlot = null }}>
     {#each tabs as t, i (t.key)}
       <div class="tab" class:on={t.key === active} class:dead={t.exited} class:drop-before={dropSlot === i} class:drop-after={dropSlot === tabs.length && i === tabs.length - 1} class:dragging={dragKey === t.key}
         role="tab" use:tooltip={hint(t)} aria-selected={t.key === active} tabindex="0" draggable={renaming?.key !== t.key}
         onclick={() => select(t.key)} onkeydown={(e) => e.target === e.currentTarget && e.key === 'Enter' && select(t.key)}
         onmousedown={(e) => e.button === 1 && e.preventDefault()} onauxclick={(e) => { if (e.button === 1) { e.preventDefault(); void close(t.key) } }}
-        ondblclick={() => startRename(t)}
+        ondblclick={(e) => !(e.target as HTMLElement).closest('.x') && startRename(t)}
         ondragstart={(e) => { dragKey = t.key; e.dataTransfer?.setData('application/x-codeart-tab', String(t.key)); if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move' }}
         ondragover={(e) => dragOver(e, i)} ondrop={drop} ondragend={() => (dragKey = dropSlot = null)}>
         {#if renaming?.key === t.key}
