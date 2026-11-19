@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use crate::claude::Conversation;
+use crate::ssh::{Server, ServerSource};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -67,7 +68,19 @@ CREATE TABLE IF NOT EXISTS trusted_folders (
 /// La versione 1 è lo schema della tappa 1; un database creato prima del versionamento (versione 0, tabelle già
 /// presenti) la riceve senza cambiamenti (`IF NOT EXISTS`). Uno schema nuovo si aggiunge in coda, mai modificando
 /// le voci esistenti.
-const MIGRATIONS: &[&str] = &[SCHEMA];
+const SSH_SERVERS: &str = "
+CREATE TABLE ssh_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  user TEXT,
+  port INTEGER,
+  identity_file TEXT,
+  start_dir TEXT
+);
+";
+
+const MIGRATIONS: &[&str] = &[SCHEMA, SSH_SERVERS];
 
 /// Applica le migrazioni mancanti, ciascuna in una transazione insieme al nuovo `user_version`. Un database di una
 /// versione più recente (app tornata indietro) resta com'è.
@@ -419,6 +432,54 @@ impl Store {
         Ok(())
     }
 
+    pub fn ssh_servers(&self) -> Result<Vec<Server>> {
+        let conn = self.conn();
+        let mut st = conn
+            .prepare("SELECT id, name, host, user, port, identity_file, start_dir FROM ssh_servers ORDER BY name COLLATE NOCASE, id")
+            .map_err(err)?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(Server {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    host: r.get(2)?,
+                    user: r.get(3)?,
+                    port: r.get::<_, Option<u16>>(4)?,
+                    identity_file: r.get(5)?,
+                    start_dir: r.get(6)?,
+                    source: ServerSource::Saved,
+                    has_password: false,
+                })
+            })
+            .map_err(err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err)
+    }
+
+    pub fn ssh_server_exists(&self, id: &str) -> Result<bool> {
+        self.conn()
+            .query_row("SELECT 1 FROM ssh_servers WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(err)
+    }
+
+    pub fn ssh_server_upsert(&self, s: &Server) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO ssh_servers(id, name, host, user, port, identity_file, start_dir) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, host = excluded.host, user = excluded.user,
+                   port = excluded.port, identity_file = excluded.identity_file, start_dir = excluded.start_dir",
+                params![s.id, s.name, s.host, s.user, s.port, s.identity_file, s.start_dir],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn ssh_server_delete(&self, id: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM ssh_servers WHERE id = ?1", [id]).map_err(err)?;
+        Ok(())
+    }
+
     pub fn setting_get(&self, key: &str) -> Result<Option<String>> {
         self.conn()
             .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
@@ -451,7 +512,7 @@ mod tests {
         // database nuovo: versione 1
         let fresh = dir.path().join("nuovo.db");
         Store::open(&fresh).unwrap();
-        assert_eq!(user_version(&fresh), 1);
+        assert_eq!(user_version(&fresh), MIGRATIONS.len() as i64);
         // database creato prima del versionamento: tabelle e dati restano, versione 1
         let old = dir.path().join("vecchio.db");
         {
@@ -462,7 +523,7 @@ mod tests {
         }
         let s = Store::open(&old).unwrap();
         assert_eq!(s.setting_get("default_permission_mode").unwrap().as_deref(), Some("plan"));
-        assert_eq!(user_version(&old), 1);
+        assert_eq!(user_version(&old), MIGRATIONS.len() as i64);
     }
 
     #[test]

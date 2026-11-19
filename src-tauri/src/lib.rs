@@ -9,6 +9,7 @@ mod lsp;
 mod projects;
 mod pty;
 pub mod search;
+pub mod ssh;
 pub mod store;
 mod tools;
 mod trasher;
@@ -139,6 +140,9 @@ pub fn run() {
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
+            ssh::ssh_servers,
+            ssh::ssh_server_save,
+            ssh::ssh_server_delete,
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,

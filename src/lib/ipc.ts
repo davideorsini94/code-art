@@ -146,3 +146,8 @@ export const ghPrMerge = (repo: string, number: number, method: MergeMethod, del
 export const lspStart = (lang: string) => invoke<{ id: number; rootUri: string }>('lsp_start', { lang })
 export const lspSend = (id: number, message: string) => invoke<void>('lsp_send', { id, message })
 export const lspStop = (id: number) => invoke<void>('lsp_stop', { id })
+
+import type { Server, ServerInput } from './types'
+export const sshServers = () => invoke<Server[]>('ssh_servers')
+export const sshServerSave = (input: ServerInput) => invoke<Server>('ssh_server_save', { input })
+export const sshServerDelete = (id: string) => invoke<void>('ssh_server_delete', { id })

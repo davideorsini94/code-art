@@ -154,6 +154,9 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_stat` | `path` | `ensure_inside` (come `fs_read`); solo metadati, nessuna lettura del contenuto | finestra | F (stat) |
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
+| `ssh_servers` | — | progetto fidato; elenco dei server salvati più gli alias concreti di `$HOME/.ssh/config` (sola lettura, ≤ 256 KB, file assente o illeggibile = nessuno); voci con host, utente o alias non validi scartate | finestra | F (lettura) |
+| `ssh_server_save` | `input` | progetto fidato; `validate_server` (host e utente non vuoti, senza spazi né caratteri di controllo né `-` iniziale; porta 1–65535; nome ≤ 100); mai i server `config:` | finestra | — |
+| `ssh_server_delete` | `id` | progetto fidato; mai i server `config:` | finestra | — |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |

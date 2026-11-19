@@ -136,3 +136,27 @@ export type LspExitEvent = { id: number; code: number }
 
 /** Branch mostrato nella barra del titolo e repository a cui appartiene. */
 export type ProjectBranch = { repo: string; name: string }
+
+// ---- SSH (specchio di src-tauri/src/ssh/mod.rs) ----
+export type ServerSource = 'saved' | 'config'
+export type Server = {
+  id: string
+  name: string
+  host: string
+  user: string | null
+  port: number | null
+  identityFile: string | null
+  startDir: string | null
+  source: ServerSource
+  hasPassword: boolean
+}
+/** Campi modificabili di un server salvato; `id` assente = nuovo server. */
+export type ServerInput = {
+  id?: string | null
+  name: string
+  host: string
+  user?: string | null
+  port?: number | null
+  identityFile?: string | null
+  startDir?: string | null
+}
