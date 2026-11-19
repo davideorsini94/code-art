@@ -46,6 +46,7 @@ import TerminalPane from './TerminalPane.svelte'
 import * as ipc from '../lib/ipc'
 import { projectStore } from '../lib/stores/project.svelte'
 import { terminals } from '../lib/stores/terminals.svelte'
+import { git } from '../lib/stores/git.svelte'
 
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} })
@@ -53,6 +54,7 @@ beforeEach(() => {
   projectStore.project = { id: 'p1', name: 'demo', folders: ['/Users/dev/app'] } as never
   terminals.requests = []
   terminals.visible = false
+  git.status = {}
 })
 afterEach(() => {
   cleanup()
@@ -99,6 +101,31 @@ describe('TerminalPane', () => {
     await fireEvent.input(input, { target: { value: '  ' } })
     await fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(tabs()[0].textContent).toContain('app · main'))
+  })
+
+  it('the automatic title follows the branch in git.status; a renamed title stays', async () => {
+    const st = (branch: string | null) => ({ branch, detached: branch === null, ahead: 0, behind: 0, entries: [] }) as never
+    git.status = { '/Users/dev/app': st('main') }
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(tabs()[0].textContent).toContain('app · main'))
+    git.status = { '/Users/dev/app': st('dev') }
+    await waitFor(() => expect(tabs()[0].textContent).toContain('app · dev'))
+    await fireEvent.dblClick(tabs()[0])
+    const input = screen.getByLabelText('Nome del terminale') as HTMLInputElement
+    await fireEvent.input(input, { target: { value: 'server' } })
+    await fireEvent.keyDown(input, { key: 'Enter' })
+    git.status = { '/Users/dev/app': st('feat') }
+    await waitFor(() => expect(tabs()[0].textContent).toContain('server'))
+    expect(tabs()[0].textContent).not.toContain('feat')
+  })
+
+  it('a detached HEAD shows only the folder name', async () => {
+    git.status = { '/Users/dev/app': { branch: null, detached: true, ahead: 0, behind: 0, entries: [] } as never }
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    expect(tabs()[0].textContent).toContain('app')
+    expect(tabs()[0].textContent).not.toContain('main')
+    expect(tabs()[0].textContent).not.toContain('·')
   })
 
   it('the plus button opens straight into the primary folder when it is the only choice', async () => {

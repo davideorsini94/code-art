@@ -63,14 +63,14 @@
               {#if st.entries.length > 0}
                 <span class="count" use:tooltip={`${st.entries.length} ${st.entries.length === 1 ? 'modifica' : 'modifiche'}`}>{st.entries.length}</span>
               {/if}
-              <button class="term" aria-label={`Apri un terminale in ${name(repo)}`} use:tooltip={`Apri un terminale in ${name(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
+              <button class="term" aria-label={`Apri un terminale in ${title(repo)}`} use:tooltip={`Apri un terminale in ${title(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
             </div>
           {/if}
           {#if open}
           {#if plain}
             <div class="syncrow">
               <div class="syncgrow"><SyncBar {repo} status={st} compact={false} /></div>
-              <button class="term" aria-label={`Apri un terminale in ${name(repo)}`} use:tooltip={`Apri un terminale in ${name(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
+              <button class="term" aria-label={`Apri un terminale in ${title(repo)}`} use:tooltip={`Apri un terminale in ${title(repo)}`} onclick={() => terminals.open(repo)}><Icon name="terminal" size={14} /></button>
             </div>
           {:else}
             <SyncBar {repo} status={st} compact={true} />

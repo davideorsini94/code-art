@@ -49,14 +49,20 @@
   }
 
   function load(): Promise<Mods> {
-    loading ??= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit'), import('@xterm/addon-web-links'), import('@xterm/xterm/css/xterm.css')]).then(
-      ([x, f, w]) => (mods = { Terminal: x.Terminal, FitAddon: f.FitAddon, WebLinksAddon: w.WebLinksAddon }),
-    )
+    loading ??= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit'), import('@xterm/addon-web-links'), import('@xterm/xterm/css/xterm.css')])
+      .then(([x, f, w]) => (mods = { Terminal: x.Terminal, FitAddon: f.FitAddon, WebLinksAddon: w.WebLinksAddon }))
+      .catch((e) => {
+        loading = undefined // un errore non resta in cache: la prossima apertura riprova
+        throw e
+      })
     return loading
   }
 
   function listenOnce(): Promise<void> {
-    listening ??= register()
+    listening ??= register().catch((e) => {
+      listening = undefined
+      throw e
+    })
     return listening
   }
 
@@ -101,7 +107,11 @@
 
   /** Il branch segue il repository (da git.status), con il nome letto all'apertura come ripiego. */
   const statusOf = (repo: string) => git.status[repo] ?? git.status[repo.replace(/\/+$/, '')]
-  const branchOf = (t: Tab) => (t.repo ? (statusOf(t.repo)?.branch ?? t.openBranch) : t.openBranch)
+  const branchOf = (t: Tab) => {
+    if (!t.repo) return t.openBranch
+    const st = statusOf(t.repo)
+    return st ? st.branch : t.openBranch // con uno status vale solo quello (HEAD staccato: nessun branch)
+  }
 
   function refreshOrphans() {
     for (const t of tabs) {
@@ -146,24 +156,31 @@
     const el = document.createElement('div')
     el.className = 'term'
     host.appendChild(el)
-    const term = new m.Terminal({
-      theme: xtermTheme,
-      allowTransparency: true,
-      fontFamily: 'ui-monospace, Menlo, monospace',
-      fontSize: 12,
-      cursorBlink: true,
-      scrollback: 5000,
-      macOptionIsMeta: true,
-    })
-    const fit = new m.FitAddon()
-    term.loadAddon(fit)
-    term.loadAddon(
-      // solo http(s), sempre nel browser di sistema: mai navigare la WebView
-      new m.WebLinksAddon((_e, uri) => void openExternal(uri)),
-    )
-    // ⌃` è del pannello, non della shell
-    term.attachCustomKeyEventHandler((e) => !(e.ctrlKey && !e.metaKey && (e.key === '`' || e.code === 'Backquote')))
-    term.open(el)
+    let term: XTerm
+    let fit: Fit
+    try {
+      term = new m.Terminal({
+        theme: xtermTheme,
+        allowTransparency: true,
+        fontFamily: 'ui-monospace, Menlo, monospace',
+        fontSize: 12,
+        cursorBlink: true,
+        scrollback: 5000,
+        macOptionIsMeta: true,
+      })
+      fit = new m.FitAddon()
+      term.loadAddon(fit)
+      term.loadAddon(
+        // solo http(s), sempre nel browser di sistema: mai navigare la WebView
+        new m.WebLinksAddon((_e, uri) => void openExternal(uri)),
+      )
+      // ⌃` è del pannello, non della shell
+      term.attachCustomKeyEventHandler((e) => !(e.ctrlKey && !e.metaKey && (e.key === '`' || e.code === 'Backquote')))
+      term.open(el)
+    } catch (e) {
+      el.remove() // niente div vuoto sopra i terminali esistenti
+      throw e
+    }
     const l: Live = { term, fit, el, id: null }
     live.set(key, l)
     tabs.push({ key, cwd, repo: null, openBranch: null, custom: null, shell: '', id: null, exited: false })
@@ -176,6 +193,7 @@
         }
       })
       .catch(() => {})
+    pickError = null
     select(key)
     await tick()
     fit.fit()
