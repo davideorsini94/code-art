@@ -155,11 +155,11 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `fs_write` | `path`, `text`, `expectedMtimeMs` | `ensure_inside`; progetto fidato; controllo di conflitto | finestra | F |
 | `fs_all_files` | — | non segue i link, salta `.git`, ≤ 50 000 voci | finestra | F (lettura) |
 | `ssh_servers` | — | progetto fidato; elenco dei server salvati più gli alias concreti di `$HOME/.ssh/config` (sola lettura, ≤ 256 KB, file assente o illeggibile = nessuno); voci con host, utente o alias non validi scartate; `hasPassword` = esiste l'elemento nel Portachiavi (controllo senza leggere il segreto) | finestra | F (lettura), Portachiavi (esistenza) |
-| `ssh_server_save` | `input` | progetto fidato; `validate_server` (host e utente non vuoti, senza spazi né caratteri di controllo né `-` iniziale; porta 1–65535; nome ≤ 100); mai i server `config:` | finestra | — |
+| `ssh_server_save` | `input` | progetto fidato; `validate_server` (host e utente non vuoti, senza spazi né caratteri di controllo né `-` iniziale; host solo lettere e cifre ASCII, `.`, `-`, `_`, `:`, nomi internazionali in punycode; porta 1–65535; nome ≤ 100); mai i server `config:` | finestra | — |
 | `ssh_server_delete` | `id` | progetto fidato; mai i server `config:`; elimina prima la password dal Portachiavi (assente = già fatto), poi il server | finestra | Portachiavi |
 | `ssh_password_set` | `id`, `password` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; password non vuota, ≤ 1024 byte, senza a capo né caratteri nulli; la password non compare mai in log, eventi, errori né torna alla WebView | finestra | Portachiavi (servizio `Code Art SSH`, account = id del server) |
 | `ssh_password_clear` | `id` | progetto fidato; `id` come `ssh_password_set`; assente = già fatto | finestra | Portachiavi |
-| `ssh_connect` | `id` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; destinazione e utente ri-validati (`check_server`); server sconosciuto (`ssh-keygen -F` su `~/.ssh/known_hosts`, `<dati app>/known_hosts`, `/etc/ssh/ssh_known_hosts*`, con nome e porta reali da `ssh -G`) → `ssh-keyscan`, impronte SHA256 in un dialogo nativo del core (titolo fisso «Nuovo server SSH», «Annulla» predefinito), solo con conferma le righe (tipi noti, base64) si aggiungono a `<dati app>/known_hosts` (0600; mai `~/.ssh`); chiave cambiata = errore senza conferma possibile; errore `auth` = serve una password | globale (connessione condivisa da tutte le finestre; evento `ssh:state` a tutte) | processi `/usr/bin/ssh`, `ssh-keygen`, `ssh-keyscan`; socket 0700 nei dati dell'app; Portachiavi (via askpass) |
+| `ssh_connect` | `id` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; destinazione e utente ri-validati (`check_server`, host con `validate_host`); già connesso o in connessione = nulla (decisione e iscrizione sotto un solo lucchetto: niente secondo dialogo né secondo master); socket già usato da un altro server connesso = rifiutato; server sconosciuto (`ssh-keygen -F` su `~/.ssh/known_hosts`, `<dati app>/known_hosts`, `/etc/ssh/ssh_known_hosts*`, con nome e porta reali da `ssh -G`) → `ssh-keyscan`, impronte SHA256 in un dialogo nativo del core (titolo fisso «Nuovo server SSH», «Annulla» predefinito), solo con conferma le righe (tipi noti, base64) si aggiungono a `<dati app>/known_hosts` (0600; mai `~/.ssh`); chiave cambiata = errore senza conferma possibile; errore `auth` = serve una password | globale (connessione condivisa da tutte le finestre; evento `ssh:state` a tutte) | processi `/usr/bin/ssh`, `ssh-keygen`, `ssh-keyscan`; socket 0700 nei dati dell'app; Portachiavi (via askpass) |
 | `ssh_disconnect` | `id` | progetto fidato; `ssh -O exit` sul socket; connessione assente = già fatto | globale | processo `ssh` |
 | `ssh_states` | — | progetto fidato; solo id, stato e messaggio d'errore di ssh (nessun segreto) | globale | — |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
@@ -337,10 +337,12 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   password arriva al core una volta (`ssh_password_set`) e non torna mai alla pagina: l'elenco dice solo se c'è
   (`hasPassword`, controllo d'esistenza che non legge il segreto). Gli errori riportano operazione e codice
   `OSStatus`, mai il segreto. La legge solo l'app stessa rilanciata da `ssh` come `SSH_ASKPASS` (`ssh/askpass.rs`):
-  con `CODEART_ASKPASS_ACCOUNT` nell'ambiente `main()` non avvia Tauri, risponde solo a prompt che finiscono con
-  `password:` (mai passphrase né domande sì/no sulla chiave del server) stampando la password su stdout ed esce 0,
-  altrimenti esce 1 senza stampare nulla; prima di leggere il Portachiavi verifica che il processo padre sia
-  `/usr/bin/ssh` (`getppid` + `proc_pidpath`), altrimenti esce 1. Test: `answers_only_password_prompts`,
+  con `CODEART_ASKPASS_ACCOUNT` nell'ambiente `main()` non avvia Tauri, risponde solo a prompt di password che
+  nominano l'host atteso (`utente@host's password:` o, keyboard-interactive, `(utente@host) …password:`, con `host`
+  uguale a `CODEART_ASKPASS_HOST`, impostato da `ssh_connect` con `HostKeyAlias` o il nome reale da `ssh -G`; mai un
+  `Password:` senza host, mai il prompt di un salto ProxyJump, mai passphrase né domande sì/no) stampando la password
+  su stdout ed esce 0, altrimenti esce 1 senza stampare nulla; prima di leggere il Portachiavi verifica anche che il
+  processo padre sia `/usr/bin/ssh` (`getppid` + `proc_pidpath`). Test: `answers_only_password_prompts_for_the_expected_host`,
   `only_system_ssh_may_ask`, `password_rules_never_echo_the_secret`, `keychain_round_trip` (ignorato: richiede il
   Portachiavi di login sbloccato).
 - Connessioni SSH (`ssh/conn.rs`): sempre `/usr/bin/ssh`, `/usr/bin/ssh-keygen`, `/usr/bin/ssh-keyscan` (mai dal
@@ -349,7 +351,16 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   percorso è troppo lungo per un socket Unix, `$TMPDIR/codeart-<uid>/`, poi `/tmp/codeart-<uid>/`, cartella 0700 di
   proprietà dell'utente, mai un link simbolico). `StrictHostKeyChecking=yes` con
   `UserKnownHostsFile="~/.ssh/known_hosts" "<dati app>/known_hosts"`. Le operazioni sono client del master
-  (`ControlMaster=no`, `-T`, `ClearAllForwardings=yes`) e girano solo se lo stato è `connected`; sul server l'unica
+  (`ControlMaster=no`, `-T`, `ClearAllForwardings=yes`) e girano solo se lo stato è `connected`; hanno anche
+  `BatchMode=yes` e `PreferredAuthentications=none`: se il master è sparito OpenSSH ripiegherebbe su una connessione
+  diretta, che così non può autenticarsi (un client del master non si autentica mai). Un'uscita 255 conta come
+  connessione persa solo con un messaggio di ssh riconosciuto e il master che non risponde a `-O check`; il controllo
+  periodico dichiara `disconnected` dopo due `-O check` falliti di fila. All'interfaccia arrivano solo messaggi
+  italiani fissi, mai lo stderr grezzo di ssh (banner del server compresi). Socket con 16 cifre esadecimali (FNV-1a a
+  64 bit dell'id); due server connessi con lo stesso socket: il secondo è rifiutato. Host e alias: solo lettere e cifre
+  ASCII, `.`, `-`, `_`, `:` (`validate_host`, anche per gli alias della config e per `hostname`/`hostkeyalias` di
+  `ssh -G`); il nome scritto in known_hosts è `host` o `[host]:porta` con quei caratteri (niente jolly, liste,
+  marcatori); al massimo 8 chiavi e 16 KB da `ssh-keyscan`, oltre la connessione è rifiutata; sul server l'unica
   shell è `sh -c '<script costante>' _ <argomenti>` con ogni argomento passato da `quote_sh` (presupposto: shell di
   login POSIX sul server). All'uscita dall'app `ssh -O exit` per ogni connessione, poi il registro dei processi.
   Test: `quote_sh_survives_hostile_names` (eseguito con `/bin/sh`), `option_values_with_spaces_quotes_and_percent_reach_openssh_intact`,
@@ -406,8 +417,11 @@ email oltre all'attribuzione dei commit, nessun token (`sk-`, `ghp_`, chiavi). `
 - Eventi di progetto: una pagina compromessa che conosce l'UUID di un altro progetto può ascoltarne gli eventi
   (vedi "Come arrivano gli eventi di un progetto").
 - La cartella temporanea delle immagini è condivisa tra progetti (nomi casuali non indovinabili).
-- **L'eseguibile dell'app consegna le password SSH a chi lo avvia in modalità askpass.** Un processo dell'utente
-  che lancia l'app con `CODEART_ASKPASS_ACCOUNT=<id>` e un prompt `…password:` ottiene la password su stdout, senza
-  la richiesta del Portachiavi che avrebbe leggendola direttamente (l'elemento è dell'app). Chi esegue codice come
-  l'utente ha comunque molte altre strade; il confine resta quello del modello di minaccia (pagina, non processi
-  locali).
+- **L'eseguibile dell'app consegna le password SSH a chi lo avvia in modalità askpass da `/usr/bin/ssh`.** Il
+  controllo del padre (`/usr/bin/ssh`) e dell'host nel prompt non prova con quale server parli davvero quel `ssh`: un
+  processo dell'utente può avviare `/usr/bin/ssh` verso un proprio server con `SSH_ASKPASS=<app>`,
+  `CODEART_ASKPASS_ACCOUNT=<id>`, `CODEART_ASKPASS_HOST=<host>` e `HostKeyAlias=<host>` (o un `HostName` falso in un
+  proprio `-F`), e ricevere la password senza la richiesta del Portachiavi che avrebbe leggendola direttamente
+  (l'elemento è dell'app). Contro un processo dello stesso utente non c'è un confine vero (può anche leggere la
+  memoria dell'app o sostituirne le scelte); il modello di minaccia resta la pagina, non i processi locali. Il
+  controllo dell'host chiude invece il caso reale di un salto ProxyJump che chiede la propria password.

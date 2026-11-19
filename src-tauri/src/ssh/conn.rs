@@ -6,7 +6,7 @@
 //! Chiavi dei server: `StrictHostKeyChecking=yes` con `~/.ssh/known_hosts` e `<dati app>/known_hosts`. Server
 //! sconosciuto: `ssh-keyscan`, impronte in un dialogo nativo (il chiamante fornisce `confirm`), solo con conferma la
 //! chiave si aggiunge a `<dati app>/known_hosts` (mai in `~/.ssh`). Chiave cambiata: errore, nessuna conferma.
-use super::{validate_target, Server, ServerSource};
+use super::{is_host_byte, validate_host, validate_target, Server, ServerSource};
 use crate::tools::{self, ToolOutput};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -73,17 +73,18 @@ impl SshPaths {
         self.home.join(".ssh/known_hosts")
     }
 
-    /// Socket del master: `<dati app>/s/<8 hex>`; se troppo lungo `$TMPDIR/codeart-<uid>/<8 hex>`, poi
-    /// `/tmp/codeart-<uid>/<8 hex>` (cartelle 0700, vedi `ensure_private_dir`).
+    /// Socket del master: `<dati app>/s/<16 hex>`; se troppo lungo `$TMPDIR/codeart-<uid>/<16 hex>`, poi
+    /// `/tmp/codeart-<uid>/<16 hex>` (cartelle 0700, vedi `ensure_private_dir`). L'ultimo sta sempre nel limite (al
+    /// massimo 23 + 1 + 16 + 17 = 57 byte), quindi non serve un nome più corto. Due server con lo stesso socket:
+    /// `connect` rifiuta il secondo.
     pub fn socket(&self, id: &str) -> PathBuf {
         let h = short_hash(id);
-        let candidates = [
-            self.data_dir.join("s"),
-            self.tmp_dir.join(format!("codeart-{}", self.uid)),
-            PathBuf::from(format!("/tmp/codeart-{}", self.uid)),
-        ];
-        let last = candidates[2].join(&h);
-        candidates.into_iter().map(|d| d.join(&h)).find(|p| socket_fits(p)).unwrap_or(last)
+        let tmp = PathBuf::from(format!("/tmp/codeart-{}", self.uid)).join(&h);
+        [self.data_dir.join("s"), self.tmp_dir.join(format!("codeart-{}", self.uid))]
+            .into_iter()
+            .map(|d| d.join(&h))
+            .find(|p| socket_fits(p))
+            .unwrap_or(tmp)
     }
 }
 
@@ -91,14 +92,14 @@ fn socket_fits(p: &Path) -> bool {
     p.as_os_str().len() + SOCKET_TMP_SUFFIX <= SOCKET_MAX
 }
 
-/// Hash stabile (FNV-1a a 32 bit) dell'id del server, in 8 cifre esadecimali: non cambia tra versioni di Rust.
+/// Hash stabile (FNV-1a a 64 bit) dell'id del server, in 16 cifre esadecimali: non cambia tra versioni di Rust.
 pub fn short_hash(id: &str) -> String {
-    let mut h: u32 = 0x811c_9dc5;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in id.bytes() {
-        h ^= u32::from(b);
-        h = h.wrapping_mul(0x0100_0193);
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{h:08x}")
+    format!("{h:016x}")
 }
 
 /// Valore di un'opzione `-o` di OpenSSH tra virgolette (i percorsi dell'app contengono spazi:
@@ -116,9 +117,9 @@ pub fn destination(server: &Server) -> String {
     }
 }
 
-/// Destinazione e utente validi (`validate_target`): l'unica difesa contro l'iniezione di opzioni.
+/// Destinazione e utente validi (`validate_host`, `validate_target`): l'unica difesa contro l'iniezione di opzioni.
 pub fn check_server(server: &Server) -> Result<(), String> {
-    validate_target("Host", &destination(server))?;
+    validate_host("Host", &destination(server))?;
     if let Some(u) = server.user.as_deref().filter(|_| server.source == ServerSource::Saved) {
         validate_target("Utente", u)?;
     }
@@ -131,27 +132,43 @@ pub fn check_server(server: &Server) -> Result<(), String> {
 /// Argomenti comuni: socket condiviso (`ControlMaster=no`: client del master), chiavi verificate, poi porta, utente
 /// e identità per i salvati, poi la destinazione.
 pub fn base_args(server: &Server, paths: &SshPaths) -> Vec<String> {
-    args_with(server, paths, false, &[])
+    args_with(server, paths, Mode::Client, &[])
 }
 
-/// Come `base_args`, con `ControlMaster=yes` per il master e `extra` subito prima della destinazione.
-fn args_with(server: &Server, paths: &SshPaths, master: bool, extra: &[&str]) -> Vec<String> {
+/// Per chi sono gli argomenti. OpenSSH tiene il PRIMO valore di ogni `-o`, quindi le varianti si generano qui
+/// invece di aggiungere opzioni in coda.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Client del master (`-G`, `-O`).
+    Client,
+    /// Il master: `ControlMaster=yes`.
+    Master,
+    /// Operazioni (`run`): `BatchMode=yes` e `PreferredAuthentications=none`. Un client del master non si autentica
+    /// mai; se il master non c'è, OpenSSH ripiegherebbe su una connessione diretta, che così fallisce sempre.
+    Run,
+}
+
+/// Argomenti per `mode`, con `extra` subito prima della destinazione.
+fn args_with(server: &Server, paths: &SshPaths, mode: Mode, extra: &[&str]) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-o".into(),
         format!("ControlPath={}", cfg_value(&paths.socket(&server.id))),
         "-o".into(),
-        format!("ControlMaster={}", if master { "yes" } else { "no" }),
+        format!("ControlMaster={}", if mode == Mode::Master { "yes" } else { "no" }),
         "-o".into(),
         "StrictHostKeyChecking=yes".into(),
         "-o".into(),
         format!("UserKnownHostsFile=\"~/.ssh/known_hosts\" {}", cfg_value(&paths.app_known_hosts())),
         "-o".into(),
-        "BatchMode=no".into(),
+        format!("BatchMode={}", if mode == Mode::Run { "yes" } else { "no" }),
         "-o".into(),
         "ServerAliveInterval=15".into(),
         "-o".into(),
         "ServerAliveCountMax=3".into(),
     ];
+    if mode == Mode::Run {
+        a.extend(["-o".into(), "PreferredAuthentications=none".into()]);
+    }
     if server.source == ServerSource::Saved {
         if let Some(p) = server.port {
             a.extend(["-p".into(), p.to_string()]);
@@ -171,17 +188,18 @@ fn args_with(server: &Server, paths: &SshPaths, master: bool, extra: &[&str]) ->
 /// Argomenti del master: in sottofondo dopo l'autenticazione (`-N` con `ControlPersist`), si chiude da solo dopo
 /// 10 minuti senza client (anche se l'app termina male).
 pub fn master_args(server: &Server, paths: &SshPaths) -> Vec<String> {
-    args_with(server, paths, true, &["-M", "-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10"])
+    args_with(server, paths, Mode::Master, &["-M", "-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10"])
 }
 
 /// `ssh -O <op>` sul socket del server (`check`, `exit`).
 pub fn control_args(server: &Server, paths: &SshPaths, op: &str) -> Vec<String> {
-    args_with(server, paths, false, &["-O", op])
+    args_with(server, paths, Mode::Client, &["-O", op])
 }
 
-/// Argomenti di `run`: niente terminale (i byte passano intatti), niente inoltri della config, poi il comando.
+/// Argomenti di `run`: mai un'autenticazione (vedi `Mode::Run`), niente terminale (i byte passano intatti), niente
+/// inoltri della config, poi il comando.
 pub fn run_args(server: &Server, paths: &SshPaths, script: &str, args: &[&str]) -> Vec<String> {
-    let mut a = args_with(server, paths, false, &["-T", "-o", "ClearAllForwardings=yes"]);
+    let mut a = args_with(server, paths, Mode::Run, &["-T", "-o", "ClearAllForwardings=yes"]);
     a.push(remote_cmd(script, args));
     a
 }
@@ -211,7 +229,10 @@ pub enum Failure {
     HostKeyUnknown,
     Unreachable(&'static str),
     Disconnected,
-    Other(String),
+    /// Il master è partito ma il socket non risponde.
+    NoMaster,
+    /// Nessun messaggio riconosciuto: lo stderr grezzo (banner del server compresi) non arriva mai all'interfaccia.
+    Other,
 }
 
 /// Classifica lo stderr di `ssh` (uscita 255).
@@ -251,13 +272,7 @@ pub fn classify(stderr: &str) -> Failure {
     {
         return Failure::Disconnected;
     }
-    let line = stderr
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("Warning:") && !l.starts_with("Pseudo-terminal"))
-        .unwrap_or("");
-    let line: String = line.chars().filter(|c| !c.is_control()).take(200).collect();
-    Failure::Other(line)
+    Failure::Other
 }
 
 impl Failure {
@@ -271,8 +286,8 @@ impl Failure {
             Failure::HostKeyUnknown => "La chiave del server non è conosciuta: riprova a connetterti per verificarla".into(),
             Failure::Unreachable(m) => (*m).into(),
             Failure::Disconnected => "Connessione chiusa".into(),
-            Failure::Other(l) if l.is_empty() => "Errore di ssh".into(),
-            Failure::Other(l) => format!("Errore di ssh: {l}"),
+            Failure::NoMaster => "Connessione condivisa non disponibile".into(),
+            Failure::Other => "Connessione non riuscita (errore di ssh)".into(),
         }
     }
 
@@ -293,6 +308,11 @@ pub struct Resolved {
 }
 
 impl Resolved {
+    /// Host che OpenSSH scrive nei prompt di password (`utente@host's password:`): `HostKeyAlias` o il nome reale.
+    pub fn prompt_host(&self) -> &str {
+        self.host_key_alias.as_deref().unwrap_or(&self.hostname)
+    }
+
     /// Nome cercato in known_hosts, come lo usa OpenSSH: `HostKeyAlias` se c'è, altrimenti `host` (porta 22) o
     /// `[host]:porta`.
     pub fn lookup_name(&self) -> String {
@@ -324,9 +344,9 @@ pub fn parse_ssh_g(out: &str) -> Result<Resolved, String> {
         }
     }
     let hostname = hostname.ok_or("ssh -G: host mancante")?;
-    validate_target("Host", &hostname)?;
+    validate_host("Host", &hostname)?;
     if let Some(a) = &alias {
-        validate_target("HostKeyAlias", a)?;
+        validate_host("HostKeyAlias", a)?;
     }
     Ok(Resolved { hostname, port: port.ok_or("ssh -G: porta mancante")?, host_key_alias: alias })
 }
@@ -341,9 +361,26 @@ const KEY_TYPES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
+/// Chiavi al massimo accettate da `ssh-keyscan` (una per tipo basta) e loro dimensione totale.
+const MAX_KEYS: usize = 8;
+const MAX_KEYS_BYTES: usize = 16 * 1024;
+
+/// Nome valido in known_hosts: `host` o `[host]:porta`, con `host` di soli caratteri di `validate_host`. Niente
+/// `*`/`?`/`!` (jolly e negazioni), `,` (liste di host), `@` iniziale (marcatori), `|` (hash).
+pub fn valid_lookup_name(name: &str) -> bool {
+    let host_ok = |h: &str| !h.is_empty() && !h.starts_with('-') && h.bytes().all(is_host_byte);
+    match name.strip_prefix('[').and_then(|r| r.split_once("]:")) {
+        Some((h, port)) => host_ok(h) && port.parse::<u16>().is_ok_and(|p| p > 0) && port.bytes().all(|b| b.is_ascii_digit()),
+        None => host_ok(name),
+    }
+}
+
 /// Righe di `ssh-keyscan` per `expected` (host o `[host]:porta`), riscritte come `<name> <tipo> <chiave>`: solo
-/// tipi noti e chiavi in base64, nient'altro entra in known_hosts.
-pub fn parse_keyscan(out: &str, expected: &str, name: &str) -> Vec<String> {
+/// tipi noti e chiavi in base64, nient'altro entra in known_hosts. Più di `MAX_KEYS` chiavi o di 16 KB: rifiutate.
+pub fn parse_keyscan(out: &str, expected: &str, name: &str) -> Result<Vec<String>, String> {
+    if !valid_lookup_name(name) {
+        return Err("Nome del server non valido per known_hosts".into());
+    }
     let mut lines: Vec<String> = Vec::new();
     for line in out.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -356,7 +393,10 @@ pub fn parse_keyscan(out: &str, expected: &str, name: &str) -> Vec<String> {
             }
         }
     }
-    lines
+    if lines.len() > MAX_KEYS || lines.iter().map(|l| l.len() + 1).sum::<usize>() > MAX_KEYS_BYTES {
+        return Err("Il server ha inviato troppe chiavi: connessione rifiutata".into());
+    }
+    Ok(lines)
 }
 
 /// Impronte da `ssh-keygen -lf -`: `(tipo, SHA256:…)`.
@@ -480,21 +520,53 @@ struct Entry {
     /// Cambia a ogni connessione o disconnessione: un'operazione vecchia non sovrascrive lo stato nuovo.
     generation: u64,
     server: Server,
+    socket: PathBuf,
 }
 
 pub type Emitter = Arc<dyn Fn(StateEvent) + Send + Sync>;
 
+/// Esito di `ssh -O check`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    Alive,
+    Dead,
+    /// L'app si sta chiudendo (nessun processo parte più).
+    Stopped,
+}
+
+enum ConnectError {
+    Cancelled,
+    Failed(Failure),
+    Io(String),
+}
+
+/// I processi `ssh` dietro le connessioni: quelli veri nell'app, uno finto nei test della macchina a stati.
+trait SshOps: Send + Sync {
+    /// Verifica la chiave del server e avvia (o riusa) il master. `current()` dice se questa connessione è ancora
+    /// quella valida (dopo il dialogo, prima di avviare il master).
+    fn establish(&self, server: &Server, current: &dyn Fn() -> bool, confirm: &dyn Fn(&str) -> bool) -> Result<(), ConnectError>;
+    fn check(&self, server: &Server) -> Check;
+    fn exit(&self, server: &Server);
+}
+
 /// Connessioni condivise dell'app (una per server, valide per tutte le finestre).
 pub struct Connections {
     paths: SshPaths,
+    ops: Arc<dyn SshOps>,
     entries: Mutex<HashMap<String, Entry>>,
     next: AtomicU64,
     emit: Emitter,
+    monitor_every: Duration,
 }
 
 impl Connections {
     pub fn new(paths: SshPaths, emit: Emitter) -> Self {
-        Connections { paths, entries: Mutex::new(HashMap::new()), next: AtomicU64::new(1), emit }
+        let ops = Arc::new(SystemSsh { paths: paths.clone() });
+        Self::with_ops(paths, ops, emit, MONITOR_EVERY)
+    }
+
+    fn with_ops(paths: SshPaths, ops: Arc<dyn SshOps>, emit: Emitter, monitor_every: Duration) -> Self {
+        Connections { paths, ops, entries: Mutex::new(HashMap::new()), next: AtomicU64::new(1), emit, monitor_every }
     }
 
     pub fn paths(&self) -> &SshPaths {
@@ -514,11 +586,15 @@ impl Connections {
         crate::lock(&self.entries).get(id).map(|e| e.state)
     }
 
-    /// Nuova generazione per `server` nello stato `state`; emette l'evento.
-    fn begin(&self, server: &Server, state: ConnState, message: Option<String>) -> u64 {
+    fn emit(&self, id: &str, state: ConnState, message: Option<String>) {
+        (self.emit)(StateEvent { id: id.to_string(), state, message });
+    }
+
+    /// Nuova generazione per `server` nello stato `state` (chiamante con il lucchetto preso).
+    fn insert_locked(&self, map: &mut HashMap<String, Entry>, server: &Server, state: ConnState) -> u64 {
         let generation = self.next.fetch_add(1, Ordering::Relaxed);
-        crate::lock(&self.entries).insert(server.id.clone(), Entry { state, message: message.clone(), generation, server: server.clone() });
-        (self.emit)(StateEvent { id: server.id.clone(), state, message });
+        let socket = self.paths.socket(&server.id);
+        map.insert(server.id.clone(), Entry { state, message: None, generation, server: server.clone(), socket });
         generation
     }
 
@@ -534,7 +610,7 @@ impl Connections {
                 _ => return false,
             }
         }
-        (self.emit)(StateEvent { id: id.to_string(), state, message });
+        self.emit(id, state, message);
         true
     }
 
@@ -542,26 +618,39 @@ impl Connections {
         crate::lock(&self.entries).get(id).map(|e| e.generation)
     }
 
-    /// Connette `server` (o non fa nulla se è già connesso o in connessione: lo stato arriva con `ssh:state`).
+    /// Connette `server`. Già connesso o in connessione: `Ok` subito, senza un secondo dialogo né un secondo master
+    /// (lo stato arriva con `ssh:state`); la decisione e l'iscrizione avvengono sotto lo stesso lucchetto.
     /// `confirm` mostra il dialogo nativo per un server nuovo e dice se l'utente l'ha accettato.
     /// Da chiamare fuori dal thread principale.
     pub fn connect(self: &Arc<Self>, server: &Server, confirm: &dyn Fn(&str) -> bool) -> Result<(), String> {
         check_server(server)?;
-        {
-            let map = crate::lock(&self.entries);
-            if map.get(&server.id).is_some_and(|e| matches!(e.state, ConnState::Connecting | ConnState::Connected)) {
+        let socket = self.paths.socket(&server.id);
+        let generation = {
+            let mut map = crate::lock(&self.entries);
+            let live = |e: &Entry| matches!(e.state, ConnState::Connecting | ConnState::Connected);
+            if map.get(&server.id).is_some_and(live) {
                 return Ok(());
             }
-        }
-        let generation = self.begin(server, ConnState::Connecting, None);
-        match self.establish(server, generation, confirm) {
+            if map.iter().any(|(id, e)| id != &server.id && live(e) && e.socket == socket) {
+                return Err("Un altro server connesso usa lo stesso socket: disconnettilo prima".into());
+            }
+            self.insert_locked(&mut map, server, ConnState::Connecting)
+        };
+        self.emit(&server.id, ConnState::Connecting, None);
+        let current = || self.generation_of(&server.id) == Some(generation);
+        match self.ops.establish(server, &current, confirm) {
             Ok(()) => {
                 if self.set_if(&server.id, generation, ConnState::Connected, None) {
                     self.spawn_monitor(server.clone(), generation);
                     Ok(())
                 } else {
-                    // disconnesso mentre si connetteva: il master appena nato si chiude
-                    let _ = self.control(server, "exit");
+                    // superata: il master si chiude solo se nessuna connessione più recente lo sta usando
+                    let owned = crate::lock(&self.entries)
+                        .get(&server.id)
+                        .is_some_and(|e| matches!(e.state, ConnState::Connecting | ConnState::Connected));
+                    if !owned {
+                        self.ops.exit(server);
+                    }
                     Err(CANCELLED.into())
                 }
             }
@@ -580,28 +669,165 @@ impl Connections {
         }
     }
 
-    fn establish(&self, server: &Server, generation: u64, confirm: &dyn Fn(&str) -> bool) -> Result<(), ConnectError> {
+    /// Controllo periodico: il master che termina (rete, server, 10 minuti senza client) → `disconnected`. Servono
+    /// due controlli falliti di fila: un intoppo isolato (processo lento, avvio non riuscito) non chiude la sessione.
+    fn spawn_monitor(self: &Arc<Self>, server: Server, generation: u64) {
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let step = me.monitor_every.min(Duration::from_millis(200));
+            let mut failures = 0;
+            loop {
+                let until = Instant::now() + me.monitor_every;
+                while Instant::now() < until {
+                    if me.generation_of(&server.id) != Some(generation) {
+                        return;
+                    }
+                    std::thread::sleep(step);
+                }
+                match me.ops.check(&server) {
+                    Check::Alive => failures = 0,
+                    Check::Stopped => return,
+                    Check::Dead => {
+                        failures += 1;
+                        if failures >= 2 {
+                            me.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Chiude la connessione condivisa di `id` (`ssh -O exit`); già chiusa = nulla da fare.
+    pub fn disconnect(&self, id: &str) -> Result<(), String> {
+        let server = {
+            let mut map = crate::lock(&self.entries);
+            let Some(server) = map.get(id).map(|e| e.server.clone()) else { return Ok(()) };
+            self.insert_locked(&mut map, &server, ConnState::Disconnected);
+            server
+        };
+        self.emit(id, ConnState::Disconnected, None);
+        self.ops.exit(&server);
+        Ok(())
+    }
+
+    /// Esegue `script` sul server con `args` (via `remote_cmd`) sulla connessione condivisa; serve lo stato
+    /// `connected`. Mai una connessione diretta (vedi `Mode::Run`).
+    pub fn run(&self, server: &Server, script: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+        self.run_with_timeout(server, script, args, stdin, RUN_TIMEOUT)
+    }
+
+    /// Come `run`. Uscita 255 con un messaggio di ssh riconosciuto E master che non risponde più = connessione persa
+    /// (`disconnected`); altrimenti è l'uscita dello script e torna al chiamante così com'è.
+    pub fn run_with_timeout(
+        &self,
+        server: &Server,
+        script: &str,
+        args: &[&str],
+        stdin: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> Result<ToolOutput, String> {
+        check_server(server)?;
+        let generation = {
+            let map = crate::lock(&self.entries);
+            match map.get(&server.id) {
+                Some(e) if e.state == ConnState::Connected => e.generation,
+                _ => return Err(DISCONNECTED.into()),
+            }
+        };
+        if !self.paths.socket(&server.id).exists() {
+            self.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
+            return Err(DISCONNECTED.into());
+        }
+        let mut c = command(SSH);
+        c.args(run_args(server, &self.paths, script, args));
+        let out = tools::run_tool(c, timeout, stdin)?;
+        if lost_connection(out.status, &out.stderr, || self.ops.check(server)) {
+            self.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
+            return Err(DISCONNECTED.into());
+        }
+        Ok(out)
+    }
+
+    /// Uscita dall'app: `ssh -O exit` per ogni connessione (in parallelo), prima di fermare i processi.
+    pub fn close_all(&self) {
+        let servers: Vec<Server> = crate::lock(&self.entries)
+            .values()
+            .filter(|e| matches!(e.state, ConnState::Connected | ConnState::Connecting))
+            .map(|e| e.server.clone())
+            .collect();
+        let handles: Vec<_> = servers
+            .into_iter()
+            .map(|s| {
+                let ops = self.ops.clone();
+                std::thread::spawn(move || ops.exit(&s))
+            })
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Uscita di `run` dovuta alla connessione persa? Solo con 255, un messaggio di ssh riconosciuto E il master che non
+/// risponde più (`check` si chiama solo in quel caso); altrimenti è l'uscita dello script remoto.
+fn lost_connection(status: i32, stderr: &str, check: impl FnOnce() -> Check) -> bool {
+    status == 255 && classify(stderr) != Failure::Other && check() == Check::Dead
+}
+
+/// I processi veri: `/usr/bin/ssh`, `ssh-keygen`, `ssh-keyscan`.
+struct SystemSsh {
+    paths: SshPaths,
+}
+
+impl SshOps for SystemSsh {
+    fn establish(&self, server: &Server, current: &dyn Fn() -> bool, confirm: &dyn Fn(&str) -> bool) -> Result<(), ConnectError> {
         let sock = self.paths.socket(&server.id);
         if let Some(dir) = sock.parent() {
             ensure_private_dir(dir, self.paths.uid).map_err(ConnectError::Io)?;
         }
         ensure_private_dir(&self.paths.data_dir, self.paths.uid).map_err(ConnectError::Io)?;
         // un master ancora vivo (avvio precedente dell'app terminato male) si riusa
-        if self.control(server, "check").is_ok_and(|o| o.status == 0) {
+        if self.check(server) == Check::Alive {
             return Ok(());
         }
         // socket rimasto da un master morto: OpenSSH altrimenti disattiverebbe la condivisione
         let _ = std::fs::remove_file(&sock);
-        self.verify_host_key(server, confirm)?;
-        if self.generation_of(&server.id) != Some(generation) {
+        let resolved = self.verify_host_key(server, confirm)?;
+        if !current() {
             return Err(ConnectError::Cancelled);
         }
-        self.start_master(server)
+        self.start_master(server, &resolved)
+    }
+
+    fn check(&self, server: &Server) -> Check {
+        match self.control(server, "check") {
+            Ok(o) if o.status == 0 => Check::Alive,
+            Err(e) if e == tools::STOPPED => Check::Stopped,
+            _ => Check::Dead,
+        }
+    }
+
+    fn exit(&self, server: &Server) {
+        let mut c = command(SSH);
+        c.args(control_args(server, &self.paths, "exit"));
+        let _ = tools::run_tool(c, Duration::from_secs(3), None);
+    }
+}
+
+impl SystemSsh {
+    /// `ssh -O <op>` sul socket del server.
+    fn control(&self, server: &Server, op: &str) -> Result<ToolOutput, String> {
+        let mut c = command(SSH);
+        c.args(control_args(server, &self.paths, op));
+        tools::run_tool(c, QUICK_TIMEOUT, None)
     }
 
     /// Server già in un known_hosts: nulla da fare. Sconosciuto: `ssh-keyscan`, impronte, conferma, aggiunta a
     /// `<dati app>/known_hosts`. Una chiave cambiata la scopre poi il master (errore, nessuna conferma).
-    fn verify_host_key(&self, server: &Server, confirm: &dyn Fn(&str) -> bool) -> Result<(), ConnectError> {
+    /// Restituisce l'indirizzo reale (per askpass).
+    fn verify_host_key(&self, server: &Server, confirm: &dyn Fn(&str) -> bool) -> Result<Resolved, ConnectError> {
         let mut c = command(SSH);
         c.arg("-G").args(base_args(server, &self.paths));
         let out = tools::run_tool(c, QUICK_TIMEOUT, None).map_err(ConnectError::Io)?;
@@ -610,16 +836,19 @@ impl Connections {
         }
         let r = parse_ssh_g(&String::from_utf8_lossy(&out.stdout)).map_err(ConnectError::Io)?;
         let name = r.lookup_name();
+        if !valid_lookup_name(&name) {
+            return Err(ConnectError::Io("Nome del server non valido per known_hosts".into()));
+        }
         if is_known(&name, &known_hosts_files(&self.paths)).map_err(ConnectError::Io)? {
-            return Ok(());
+            return Ok(r);
         }
         let mut c = command(SSH_KEYSCAN);
         c.args(["-T", "5", "-p", &r.port.to_string(), "--", &r.hostname]);
         let out = tools::run_tool(c, Duration::from_secs(15), None).map_err(ConnectError::Io)?;
-        let lines = parse_keyscan(&String::from_utf8_lossy(&out.stdout), &scan_name(&r.hostname, r.port), &name);
+        let lines = parse_keyscan(&String::from_utf8_lossy(&out.stdout), &scan_name(&r.hostname, r.port), &name).map_err(ConnectError::Io)?;
         if lines.is_empty() {
             let f = match classify(&out.stderr) {
-                Failure::Other(_) => Failure::Unreachable("Server non raggiungibile: nessuna chiave ricevuta"),
+                Failure::Other => Failure::Unreachable("Server non raggiungibile: nessuna chiave ricevuta"),
                 f => f,
             };
             return Err(ConnectError::Failed(f));
@@ -634,12 +863,13 @@ impl Connections {
         if !confirm(&new_host_message(&destination(server), &name, &fps)) {
             return Err(ConnectError::Cancelled);
         }
-        append_known_hosts(&self.paths.app_known_hosts(), &lines).map_err(ConnectError::Io)
+        append_known_hosts(&self.paths.app_known_hosts(), &lines).map_err(ConnectError::Io)?;
+        Ok(r)
     }
 
     /// Avvia il master e aspetta che il socket risponda. Con `-N` e `ControlPersist` OpenSSH passa in sottofondo
     /// dopo l'autenticazione (il processo avviato esce 0); se restasse in primo piano basta il socket pronto.
-    fn start_master(&self, server: &Server) -> Result<(), ConnectError> {
+    fn start_master(&self, server: &Server, resolved: &Resolved) -> Result<(), ConnectError> {
         use crate::claude::locate::{in_new_session, stop_group, TERM_GRACE};
         use std::process::Stdio;
         let ticket = tools::RUNNING.register().map_err(ConnectError::Io)?;
@@ -649,6 +879,8 @@ impl Connections {
             .env("SSH_ASKPASS", exe)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env(super::askpass::ACCOUNT_ENV, &server.id)
+            // askpass risponde solo a un prompt che nomina questo host (non a un salto ProxyJump)
+            .env(super::askpass::HOST_ENV, resolved.prompt_host())
             .env_remove("DISPLAY");
         in_new_session(&mut cmd);
         let mut child = cmd
@@ -697,7 +929,7 @@ impl Connections {
             let ready_to_check = exited_ok_at.is_some() || sock.exists();
             if ready_to_check && last_check.elapsed() >= Duration::from_millis(300) {
                 last_check = Instant::now();
-                if self.control(server, "check").is_ok_and(|o| o.status == 0) {
+                if self.check(server) == Check::Alive {
                     // in primo piano: il processo resta vivo, il controllo periodico ne segue la fine
                     return Ok(());
                 }
@@ -705,7 +937,7 @@ impl Connections {
             // uscito 0 ma il socket non risponde: errore dopo qualche secondo
             if exited_ok_at.is_some_and(|t| t.elapsed() > Duration::from_secs(5)) {
                 return Err(ConnectError::Failed(match classify(&stderr()) {
-                    Failure::Other(l) if l.is_empty() => Failure::Other("connessione condivisa non disponibile".into()),
+                    Failure::Other => Failure::NoMaster,
                     f => f,
                 }));
             }
@@ -718,117 +950,6 @@ impl Connections {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-
-    /// `ssh -O <op>` sul socket del server.
-    fn control(&self, server: &Server, op: &str) -> Result<ToolOutput, String> {
-        let mut c = command(SSH);
-        c.args(control_args(server, &self.paths, op));
-        tools::run_tool(c, QUICK_TIMEOUT, None)
-    }
-
-    /// Controllo periodico: il master che termina (rete, server, 10 minuti senza client) → `disconnected`.
-    fn spawn_monitor(self: &Arc<Self>, server: Server, generation: u64) {
-        let me = self.clone();
-        std::thread::spawn(move || {
-            loop {
-                let until = Instant::now() + MONITOR_EVERY;
-                while Instant::now() < until {
-                    if me.generation_of(&server.id) != Some(generation) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                match me.control(&server, "check") {
-                    Ok(o) if o.status == 0 => {}
-                    // l'app si sta chiudendo
-                    Err(e) if e == tools::STOPPED => return,
-                    _ => {
-                        me.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
-                        return;
-                    }
-                }
-            }
-        });
-    }
-
-    /// Chiude la connessione condivisa di `id` (`ssh -O exit`); già chiusa = nulla da fare.
-    pub fn disconnect(&self, id: &str) -> Result<(), String> {
-        let server = crate::lock(&self.entries).get(id).map(|e| e.server.clone());
-        let Some(server) = server else { return Ok(()) };
-        self.begin(&server, ConnState::Disconnected, None);
-        let _ = self.control(&server, "exit");
-        Ok(())
-    }
-
-    /// Esegue `script` sul server con `args` (via `remote_cmd`) sulla connessione condivisa; serve lo stato
-    /// `connected`. Uscita 255 = errore di ssh (connessione persa → `disconnected`).
-    pub fn run(&self, server: &Server, script: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<ToolOutput, String> {
-        self.run_with_timeout(server, script, args, stdin, RUN_TIMEOUT)
-    }
-
-    pub fn run_with_timeout(
-        &self,
-        server: &Server,
-        script: &str,
-        args: &[&str],
-        stdin: Option<Vec<u8>>,
-        timeout: Duration,
-    ) -> Result<ToolOutput, String> {
-        check_server(server)?;
-        let generation = {
-            let map = crate::lock(&self.entries);
-            match map.get(&server.id) {
-                Some(e) if e.state == ConnState::Connected => e.generation,
-                _ => return Err(DISCONNECTED.into()),
-            }
-        };
-        if !self.paths.socket(&server.id).exists() {
-            self.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
-            return Err(DISCONNECTED.into());
-        }
-        let mut c = command(SSH);
-        c.args(run_args(server, &self.paths, script, args));
-        let out = tools::run_tool(c, timeout, stdin)?;
-        if out.status == 255 {
-            let f = classify(&out.stderr);
-            if f == Failure::Disconnected {
-                self.set_if(&server.id, generation, ConnState::Disconnected, Some(f.message()));
-                return Err(DISCONNECTED.into());
-            }
-            return Err(f.message());
-        }
-        Ok(out)
-    }
-
-    /// Uscita dall'app: `ssh -O exit` per ogni connessione (in parallelo), prima di fermare i processi.
-    pub fn close_all(&self) {
-        let servers: Vec<Server> = crate::lock(&self.entries)
-            .values()
-            .filter(|e| matches!(e.state, ConnState::Connected | ConnState::Connecting))
-            .map(|e| e.server.clone())
-            .collect();
-        let paths = self.paths.clone();
-        let handles: Vec<_> = servers
-            .into_iter()
-            .map(|s| {
-                let paths = paths.clone();
-                std::thread::spawn(move || {
-                    let mut c = command(SSH);
-                    c.args(control_args(&s, &paths, "exit"));
-                    let _ = tools::run_tool(c, Duration::from_secs(3), None);
-                })
-            })
-            .collect();
-        for h in handles {
-            let _ = h.join();
-        }
-    }
-}
-
-enum ConnectError {
-    Cancelled,
-    Failed(Failure),
-    Io(String),
 }
 
 #[cfg(test)]
@@ -870,11 +991,11 @@ mod tests {
 
     #[test]
     fn short_hash_is_stable_fnv1a() {
-        assert_eq!(short_hash(""), "811c9dc5");
-        assert_eq!(short_hash("a"), "e40c292c");
+        assert_eq!(short_hash(""), "cbf29ce484222325");
+        assert_eq!(short_hash("a"), "af63dc4c8601ec8c");
         assert_eq!(short_hash("config:web"), short_hash("config:web"));
         assert_ne!(short_hash("config:web"), short_hash("config:db"));
-        assert_eq!(short_hash("x").len(), 8);
+        assert_eq!(short_hash("x").len(), 16);
     }
 
     #[test]
@@ -883,14 +1004,18 @@ mod tests {
         let h = short_hash("id-1");
         assert_eq!(p.socket("id-1"), PathBuf::from(format!("/home/dev/Library/Application Support/CodeArt/s/{h}")));
         // 100 byte compreso il nome temporaneo di OpenSSH (`.` + 16 caratteri)
-        let fits = "/d".repeat((100 - 17 - "/s/".len() - 8) / 2);
-        assert_eq!(fits.len() + 3 + 8 + 17, 100);
+        let fits = "/d".repeat((100 - 17 - "/s/".len() - 16) / 2);
+        assert_eq!(fits.len() + 3 + 16 + 17, 100);
         assert_eq!(paths(&fits).socket("id-1"), PathBuf::from(format!("{fits}/s/{h}")));
         let long = format!("{fits}x");
         assert_eq!(paths(&long).socket("id-1"), PathBuf::from(format!("/var/folders/xy/T/codeart-501/{h}")));
         let mut both = paths(&long);
         both.tmp_dir = PathBuf::from(&long);
         assert_eq!(both.socket("id-1"), PathBuf::from(format!("/tmp/codeart-501/{h}")));
+        // il caso peggiore (uid a 10 cifre) sta comunque nel limite
+        let mut worst = both.clone();
+        worst.uid = u32::MAX;
+        assert!(socket_fits(&worst.socket("id-1")));
     }
 
     #[test]
@@ -944,6 +1069,15 @@ mod tests {
         let c = control_args(&s, &p, "check");
         assert_eq!(&c[c.len() - 3..], ["-O", "check", "example.test"].map(String::from));
         let r = run_args(&s, &p, "cat -- \"$1\"", &["/home/dev/a b"]);
+        // run non si autentica mai (niente ripiego su una connessione diretta); il master e i client sì
+        assert!(r.contains(&"BatchMode=yes".to_string()) && !r.contains(&"BatchMode=no".to_string()));
+        let pa = r.iter().position(|a| a == "PreferredAuthentications=none").expect("PreferredAuthentications=none");
+        assert_eq!(r[pa - 1], "-o");
+        assert!(pa < r.len() - 2, "prima della destinazione");
+        for other in [&m, &c, &base_args(&s, &p)] {
+            assert!(other.contains(&"BatchMode=no".to_string()));
+            assert!(!other.iter().any(|a| a.starts_with("PreferredAuthentications")));
+        }
         assert_eq!(&r[r.len() - 5..r.len() - 1], ["-T", "-o", "ClearAllForwardings=yes", "example.test"].map(String::from));
         assert_eq!(r.last().unwrap(), "sh -c 'cat -- \"$1\"' _ '/home/dev/a b'");
     }
@@ -1050,11 +1184,14 @@ Host key verification failed.\r\n";
         ] {
             assert_eq!(classify(t), Failure::Disconnected, "{t}");
         }
-        assert_eq!(classify("Warning: Permanently added 'x'\nqualcosa \u{1b}[31mdi strano\n"), Failure::Other("qualcosa [31mdi strano".into()));
-        assert_eq!(classify(""), Failure::Other(String::new()));
+        // lo stderr grezzo (banner del server compreso) non arriva mai all'interfaccia
+        let banner = "Benvenuto su example.test! Visita http://evil.test\n";
+        assert_eq!(classify(banner), Failure::Other);
+        assert_eq!(classify(""), Failure::Other);
+        assert!(!Failure::Other.message().contains("evil"));
         assert_eq!(Failure::Auth.connect_error(), AUTH);
         assert!(Failure::HostKeyChanged.connect_error().contains("cambiata"));
-        assert_eq!(Failure::Other(String::new()).message(), "Errore di ssh");
+        assert_eq!(Failure::Other.message(), "Connessione non riuscita (errore di ssh)");
     }
 
     #[test]
@@ -1069,6 +1206,10 @@ Host key verification failed.\r\n";
         assert!(parse_ssh_g("port 22\n").is_err());
         assert!(parse_ssh_g("hostname example.test\n").is_err());
         assert!(parse_ssh_g("hostname -oProxyCommand=x\nport 22\n").is_err());
+        for bad in ["*", "a,b.example.test", "dev@example.test", "a/b", "!x", "bücher.test"] {
+            assert!(parse_ssh_g(&format!("hostname {bad}\nport 22\n")).is_err(), "{bad}");
+            assert!(parse_ssh_g(&format!("hostname example.test\nport 22\nhostkeyalias {bad}\n")).is_err(), "{bad}");
+        }
         // un alias vero della config, risolto da OpenSSH
         let d = tempfile::tempdir().unwrap();
         let cfg = d.path().join("config");
@@ -1127,11 +1268,26 @@ example.test ssh-dss AAAAB3NzaC1kc3M\n\
 example.test ssh-rsa AAAA$(id)\n\
 example.test ssh-rsa AAAA extra\n";
         assert_eq!(
-            parse_keyscan(out, "example.test", "example.test"),
+            parse_keyscan(out, "example.test", "example.test").unwrap(),
             ["example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBuQ", "example.test ecdsa-sha2-nistp256 AAAAE2VjZHNh="]
         );
         let out = "[example.test]:2222 ssh-ed25519 AAAAC3Nz\nexample.test ssh-ed25519 AAAAC3Nz\n";
-        assert_eq!(parse_keyscan(out, "[example.test]:2222", "dev-box"), ["dev-box ssh-ed25519 AAAAC3Nz"]);
+        assert_eq!(parse_keyscan(out, "[example.test]:2222", "dev-box").unwrap(), ["dev-box ssh-ed25519 AAAAC3Nz"]);
+        // nomi che in known_hosts sarebbero jolly, liste, marcatori o hash
+        for bad in ["*", "a,b", "@revoked", "|1|abc", "!x", "-x", "[a]:0", "[a]:x", "[a,b]:22", "", "a b"] {
+            assert!(!valid_lookup_name(bad), "{bad:?}");
+            assert!(parse_keyscan(out, "[example.test]:2222", bad).is_err(), "{bad:?}");
+        }
+        for ok in ["example.test", "[example.test]:2222", "dev-box", "fe80::1", "[fe80::1]:22"] {
+            assert!(valid_lookup_name(ok), "{ok}");
+        }
+        // al massimo 8 chiavi e 16 KB: oltre, rifiutate
+        let many: String = (0..9).map(|i| format!("example.test ssh-ed25519 AAAA{i}\n")).collect();
+        assert!(parse_keyscan(&many, "example.test", "example.test").unwrap_err().contains("troppe chiavi"));
+        let eight: String = (0..8).map(|i| format!("example.test ssh-ed25519 AAAA{i}\n")).collect();
+        assert_eq!(parse_keyscan(&eight, "example.test", "example.test").unwrap().len(), 8);
+        let big: String = (0..2).map(|i| format!("example.test ssh-rsa {}{i}\n", "A".repeat(9000))).collect();
+        assert!(parse_keyscan(&big, "example.test", "example.test").is_err());
     }
 
     #[test]
@@ -1230,5 +1386,184 @@ example.test ssh-rsa AAAA extra\n";
         assert_eq!(serde_json::to_value(&c.states()[0]).unwrap()["state"], "error");
         let disc = serde_json::to_value(StateEvent { id: "x".into(), state: ConnState::Disconnected, message: None }).unwrap();
         assert_eq!(disc, serde_json::json!({ "id": "x", "state": "disconnected" }));
+    }
+
+    /// `ssh` finto per la macchina a stati: la prima `establish` può restare ferma finché il test non la sblocca.
+    #[derive(Default)]
+    struct FakeSsh {
+        establish_calls: std::sync::atomic::AtomicUsize,
+        exits: std::sync::atomic::AtomicUsize,
+        checks_done: std::sync::atomic::AtomicUsize,
+        entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        result: Mutex<Option<ConnectError>>,
+        checks: Mutex<std::collections::VecDeque<Check>>,
+    }
+
+    impl SshOps for FakeSsh {
+        fn establish(&self, _: &Server, _: &dyn Fn() -> bool, _: &dyn Fn(&str) -> bool) -> Result<(), ConnectError> {
+            self.establish_calls.fetch_add(1, Ordering::SeqCst);
+            let entered = self.entered.lock().unwrap().take();
+            if let Some(tx) = entered {
+                tx.send(()).unwrap();
+            }
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(rx) = gate {
+                rx.recv().unwrap();
+            }
+            match self.result.lock().unwrap().take() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+        fn check(&self, _: &Server) -> Check {
+            self.checks_done.fetch_add(1, Ordering::SeqCst);
+            self.checks.lock().unwrap().pop_front().unwrap_or(Check::Alive)
+        }
+        fn exit(&self, _: &Server) {
+            self.exits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Connessioni con il finto; `gated`: la prima `establish` si ferma (restituisce il segnale di ingresso e lo sblocco).
+    #[allow(clippy::type_complexity)]
+    fn fake_conns(
+        gated: bool,
+        monitor_every: Duration,
+    ) -> (Arc<Connections>, Arc<FakeSsh>, Arc<Mutex<Vec<StateEvent>>>, Option<(std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>)>) {
+        let fake = Arc::new(FakeSsh::default());
+        let ctl = gated.then(|| {
+            let (etx, erx) = std::sync::mpsc::channel();
+            let (gtx, grx) = std::sync::mpsc::channel();
+            *fake.entered.lock().unwrap() = Some(etx);
+            *fake.gate.lock().unwrap() = Some(grx);
+            (erx, gtx)
+        });
+        let (emit, log) = recorder();
+        let c = Arc::new(Connections::with_ops(paths("/home/dev/data"), fake.clone(), emit, monitor_every));
+        (c, fake, log, ctl)
+    }
+
+    fn states_of(log: &Arc<Mutex<Vec<StateEvent>>>) -> Vec<ConnState> {
+        log.lock().unwrap().iter().map(|e| e.state).collect()
+    }
+
+    const SLOW: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn second_connect_while_connecting_is_a_no_op() {
+        let (c, fake, log, ctl) = fake_conns(true, SLOW);
+        let (entered, release) = ctl.unwrap();
+        let s = saved("id-1");
+        let (c2, s2) = (c.clone(), s.clone());
+        let first = std::thread::spawn(move || c2.connect(&s2, &|_| true));
+        entered.recv().unwrap();
+        // doppio clic o seconda finestra: nessun secondo dialogo né secondo master
+        assert_eq!(c.connect(&s, &|_| panic!("nessun secondo dialogo")), Ok(()));
+        assert_eq!(fake.establish_calls.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert_eq!(c.connect(&s, &|_| panic!("già connesso")), Ok(()));
+        assert_eq!(fake.establish_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Connected]);
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 0);
+        c.disconnect("id-1").unwrap();
+    }
+
+    #[test]
+    fn superseded_connect_closes_its_master_only_if_nobody_owns_it() {
+        // disconnesso durante la connessione: il master appena nato si chiude
+        let (c, fake, log, ctl) = fake_conns(true, SLOW);
+        let (entered, release) = ctl.unwrap();
+        let s = saved("id-1");
+        let (c2, s2) = (c.clone(), s.clone());
+        let first = std::thread::spawn(move || c2.connect(&s2, &|_| true));
+        entered.recv().unwrap();
+        c.disconnect("id-1").unwrap();
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap().unwrap_err(), CANCELLED);
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 2);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Disconnected]);
+
+        // disconnesso e poi riconnesso da un'altra chiamata: il master è di quella, non si tocca
+        let (c, fake, _log, ctl) = fake_conns(true, SLOW);
+        let (entered, release) = ctl.unwrap();
+        let (c2, s2) = (c.clone(), s.clone());
+        let first = std::thread::spawn(move || c2.connect(&s2, &|_| true));
+        entered.recv().unwrap();
+        c.disconnect("id-1").unwrap();
+        assert_eq!(c.connect(&s, &|_| true), Ok(()));
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap().unwrap_err(), CANCELLED);
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 1, "solo il -O exit della disconnessione");
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Connected));
+        c.disconnect("id-1").unwrap();
+    }
+
+    #[test]
+    fn connect_failures_map_to_states_and_errors() {
+        let (c, fake, log, _) = fake_conns(false, SLOW);
+        *fake.result.lock().unwrap() = Some(ConnectError::Failed(Failure::Auth));
+        assert_eq!(c.connect(&saved("id-1"), &|_| true).unwrap_err(), AUTH);
+        assert_eq!(c.states(), [StateEvent { id: "id-1".into(), state: ConnState::Error, message: Some("Autenticazione non riuscita".into()) }]);
+        *fake.result.lock().unwrap() = Some(ConnectError::Cancelled);
+        assert_eq!(c.connect(&saved("id-1"), &|_| true).unwrap_err(), CANCELLED);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Error, ConnState::Connecting, ConnState::Disconnected]);
+    }
+
+    #[test]
+    fn two_servers_sharing_a_socket_are_refused() {
+        let (c, fake, _log, _) = fake_conns(false, SLOW);
+        let s = saved("id-1");
+        // un altro server connesso con lo stesso socket (collisione dell'hash)
+        crate::lock(&c.entries).insert(
+            "altro".into(),
+            Entry { state: ConnState::Connected, message: None, generation: 0, server: saved("altro"), socket: c.paths().socket("id-1") },
+        );
+        assert!(c.connect(&s, &|_| true).unwrap_err().contains("stesso socket"));
+        assert_eq!(fake.establish_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(c.state_of("id-1"), None);
+        // se l'altro non è più connesso, nessun conflitto
+        crate::lock(&c.entries).get_mut("altro").unwrap().state = ConnState::Disconnected;
+        assert_eq!(c.connect(&s, &|_| true), Ok(()));
+        c.disconnect("id-1").unwrap();
+    }
+
+    #[test]
+    fn monitor_needs_two_failed_checks_in_a_row() {
+        let (c, fake, log, _) = fake_conns(false, Duration::from_millis(10));
+        fake.checks.lock().unwrap().extend([Check::Dead, Check::Alive, Check::Dead, Check::Dead]);
+        assert_eq!(c.connect(&saved("id-1"), &|_| true), Ok(()));
+        let t0 = Instant::now();
+        while c.state_of("id-1") != Some(ConnState::Disconnected) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "mai disconnesso");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fake.checks_done.load(Ordering::SeqCst), 4, "disconnesso solo al secondo fallimento di fila");
+        assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Connected, ConnState::Disconnected]);
+        // l'app che si chiude ferma il controllo senza cambiare stato
+        let (c, fake, log, _) = fake_conns(false, Duration::from_millis(10));
+        fake.checks.lock().unwrap().extend([Check::Stopped]);
+        assert_eq!(c.connect(&saved("id-1"), &|_| true), Ok(()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fake.checks_done.load(Ordering::SeqCst), 1);
+        assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Connected]);
+    }
+
+    #[test]
+    fn run_blames_the_connection_only_when_ssh_says_so_and_the_master_is_gone() {
+        let closed = "Connection to example.test closed by remote host.\r\n";
+        assert!(lost_connection(255, closed, || Check::Dead));
+        assert!(lost_connection(255, "Control socket connect(/home/dev/s/x): No such file or directory\n", || Check::Dead));
+        // master vivo: lo script ha stampato qualcosa che somiglia a ssh ed è uscito 255
+        assert!(!lost_connection(255, closed, || Check::Alive));
+        assert!(!lost_connection(255, "cat: /home/dev/x: Permission denied\n", || Check::Alive));
+        // nessun messaggio di ssh: niente controllo, è l'uscita dello script
+        assert!(!lost_connection(255, "errore dello script\n", || panic!("nessun controllo")));
+        assert!(!lost_connection(1, closed, || panic!("nessun controllo")));
+        assert!(!lost_connection(255, closed, || Check::Stopped));
     }
 }

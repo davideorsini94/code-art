@@ -87,6 +87,21 @@ pub fn validate_target(what: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Host o alias: come `validate_target`, e solo lettere e cifre ASCII, `.`, `-`, `_`, `:` (IPv6). Niente `*`, `?`,
+/// `!`, `,`, `@`, `/`…: in known_hosts sarebbero caratteri jolly, liste o altri host, nella destinazione un altro
+/// utente o un URI. I nomi internazionali vanno scritti in punycode.
+pub fn validate_host(what: &str, v: &str) -> Result<(), String> {
+    validate_target(what, v)?;
+    if !v.bytes().all(is_host_byte) {
+        return Err(format!("{what}: solo lettere, cifre, «.», «-», «_» e «:» (nomi internazionali in punycode)"));
+    }
+    Ok(())
+}
+
+pub fn is_host_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b".-_:".contains(&b)
+}
+
 fn validate_text(what: &str, v: &str) -> Result<(), String> {
     if v.chars().any(|c| c.is_control()) {
         return Err(format!("{what}: caratteri di controllo non ammessi"));
@@ -103,7 +118,7 @@ pub fn validate_server(s: &ServerInput) -> Result<(), String> {
         return Err("Nome: al massimo 100 caratteri".into());
     }
     validate_text("Nome", name)?;
-    validate_target("Host", &s.host)?;
+    validate_host("Host", &s.host)?;
     if let Some(u) = s.user.as_deref().filter(|u| !u.is_empty()) {
         validate_target("Utente", u)?;
     }
@@ -206,9 +221,10 @@ pub fn clear_password(store: &Store, secrets: &dyn Secrets, config_text: Option<
 fn config_servers(text: &str) -> Vec<Server> {
     config::parse_ssh_config(text)
         .into_iter()
-        .filter(|h| validate_target("Alias", &h.alias).is_ok())
+        .filter(|h| validate_host("Alias", &h.alias).is_ok())
         .filter_map(|h| {
             let host = h.host_name.clone().unwrap_or_else(|| h.alias.clone());
+            // `HostName` può contenere token (`%h`) che OpenSSH espande: si mostra solo, la verifica vera è su `ssh -G`
             validate_target("Host", &host).ok()?;
             Some(Server {
                 id: format!("config:{}", h.alias),
@@ -369,8 +385,14 @@ mod tests {
     #[test]
     fn validation_rules() {
         assert!(validate_server(&input("Dev", "example.test")).is_ok());
-        for bad in ["", "a b", "-oProxyCommand=x", "a\nb", "a\u{0}b", "a\tb"] {
+        for bad in [
+            "", "a b", "-oProxyCommand=x", "a\nb", "a\u{0}b", "a\tb", "*", "a,b", "!a", "a?b", "dev@example.test", "ssh://example.test",
+            "a/b", "[::1]", "a|b", "@revoked", "bücher.example.test",
+        ] {
             assert!(validate_server(&input("Dev", bad)).is_err(), "host {bad:?}");
+        }
+        for ok in ["example.test", "xn--bcher-kva.example.test", "192.0.2.1", "fe80::1", "dev_box-1"] {
+            assert!(validate_server(&input("Dev", ok)).is_ok(), "host {ok:?}");
         }
         let mut u = input("Dev", "example.test");
         u.user = Some("-x".into());
@@ -428,7 +450,7 @@ mod tests {
     fn config_servers_are_listed_read_only() {
         let (_d, st) = store();
         save_server(&st, &Fake::default(), &input("Mio", "m.example.test")).unwrap();
-        let cfg = "Host web\n HostName w.example.test\n User dev\nHost solo\nHost -bad\n";
+        let cfg = "Host web\n HostName w.example.test\n User dev\nHost solo\nHost -bad a,b u@h\n";
         let all = list_servers(&st, &Fake::default(), Some(cfg)).unwrap();
         let ids: Vec<_> = all.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(&ids[1..], ["config:web", "config:solo"]);
