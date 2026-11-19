@@ -87,7 +87,15 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = handle.emit("ssh:state", e);
             });
-            app.manage(Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit)));
+            let ssh_conns = Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit));
+            app.manage(ssh_conns.clone());
+            // sessioni dei database: come `ssh:state`, `db:state` va a tutte le finestre (id, stato, messaggio senza segreti)
+            let handle = app.handle().clone();
+            let db_emit: db::pg::Emitter = Arc::new(move |e: ssh::conn::StateEvent| {
+                use tauri::Emitter;
+                let _ = handle.emit("db:state", e);
+            });
+            app.manage(Arc::new(db::pg::Sessions::new(ssh_conns, db_emit)));
             app.manage(Arc::new(ssh::transfer::Transfers::default()));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
@@ -158,6 +166,9 @@ pub fn run() {
             db::db_password_clear,
             db::db_history,
             db::db_history_add,
+            db::db_connect,
+            db::db_disconnect,
+            db::db_states,
             ssh::ssh_servers,
             ssh::ssh_server_save,
             ssh::ssh_server_delete,
@@ -236,6 +247,10 @@ pub fn run() {
                 app.state::<Arc<lsp::Lsp>>().stop_all();
                 // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
                 app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                // sessioni dei database e relativi inoltri SSH, prima di chiudere le connessioni SSH
+                if let Some(s) = app.try_state::<Arc<db::pg::Sessions>>() {
+                    s.close_all();
+                }
                 // connessioni SSH condivise: `ssh -O exit` prima di fermare i processi (servono `run_tool`)
                 if let Some(c) = app.try_state::<Arc<ssh::conn::Connections>>() {
                     c.close_all();

@@ -1,10 +1,14 @@
 //! Connessioni ai database (Postgres, MongoDB): elenco delle connessioni salvate nel database dell'app, le loro
 //! password (solo nel Portachiavi, servizio `Code Art DB`) e la cronologia delle query. Niente rete qui: le sessioni
 //! stanno nei moduli dei driver.
+pub mod pg;
+pub mod tunnel;
+
 use crate::ssh::{self, keychain, Secrets};
+use std::sync::Arc;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Voci di cronologia tenute per connessione.
 pub const HISTORY_KEEP: usize = 200;
@@ -296,6 +300,48 @@ pub async fn db_history(app: AppHandle, window: WebviewWindow, id: String) -> Re
 pub async fn db_history_add(app: AppHandle, window: WebviewWindow, id: String, text: String) -> Result<(), String> {
     let store = ssh::trusted_store(&app, &window)?;
     crate::projects::off_main(move || history_add(&store, &id, &text, now_ms())).await
+}
+
+/// Connette (sessione condivisa da tutte le finestre; lo stato arriva con `db:state`). Già connessa o in
+/// connessione: `Ok` subito. `Err("auth")` = serve la password. Con un server SSH, deve essere già connesso.
+#[tauri::command]
+pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    let store = ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let (conn, password, server) = crate::projects::off_main(move || {
+        let conn = store.db_connections()?.into_iter().find(|c| c.id == id).ok_or_else(|| "Connessione non trovata".to_string())?;
+        let server = match &conn.ssh_server_id {
+            Some(s) => Some(ssh::find_server(&store, ssh::read_user_config().as_deref(), s)?),
+            None => None,
+        };
+        // senza password salvata si prova comunque (autenticazione `trust`); se serve, il server risponde `auth`
+        let password = keychain::get(keychain::DB_SERVICE, &conn.id).unwrap_or(None);
+        Ok((conn, password, server))
+    })
+    .await?;
+    match conn.kind {
+        DbKind::Postgres => sessions.connect(&conn.id, pg::PgParams::from_connection(&conn), password, server).await,
+        // Task 5: MongoDB
+        DbKind::Mongo => Err("tipo di connessione non ancora supportato".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    crate::projects::off_main(move || {
+        sessions.disconnect(&id);
+        Ok(())
+    })
+    .await
+}
+
+/// Stato delle sessioni note in questo avvio (le altre sono `disconnected`).
+#[tauri::command]
+pub async fn db_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<ssh::conn::StateEvent>, String> {
+    ssh::trusted_store(&app, &window)?;
+    Ok(app.state::<Arc<pg::Sessions>>().states())
 }
 
 #[cfg(test)]

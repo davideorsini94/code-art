@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DbConnection, DbConnectionInput, DbHistoryEntry, Project, ProjectBranch } from './types'
+import type { DbConnection, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -197,3 +197,8 @@ export const dbPasswordClear = (id: string) => invoke<void>('db_password_clear',
 export const dbHistory = (id: string) => invoke<DbHistoryEntry[]>('db_history', { id })
 /** Testo ≤ 100 KB; uguale alla voce più recente = non ripetuto. */
 export const dbHistoryAdd = (id: string, text: string) => invoke<void>('db_history_add', { id, text })
+
+// ---- Database: sessioni (evento `db:state` a tutte le finestre; `Err('auth')` = serve la password) ----
+export const dbConnect = (id: string) => invoke<void>('db_connect', { id })
+export const dbDisconnect = (id: string) => invoke<void>('db_disconnect', { id })
+export const dbStates = () => invoke<DbStateEvent[]>('db_states')

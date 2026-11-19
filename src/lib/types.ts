@@ -157,6 +157,8 @@ export type DbConnection = {
 /** `id` assente = nuova connessione; `port` assente = quella predefinita del tipo (5432 / 27017). */
 export type DbConnectionInput = Omit<DbConnection, 'id' | 'port' | 'hasPassword'> & { id?: string; port?: number | null }
 export type DbHistoryEntry = { id: number; text: string; atMs: number }
+/** Evento `db:state` e voce di `db_states` (come `SshStateEvent`). */
+export type DbStateEvent = { id: string; state: 'connecting' | 'connected' | 'disconnected' | 'error'; message?: string }
 
 // ---- SSH (specchio di src-tauri/src/ssh/mod.rs) ----
 export type ServerSource = 'saved' | 'config'

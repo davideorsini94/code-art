@@ -211,6 +211,12 @@ pub fn control_args(server: &Server, paths: &SshPaths, op: &str) -> Vec<String> 
     args_with(server, paths, Mode::Client, &["-O", op])
 }
 
+/// `ssh -O forward|cancel -L <spec>` sul socket del server: aggiunge o toglie un inoltro locale alla connessione
+/// condivisa. `spec` = `127.0.0.1:<porta>:<host>:<porta>`.
+pub fn forward_args(server: &Server, paths: &SshPaths, op: &str, spec: &str) -> Vec<String> {
+    args_with(server, paths, Mode::Client, &["-O", op, "-L", spec])
+}
+
 /// Argomenti di `run`: mai un'autenticazione (vedi `Mode::Run`), niente terminale (i byte passano intatti, anche con
 /// `RequestTTY` nella config), niente inoltri della config, poi il comando.
 pub fn run_args(server: &Server, paths: &SshPaths, script: &str, args: &[&str]) -> Vec<String> {
@@ -837,6 +843,28 @@ impl Connections {
         Ok(interactive_args(server, &self.paths, script, args))
     }
 
+    /// Aggiunge l'inoltro locale `spec` alla connessione condivisa del server (`ssh -O forward`); serve lo stato
+    /// `connected`. `Err` = il testo di ssh (es. porta già in uso).
+    pub fn forward(&self, server: &Server, spec: &str) -> Result<(), String> {
+        check_server(server)?;
+        self.live_generation(server)?;
+        let mut c = command(SSH);
+        c.args(forward_args(server, &self.paths, "forward", spec));
+        let out = tools::run_tool(c, QUICK_TIMEOUT, None)?;
+        if out.status != 0 {
+            let e = out.stderr.trim();
+            return Err(if e.is_empty() { "inoltro non riuscito".into() } else { e.to_string() });
+        }
+        Ok(())
+    }
+
+    /// Toglie l'inoltro `spec` (`ssh -O cancel`); se la connessione non c'è più l'inoltro è già sparito.
+    pub fn cancel_forward(&self, server: &Server, spec: &str) {
+        let mut c = command(SSH);
+        c.args(forward_args(server, &self.paths, "cancel", spec));
+        let _ = tools::run_tool(c, Duration::from_secs(3), None);
+    }
+
     /// Uscita dall'app: `ssh -O exit` per ogni connessione (in parallelo), prima di fermare i processi.
     pub fn close_all(&self) {
         let servers: Vec<Server> = crate::lock(&self.entries)
@@ -1143,6 +1171,23 @@ mod tests {
         (bare.user, bare.port, bare.identity_file) = (None, None, Some(String::new()));
         assert_eq!(base_args(&bare, &p).last().map(String::as_str), Some("example.test"));
         assert!(!base_args(&bare, &p).iter().any(|a| a == "-p" || a == "-l" || a == "-i"));
+    }
+
+    #[test]
+    fn forward_and_cancel_args() {
+        let s = saved("srv");
+        let p = paths("/data");
+        let spec = "127.0.0.1:50000:db.internal:5432";
+        for op in ["forward", "cancel"] {
+            let a = forward_args(&s, &p, op, spec);
+            let o = a.iter().position(|x| x == "-O").unwrap();
+            assert_eq!(a[o + 1], op);
+            assert_eq!(&a[o + 2..o + 4], ["-L", spec]);
+            // un client del master: mai ControlMaster=yes, destinazione per ultima
+            assert!(a.contains(&"ControlMaster=no".to_string()));
+            assert_eq!(a.last().unwrap(), &destination(&s));
+            assert!(o + 4 == a.len() - 1);
+        }
     }
 
     #[test]

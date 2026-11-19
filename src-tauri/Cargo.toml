@@ -35,6 +35,9 @@ tauri-plugin-notification = "2.8.1"
 grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
 grep-matcher = "0.1.9"
+tokio-postgres = "0.7.18"
+postgres-native-tls = "0.5.3"
+native-tls = "0.2.18"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
