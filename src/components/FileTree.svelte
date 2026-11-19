@@ -6,6 +6,8 @@
   import { projectStore } from '../lib/stores/project.svelte'
   import { editor } from '../lib/stores/editor.svelte'
   import { terminals } from '../lib/stores/terminals.svelte'
+  import { LOCAL_DRAG, REMOTE_DRAG } from '../lib/drag'
+  import { ssh } from '../lib/stores/ssh.svelte'
   import { asFsError, fsCreate, fsList, fsRename, fsTrash } from '../lib/ipc'
   import FileIcon from './FileIcon.svelte'
   import { iconFor } from '../lib/fileicons'
@@ -147,6 +149,17 @@
     ev.preventDefault()
     dropTarget = null
     if (readOnly) return
+    // dal server: download nella cartella di destinazione
+    const remote = ev.dataTransfer?.getData(REMOTE_DRAG)
+    if (remote) {
+      try {
+        const d = JSON.parse(remote)
+        if (target.isDir && d && typeof d.serverId === 'string' && typeof d.path === 'string') void ssh.downloadTo(d.serverId, [d.path], target.path)
+      } catch {
+        /* dati non validi: niente */
+      }
+      return
+    }
     const from = ev.dataTransfer?.getData('text/plain')
     if (!from || isRootPath(from) || !target.isDir || from === target.path || target.path.startsWith(from + '/')) return
     const to = `${target.path}/${nameOf(from)}`
@@ -196,6 +209,7 @@
         if (isRoot) return ev.preventDefault()
         ev.dataTransfer?.setData('text/plain', e.path)
         ev.dataTransfer?.setData(PATH_DRAG_TYPE, e.path)
+        ev.dataTransfer?.setData(LOCAL_DRAG, JSON.stringify([e.path]))
       }}
       ondragover={(ev) => {
         if (e.isDir && !readOnly) {

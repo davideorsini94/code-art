@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fsRead = vi.fn(async (_p: string) => ({ text: 'disco', mtimeMs: 1 }))
 const fsWrite = vi.fn(async (_p: string, _t: string, _m: number | null) => 2)
+const sshRead = vi.fn(async (_id: string, _p: string) => ({ text: 'server', version: '5:1' }))
+const sshWrite = vi.fn(async (_id: string, _p: string, _t: string, _v: string) => '6:2')
 vi.mock('../ipc', () => ({
+  sshRead: (id: string, p: string) => sshRead(id, p),
+  sshWrite: (id: string, p: string, t: string, v: string) => sshWrite(id, p, t, v),
   fsRead: (p: string) => fsRead(p),
   fsWrite: (p: string, t: string, m: number | null) => fsWrite(p, t, m),
   asFsError: (e: unknown) => (e && typeof e === 'object' && 'code' in e ? e : { code: 'io', message: String(e) }),
@@ -179,5 +183,96 @@ describe('openAt', () => {
     await editor.openAt('/p/src/a.ts', 12, 5)
     expect(editor.active).toBe('/p/src/a.ts')
     expect(editor.reveal).toEqual({ key: editor.active, line: 12, col: 5 })
+  })
+})
+
+describe('remote tabs', () => {
+  beforeEach(() => {
+    for (const t of [...editor.tabs]) editor.close(t.key)
+    vi.clearAllMocks()
+    sshRead.mockImplementation(async () => ({ text: 'server', version: '5:1' }))
+    sshWrite.mockImplementation(async () => '6:2')
+  })
+  const dirtyRemote = async () => {
+    await editor.openRemote('s1', '/home/dev/app/a.ts')
+    const t = editor.tabs.find((x) => x.key === 'ssh:s1:/home/dev/app/a.ts')!
+    editor.bind(t.id, { snapshot: () => ({ text: 'mio', commit: () => editor.setDirty(t.id, false) }) })
+    editor.setDirty(t.id, true)
+    return t
+  }
+
+  it('opens a remote file with its own key, name and text, without touching the local fs', async () => {
+    await editor.openRemote('s1', '/home/dev/app/a.ts')
+    const t = editor.activeTab!
+    expect(t.key).toBe('ssh:s1:/home/dev/app/a.ts')
+    expect(t.name).toBe('a.ts')
+    expect(t.path).toBe('/home/dev/app/a.ts')
+    expect(t.baseText).toBe('server')
+    expect(t.remote).toEqual({ serverId: 's1', path: '/home/dev/app/a.ts', version: '5:1' })
+    expect(fsRead).not.toHaveBeenCalled()
+    await editor.openRemote('s1', '/home/dev/app/a.ts')
+    expect(editor.tabs).toHaveLength(1)
+  })
+
+  it('shows images and binaries as unavailable previews', async () => {
+    await editor.openRemote('s1', '/home/dev/logo.png')
+    expect(editor.activeTab!.error).toBe('remote_preview')
+    expect(editor.activeTab!.message).toBe('Anteprima non disponibile per i file remoti')
+    expect(sshRead).not.toHaveBeenCalled()
+  })
+
+  it('saves with the stored version and keeps the new one', async () => {
+    const t = await dirtyRemote()
+    await editor.save(t.path, t.key)
+    expect(sshWrite).toHaveBeenCalledWith('s1', '/home/dev/app/a.ts', 'mio', '5:1')
+    expect(t.remote!.version).toBe('6:2')
+    expect(t.dirty).toBe(false)
+    expect(t.baseText).toBe('mio')
+  })
+
+  it('a conflict raises the prompt; overwrite re-reads the version then writes', async () => {
+    const t = await dirtyRemote()
+    sshWrite.mockRejectedValueOnce({ code: 'conflict', message: 'cambiato' })
+    await editor.save(t.path, t.key)
+    expect(t.prompt).toBe(true)
+    expect(t.dirty).toBe(true)
+    sshRead.mockResolvedValueOnce({ text: 'altro', version: '9:9' })
+    await editor.keepMine(t.path, t.key)
+    expect(sshWrite).toHaveBeenLastCalledWith('s1', '/home/dev/app/a.ts', 'mio', '9:9')
+    expect(t.prompt).toBe(false)
+    expect(t.dirty).toBe(false)
+  })
+
+  it('reload discards local edits and takes the server text; dismiss keeps them', async () => {
+    const t = await dirtyRemote()
+    t.prompt = true
+    editor.dismissPrompt(t.key)
+    expect(t.prompt).toBe(false)
+    expect(t.dirty).toBe(true)
+    sshRead.mockResolvedValueOnce({ text: 'nuovo', version: '7:7' })
+    await editor.reload(t.path, t.key)
+    expect(t.baseText).toBe('nuovo')
+    expect(t.remote!.version).toBe('7:7')
+    expect(t.dirty).toBe(false)
+  })
+
+  it('an io error (e.g. dropped connection) keeps the tab dirty with a readable message', async () => {
+    const t = await dirtyRemote()
+    sshWrite.mockRejectedValueOnce({ code: 'io', message: 'Connessione chiusa' })
+    await editor.save(t.path, t.key)
+    expect(t.dirty).toBe(true)
+    expect(t.prompt).toBe(false)
+    expect(t.message).toBe('Connessione chiusa')
+  })
+
+  it('local fs events and renames ignore remote tabs', async () => {
+    await editor.openRemote('s1', '/home/dev/app/a.ts')
+    fsRead.mockClear()
+    await editor.applyChanged(['/home/dev/app/a.ts'])
+    expect(fsRead).not.toHaveBeenCalled()
+    editor.repath('/home/dev/app', '/x')
+    expect(editor.tabs[0].path).toBe('/home/dev/app/a.ts')
+    editor.closeUnder('/home/dev/app')
+    expect(editor.tabs).toHaveLength(1)
   })
 })

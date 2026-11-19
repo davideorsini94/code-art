@@ -8,6 +8,7 @@
   import { ssh } from '../../lib/stores/ssh.svelte'
   import ServerForm from './ServerForm.svelte'
   import RemoteTree from './RemoteTree.svelte'
+  import Transfers from './Transfers.svelte'
   import type { Server } from '../../lib/types'
 
   let form = $state<{ server: Server | null } | null>(null)
@@ -122,6 +123,7 @@
       </li>
     {/each}
   </ul>
+  <Transfers />
 </div>
 <InfoToast message={ssh.notice} onclose={() => (ssh.notice = null)} />
 

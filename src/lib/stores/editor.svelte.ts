@@ -1,5 +1,5 @@
 import { listenProject } from '../events'
-import { asFsError, fsRead, fsWrite } from '../ipc'
+import { asFsError, fsRead, fsWrite, sshRead, sshWrite } from '../ipc'
 import { projectStore } from './project.svelte'
 import type { FileContent, FsChanged } from '../types'
 import { previewPolicy } from '../md-policy'
@@ -19,10 +19,13 @@ export function onDiskChange(tab: { dirty: boolean; baseText: string }, disk: Fi
 /** Chiave di una tab: il percorso per i file, `diff:` + percorso per i diff (così un diff si apre accanto al file). */
 export const tabKey = (path: string, diff: boolean) => (diff ? `diff:${path}` : path)
 
+/** Chiave di una scheda di un file sul server: non collide mai con i percorsi locali. */
+export const remoteKey = (serverId: string, path: string) => `ssh:${serverId}:${path}`
+
 /** Sposta le tab il cui percorso è `from` o sta dentro `from` (cartella rinominata/spostata). */
-export function repath<T extends { path: string; name: string; diff: unknown; key?: string }>(tabs: T[], from: string, to: string): T[] {
+export function repath<T extends { path: string; name: string; diff: unknown; key?: string; remote?: unknown }>(tabs: T[], from: string, to: string): T[] {
   return tabs.map((t) => {
-    if (t.path !== from && !t.path.startsWith(from + '/')) return t
+    if (t.remote || (t.path !== from && !t.path.startsWith(from + '/'))) return t
     const path = to + t.path.slice(from.length)
     return { ...t, path, key: tabKey(path, !!t.diff), name: t.diff ? `${baseName(path)} (diff)` : baseName(path) }
   })
@@ -40,7 +43,11 @@ export type Tab = {
   rev: number // incrementa a ogni ricarica: il pannello rimette baseText nel modello
   dirty: boolean
   mtimeMs: number | null
-  error: 'too_large' | 'not_text' | 'forbidden' | 'io' | null
+  error: 'too_large' | 'not_text' | 'forbidden' | 'io' | 'remote_preview' | null
+  /** Testo dell'ultimo errore (apertura o salvataggio di un file sul server). */
+  message?: string
+  /** File sul server: `path` è il percorso remoto, `version` quella da ridare a `sshWrite`. */
+  remote?: { serverId: string; path: string; version: string }
   prompt: boolean // "Cambiato su disco" in attesa di scelta
   /** `editable`: il lato modificato (cartella di lavoro) si può cambiare e salvare; il lato originale resta in sola lettura. */
   diff: { before: string; after: string; editable?: boolean } | null
@@ -132,6 +139,53 @@ class EditorStore {
     this.active = tab.key
   }
 
+  /** Apre un file del server in una scheda (solo testo: anteprime e binari non sono disponibili da remoto). */
+  async openRemote(serverId: string, path: string) {
+    const key = remoteKey(serverId, path)
+    const existing = this.tabs.find((t) => t.key === key)
+    if (existing) {
+      this.active = key
+      return
+    }
+    const name = baseName(path)
+    let viewer = viewerFor(name)
+    if (viewer === 'markdown') viewer = 'text'
+    const tab: Tab = { ...this.blank(path), key, viewer, remote: { serverId, path, version: '' } }
+    if (isBinaryViewer(viewer)) {
+      tab.error = 'remote_preview'
+      tab.message = 'Anteprima non disponibile per i file remoti'
+    } else {
+      try {
+        const c = await sshRead(serverId, path)
+        tab.baseText = c.text
+        tab.remote = { serverId, path, version: c.version }
+      } catch (e) {
+        const err = asFsError(e)
+        tab.error = err.code === 'too_large' || err.code === 'not_text' ? err.code : 'io'
+        tab.message = err.message
+      }
+    }
+    this.tabs = [...this.tabs, tab]
+    this.active = key
+  }
+
+  /** Salva un file del server: su `conflict` mostra la barra, su altri errori (es. connessione caduta) la scheda resta modificata. */
+  private async saveRemote(t: Tab, text: string, commit: () => void) {
+    const r = t.remote!
+    try {
+      const version = await sshWrite(r.serverId, r.path, text, r.version)
+      t.remote = { ...r, version }
+      t.baseText = text
+      t.message = undefined
+      t.prompt = false
+      commit()
+    } catch (e) {
+      const err = asFsError(e)
+      if (err.code === 'conflict') t.prompt = true
+      else t.message = err.message
+    }
+  }
+
   /** Apre il file e porta il cursore su riga e colonna (1-based, come Monaco). I markdown si aprono in "Modifica". */
   async openAt(path: string, line: number, col: number) {
     this.reveal = null
@@ -174,6 +228,7 @@ class EditorStore {
     if (!t || (t.diff && !t.diff.editable) || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
+    if (t.remote) return this.saveRemote(t, snap.text, snap.commit)
     try {
       t.mtimeMs = await fsWrite(path, snap.text, t.mtimeMs)
       t.baseText = snap.text
@@ -229,7 +284,7 @@ class EditorStore {
 
   /** Chiude le tab di un file o di tutti i file dentro una cartella (dopo "sposta nel Cestino"). */
   closeUnder(path: string) {
-    for (const t of [...this.tabs]) if (t.path === path || t.path.startsWith(path + '/')) this.close(t.key)
+    for (const t of [...this.tabs]) if (!t.remote && (t.path === path || t.path.startsWith(path + '/'))) this.close(t.key)
   }
 
   /** Dopo rinomina/spostamento: le tab seguono il nuovo percorso. */
@@ -243,6 +298,20 @@ class EditorStore {
   async reload(path: string, key = tabKey(path, false)) {
     const t = this.tabs.find((x) => x.key === key)
     if (!t || isBinaryViewer(t.viewer)) return
+    if (t.remote) {
+      try {
+        const c = await sshRead(t.remote.serverId, t.remote.path)
+        t.baseText = c.text
+        t.remote = { ...t.remote, version: c.version }
+        t.rev++
+        t.dirty = false
+        t.prompt = false
+        t.message = undefined
+      } catch (e) {
+        t.message = asFsError(e).message
+      }
+      return
+    }
     try {
       const c = await fsRead(path)
       t.baseText = c.text
@@ -256,10 +325,29 @@ class EditorStore {
     }
   }
 
+  /** Chiude la barra di conflitto senza scegliere: le modifiche restano nella scheda. */
+  dismissPrompt(key: string) {
+    const t = this.tabs.find((x) => x.key === key)
+    if (t) t.prompt = false
+  }
+
   /** Tiene il testo locale: accetta lo stato attuale del disco così il prossimo salvataggio sovrascrive. */
   async keepMine(path: string, key = tabKey(path, false)) {
     const t = this.tabs.find((x) => x.key === key)
     if (!t) return
+    if (t.remote) {
+      // sovrascrivi: si prende la versione attuale del server e si riscrive il testo locale
+      const snap = this.bindings.get(t.id)?.snapshot()
+      if (!snap) return
+      try {
+        const c = await sshRead(t.remote.serverId, t.remote.path)
+        t.remote = { ...t.remote, version: c.version }
+      } catch (e) {
+        t.message = asFsError(e).message
+        return
+      }
+      return this.saveRemote(t, snap.text, snap.commit)
+    }
     try {
       const c = await fsRead(path)
       t.mtimeMs = c.mtimeMs
@@ -273,7 +361,7 @@ class EditorStore {
   async applyChanged(paths: string[]) {
     const set = new Set(paths)
     for (const t of this.tabs) {
-      if ((t.diff && !t.diff.editable) || !set.has(t.path)) continue
+      if (t.remote || (t.diff && !t.diff.editable) || !set.has(t.path)) continue
       if (isBinaryViewer(t.viewer)) {
         this.scheduleViewerReload(t.path)
         continue

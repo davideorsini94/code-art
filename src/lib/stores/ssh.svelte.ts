@@ -1,8 +1,13 @@
 import * as ipc from '../ipc'
-import { listenSshState } from '../events'
+import { listenProject, listenSshState } from '../events'
 import { errorText } from '../errors'
 import { projectStore } from './project.svelte'
-import type { Server, ServerInput, SshConnState, SshStateEvent } from '../types'
+import type { Server, ServerInput, SshConnState, SshStateEvent, TransferEvent } from '../types'
+
+/** Trasferimento mostrato nel pannello: l'ultimo evento ricevuto più la destinazione (per aggiornare l'elenco a fine). */
+export type TransferView = TransferEvent & { dest?: { serverId: string; dir: string; remote: boolean } }
+
+const HIDE_AFTER_MS = 8000
 
 /** Server SSH e stato delle connessioni (condivise da tutte le finestre). Nessuna password passa di qui: arriva al
  *  core con `setPassword` e non viene conservata. */
@@ -16,7 +21,14 @@ export class SshStore {
   errors = $state<Record<string, string>>({})
   notice = $state<string | null>(null)
   loaded = $state(false)
+  /** Trasferimenti attivi o recenti, in ordine di avvio. */
+  transfers = $state<TransferView[]>([])
+  /** Cartella del server da rileggere dopo un trasferimento finito (la ascolta `RemoteTree`). */
+  reloadDir = $state<{ serverId: string; dir: string; n: number } | null>(null)
   private started = false
+  private unlistenTransfer: (() => void) | undefined
+  private pendingDest = new Map<string, TransferView['dest']>()
+  private hideTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private unlisten: (() => void) | undefined
 
   /** Una volta per finestra: ascolta `ssh:state` e legge elenco e stati. */
@@ -30,11 +42,86 @@ export class SshStore {
     }
     await Promise.all([this.refresh(), this.refreshStates()])
     this.loaded = true
+    await this.listenTransfers()
+  }
+
+  /** Eventi `ssh:transfer` del progetto della finestra (serve il progetto caricato). */
+  private async listenTransfers() {
+    const pid = projectStore.project?.id
+    if (!pid || this.unlistenTransfer) return
+    try {
+      this.unlistenTransfer = await listenProject<TransferEvent>('ssh:transfer', pid, (e) => this.applyTransfer(e.payload))
+    } catch {
+      /* senza eventi i trasferimenti non mostrano l'avanzamento */
+    }
+  }
+
+  applyTransfer(ev: TransferEvent) {
+    const i = this.transfers.findIndex((t) => t.transferId === ev.transferId)
+    const dest = i >= 0 ? this.transfers[i].dest : this.pendingDest.get(ev.transferId)
+    const view: TransferView = { ...ev, dest }
+    if (i >= 0) this.transfers[i] = view
+    else this.transfers.push(view)
+    if (ev.state !== 'running') this.finished(view)
+  }
+
+  private finished(t: TransferView) {
+    if (t.dest?.remote) this.reloadDir = { serverId: t.dest.serverId, dir: t.dest.dir, n: (this.reloadDir?.n ?? 0) + 1 }
+    if (t.state === 'error' || t.errors?.length) return // con errori resta finché non lo si chiude
+    clearTimeout(this.hideTimers.get(t.transferId))
+    this.hideTimers.set(t.transferId, setTimeout(() => this.dismiss(t.transferId), HIDE_AFTER_MS))
+  }
+
+  dismiss(id: string) {
+    clearTimeout(this.hideTimers.get(id))
+    this.hideTimers.delete(id)
+    this.pendingDest.delete(id)
+    this.transfers = this.transfers.filter((t) => t.transferId !== id)
+  }
+
+  async cancelTransfer(id: string) {
+    try {
+      await ipc.sshTransferCancel(id)
+    } catch (e) {
+      this.notice = errorText(e)
+    }
+  }
+
+  /** Dal progetto al server. */
+  async upload(serverId: string, localPaths: string[], remoteDir: string) {
+    try {
+      const id = await ipc.sshUpload(serverId, localPaths, remoteDir)
+      this.track(id, { serverId, dir: remoteDir, remote: true })
+    } catch (e) {
+      this.notice = errorText(e)
+    }
+  }
+
+  /** Dal server a una cartella del Mac. */
+  async downloadTo(serverId: string, remotePaths: string[], localDir: string) {
+    try {
+      const id = await ipc.sshDownload(serverId, remotePaths, localDir)
+      this.track(id, { serverId, dir: localDir, remote: false })
+    } catch (e) {
+      this.notice = errorText(e)
+    }
+  }
+
+  private track(id: string, dest: NonNullable<TransferView['dest']>) {
+    const t = this.transfers.find((x) => x.transferId === id)
+    if (t) {
+      t.dest = dest // l'evento è arrivato prima della risposta
+      if (t.state !== 'running') this.finished(t)
+    } else this.pendingDest.set(id, dest)
   }
 
   stop() {
     this.unlisten?.()
     this.unlisten = undefined
+    this.unlistenTransfer?.()
+    this.unlistenTransfer = undefined
+    for (const h of this.hideTimers.values()) clearTimeout(h)
+    this.hideTimers.clear()
     this.started = false
   }
 
@@ -127,12 +214,9 @@ export class SshStore {
       this.notice = 'Nessuna cartella di progetto in cui scaricare'
       return
     }
-    try {
-      await ipc.sshDownload(serverId, [path], dir)
-      this.notice = `Download avviato in ${dir}`
-    } catch (e) {
-      this.notice = errorText(e)
-    }
+    this.notice = null
+    await this.downloadTo(serverId, [path], dir)
+    if (!this.notice) this.notice = `Download avviato in ${dir}`
   }
 }
 

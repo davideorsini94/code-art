@@ -4,6 +4,8 @@
   import { errorText } from '../../lib/errors'
   import { sshList, sshMkdir, sshRename, sshWrite, sshDelete } from '../../lib/ipc'
   import { ssh } from '../../lib/stores/ssh.svelte'
+  import { editor } from '../../lib/stores/editor.svelte'
+  import { LOCAL_DRAG, REMOTE_DRAG } from '../../lib/drag'
   import FileIcon from '../FileIcon.svelte'
   import { iconFor } from '../../lib/fileicons'
   import type { RemoteEntry } from '../../lib/types'
@@ -11,7 +13,7 @@
   /** Albero di una cartella del server. `disabled` = connessione caduta: l'albero resta visibile, senza azioni. */
   let { serverId, root, disabled = false }: { serverId: string; root: string; disabled?: boolean } = $props()
 
-  const DRAG = 'application/x-codeart-remote'
+  const DRAG = REMOTE_DRAG
   let children = $state<Record<string, RemoteEntry[]>>({})
   let truncated = $state<Record<string, boolean>>({})
   let expanded = $state<Record<string, boolean>>({})
@@ -46,6 +48,12 @@
     const r = root
     expanded[r] = true
     if (!children[r]) void load(r)
+  })
+
+  // trasferimento finito verso una cartella di questo server: si rilegge l'elenco (se era già stato caricato)
+  $effect(() => {
+    const r = ssh.reloadDir
+    if (r && r.serverId === serverId && children[r.dir]) void load(r.dir)
   })
 
   onMount(() => {
@@ -119,6 +127,17 @@
     ev.preventDefault()
     dropTarget = null
     if (disabled || !target.isDir) return
+    // dal progetto: upload nella cartella di destinazione
+    const local = ev.dataTransfer?.getData(LOCAL_DRAG)
+    if (local) {
+      try {
+        const paths = JSON.parse(local)
+        if (Array.isArray(paths) && paths.length && paths.every((p) => typeof p === 'string')) void ssh.upload(serverId, paths, target.path)
+      } catch {
+        /* dati non validi: niente */
+      }
+      return
+    }
     let from: string | null = null
     try {
       const d = JSON.parse(ev.dataTransfer?.getData(DRAG) || 'null')
@@ -185,10 +204,14 @@
         selected = e.path
         if (e.isDir) void toggle(e)
       }}
+      ondblclick={() => {
+        if (!e.isDir && !disabled) void editor.openRemote(serverId, e.path)
+      }}
       onkeydown={(ev) => {
         if (ev.key !== 'Enter') return
         selected = e.path
         if (e.isDir) void toggle(e)
+        else if (!disabled) void editor.openRemote(serverId, e.path)
       }}
       oncontextmenu={(ev) => {
         ev.preventDefault()
