@@ -11,6 +11,7 @@
     { id: 'search', icon: 'search', label: 'Cerca', what: 'la ricerca nel progetto', shortcut: '⌘⇧F' },
     { id: 'git', icon: 'branch', label: 'Git', what: 'il controllo del codice', shortcut: '⌘⇧G' },
     { id: 'convs', icon: 'chats', label: 'Conversazioni', what: 'l\'elenco delle conversazioni', shortcut: '⌘⇧C' },
+    { id: 'ssh', icon: 'server', label: 'SSH', what: 'i server SSH', shortcut: '⌘⇧S' },
   ]
   const items: { col: ResizableCol; icon: IconName; label: string; what: string }[] = [
     { col: 'conv', icon: 'chat', label: 'Conversazione', what: 'la conversazione' },
