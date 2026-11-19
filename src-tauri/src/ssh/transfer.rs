@@ -29,32 +29,42 @@ const QUICK: Duration = Duration::from_secs(60);
 const STDERR_MAX: usize = 8 * 1024;
 pub const EXISTS: &str = "esiste già";
 pub const LOST: &str = "Connessione persa";
+/// Errori per voce al massimo nell'evento finale (gli altri si contano in una voce "e altri N errori").
+const MAX_ERRORS: usize = 100;
 
 const EXIT_EXISTS: i32 = 4;
 const EXIT_NOT_FOUND: i32 = 6;
 
+// Script su una riga sola e senza `!` (vedi `fs`): funzionano anche con csh/tcsh come shell di login del server.
+
 /// `$1` = file temporaneo; mai sopra qualcosa che esiste (anche un link); i byte arrivano da stdin.
-pub const UPLOAD_SCRIPT: &str = "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 4; fi\nset -C\ncat > \"$1\"";
+pub const UPLOAD_SCRIPT: &str = "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 4; fi; set -C; cat > \"$1\"";
 pub const DOWNLOAD_SCRIPT: &str = "cat -- \"$1\"";
 /// Esce con 4 se `$1` esiste (anche un link rotto).
 pub const EXISTS_SCRIPT: &str = "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 4; fi";
 /// Come `mkdir --` ma una destinazione che esiste (anche un link) è un conflitto (4), non un errore generico.
-pub const MKDIR_NEW_SCRIPT: &str = "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 4; fi\nmkdir -- \"$1\"";
+pub const MKDIR_NEW_SCRIPT: &str = "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 4; fi; mkdir -- \"$1\"";
 pub const REMOVE_SCRIPT: &str = "rm -f -- \"$1\"";
 /// Albero di `$1` in un solo giro (un percorso per record, `tipo\tbyte\tpercorso\0`, cartelle prima del contenuto):
-/// `d` cartella, `f` file, `l` link (non si seguono), `o` altro. Una chiamata sola invece di una per voce.
-pub const WALK_SCRIPT: &str = "walk() { for f in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do\n\
-  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n\
-  if [ -L \"$f\" ]; then printf 'l\\t0\\t%s\\0' \"$f\"\n\
-  elif [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\0' \"$f\"; walk \"$f\"\n\
-  elif [ -f \"$f\" ]; then s=$({ wc -c < \"$f\"; } 2>/dev/null | tr -d ' '); printf 'f\\t%s\\t%s\\0' \"${s:-0}\" \"$f\"\n\
-  else printf 'o\\t0\\t%s\\0' \"$f\"; fi\n\
-done; }\n\
-if [ -L \"$1\" ]; then printf 'l\\t0\\t%s\\0' \"$1\"\n\
-elif [ -d \"$1\" ]; then printf 'd\\t0\\t%s\\0' \"$1\"; walk \"$1\"\n\
-elif [ -f \"$1\" ]; then s=$({ wc -c < \"$1\"; } 2>/dev/null | tr -d ' '); printf 'f\\t%s\\t%s\\0' \"${s:-0}\" \"$1\"\n\
-elif [ -e \"$1\" ]; then printf 'o\\t0\\t%s\\0' \"$1\"\n\
-else exit 6; fi\n";
+/// `d` cartella, `f` file, `l` link (non si seguono), `o` altro. Una chiamata sola invece di una per voce. I dotfile
+/// da `"$1"/.*`, senza `.` e `..`.
+pub const WALK_SCRIPT: &str = "walk() { for f in \"$1\"/* \"$1\"/.*; do \
+case ${f##*/} in .|..) continue;; esac; \
+[ -e \"$f\" ] || [ -L \"$f\" ] || continue; \
+if [ -L \"$f\" ]; then printf 'l\\t0\\t%s\\0' \"$f\"; \
+elif [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\0' \"$f\"; walk \"$f\"; \
+elif [ -f \"$f\" ]; then s=$({ wc -c < \"$f\"; } 2>/dev/null | tr -d ' '); printf 'f\\t%s\\t%s\\0' \"${s:-0}\" \"$f\"; \
+else printf 'o\\t0\\t%s\\0' \"$f\"; fi; \
+done; }; \
+if [ -L \"$1\" ]; then printf 'l\\t0\\t%s\\0' \"$1\"; \
+elif [ -d \"$1\" ]; then printf 'd\\t0\\t%s\\0' \"$1\"; walk \"$1\"; \
+elif [ -f \"$1\" ]; then s=$({ wc -c < \"$1\"; } 2>/dev/null | tr -d ' '); printf 'f\\t%s\\t%s\\0' \"${s:-0}\" \"$1\"; \
+elif [ -e \"$1\" ]; then printf 'o\\t0\\t%s\\0' \"$1\"; \
+else exit 6; fi";
+
+/// Tutti gli script di questo modulo (per i test delle shell).
+#[cfg(test)]
+pub const ALL_SCRIPTS: &[&str] = &[UPLOAD_SCRIPT, DOWNLOAD_SCRIPT, EXISTS_SCRIPT, MKDIR_NEW_SCRIPT, REMOVE_SCRIPT, WALK_SCRIPT];
 
 // ---------- eventi ----------
 
@@ -170,10 +180,28 @@ fn script_failure(status: i32, stderr: &str) -> String {
     let l = first_line(stderr);
     match status {
         EXIT_EXISTS => EXISTS.into(),
-        255 if l.is_empty() => LOST.into(),
+        255 if l.is_empty() || super::conn::classify(stderr) == super::conn::Failure::Disconnected => LOST.into(),
         _ if l.is_empty() => format!("errore del server (codice {status})"),
         _ => l,
     }
+}
+
+/// Errore dovuto alla connessione persa (o chiusa): le voci successive fallirebbero tutte allo stesso modo.
+fn is_lost(m: &str) -> bool {
+    m == LOST || m == super::conn::DISCONNECTED
+}
+
+/// Errori per l'evento finale: uguali (percorso e messaggio) una volta sola, al massimo `MAX_ERRORS` più una voce
+/// con il numero degli altri.
+fn capped(errors: Vec<TransferError>) -> Vec<TransferError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<TransferError> = errors.into_iter().filter(|e| seen.insert((e.path.clone(), e.message.clone()))).collect();
+    if out.len() > MAX_ERRORS {
+        let extra = out.len() - MAX_ERRORS;
+        out.truncate(MAX_ERRORS);
+        out.push(TransferError { path: String::new(), message: format!("e altri {extra} errori") });
+    }
+    out
 }
 
 // ---------- avanzamento ----------
@@ -396,12 +424,31 @@ fn exists_local(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
 }
 
+/// Le cartelle tra la destinazione scelta e `dst` (create da questo trasferimento) devono essere cartelle vere, non
+/// collegamenti simbolici, e `dst` non dev'essere un collegamento: così un download non scrive mai fuori dalla
+/// cartella scelta, qualunque cosa mandi il server. `rel` = percorso relativo di `dst` (un componente per livello).
+fn local_parents_ok(dst: &Path, rel: &str) -> Result<(), String> {
+    let mut cur = dst.parent();
+    for _ in 1..rel.split('/').count() {
+        let Some(p) = cur else { return Err("percorso di destinazione non valido".into()) };
+        if !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) {
+            return Err("cartella di destinazione non valida (collegamento simbolico?)".into());
+        }
+        cur = p.parent();
+    }
+    if std::fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{EXISTS} (collegamento simbolico)"));
+    }
+    Ok(())
+}
+
 fn download_file(c: &mut Ctx, item: &Item) -> ItemResult {
     let dst = Path::new(&item.dst);
     let part = PathBuf::from(part_of(&item.dst));
     if item.top && exists_local(dst) {
         return Err(failed(EXISTS));
     }
+    local_parents_ok(dst, &item.rel).map_err(failed)?;
     let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(failed(format!("{EXISTS}: il file temporaneo"))),
@@ -465,6 +512,7 @@ fn make_dir(c: &mut Ctx, item: &Item, upload: bool) -> ItemResult {
     if upload {
         c.run_ok(MKDIR_NEW_SCRIPT, &[&item.dst]).map_err(failed)
     } else {
+        local_parents_ok(Path::new(&item.dst), &item.rel).map_err(failed)?;
         std::fs::create_dir(&item.dst).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists { failed(EXISTS) } else { failed(format!("creazione non riuscita: {e}")) }
         })
@@ -552,7 +600,11 @@ fn plan_download(t: &dyn Transport, sources: &[String], local_dir: &Path) -> Pla
         let out = match t.run(WALK_SCRIPT, &[root], None) {
             Ok(o) => o,
             Err(e) => {
+                let lost = is_lost(&e);
                 errors.push(err_entry(name, e));
+                if lost {
+                    break; // le altre sorgenti fallirebbero allo stesso modo
+                }
                 continue;
             }
         };
@@ -564,20 +616,31 @@ fn plan_download(t: &dyn Transport, sources: &[String], local_dir: &Path) -> Pla
             errors.push(err_entry(name, script_failure(out.status, &out.stderr)));
             continue;
         }
-        for rec in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        // cartelle già viste (percorso relativo; "" = la sorgente): ogni voce deve stare in una di queste
+        let mut dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (n, rec) in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()).enumerate() {
             if items.len() >= MAX_ITEMS {
                 errors.push(err_entry(name, "troppe voci: il resto è saltato"));
                 break 'sources;
             }
-            let Ok(rec) = std::str::from_utf8(rec) else {
+            let parsed = std::str::from_utf8(rec).ok().and_then(|rec| {
+                let mut it = rec.splitn(3, '\t');
+                Some((it.next()?, it.next()?, it.next()?))
+            });
+            // il primo record è sempre la sorgente stessa: altrimenti la risposta non è dello script
+            if n == 0 && parsed.is_none_or(|(_, _, path)| path != root) {
+                errors.push(err_entry(name, "risposta inattesa dal server: elemento saltato"));
+                continue 'sources;
+            }
+            let Some((kind, size, path)) = parsed else {
                 errors.push(err_entry(name, "nome non valido (non UTF-8): voce saltata"));
                 continue;
             };
-            let mut it = rec.splitn(3, '\t');
-            let (Some(kind), Some(size), Some(path)) = (it.next(), it.next(), it.next()) else { continue };
             let sub = if path == root { Some("") } else { path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) };
-            // ogni componente del percorso relativo è un nome vero: niente `.`, `..`, vuoti
-            let Some(sub) = sub.filter(|r| r.is_empty() || r.split('/').all(|c| !c.is_empty() && c != "." && c != "..")) else {
+            // ogni componente del percorso relativo è un nome vero (niente `.`, `..`, vuoti) e la cartella che la
+            // contiene è un record `d` già arrivato (mai dentro un link o un file)
+            let parent_ok = |r: &str| r.is_empty() || dirs.contains(r.rsplit_once('/').map_or("", |(p, _)| p));
+            let Some(sub) = sub.filter(|r| (r.is_empty() || r.split('/').all(|c| !c.is_empty() && c != "." && c != "..")) && parent_ok(r)) else {
                 errors.push(err_entry(name, "percorso inatteso dal server: voce saltata"));
                 continue;
             };
@@ -585,7 +648,10 @@ fn plan_download(t: &dyn Transport, sources: &[String], local_dir: &Path) -> Pla
             let dst = join(&local_dir, &rel);
             let top = sub.is_empty();
             match kind {
-                "d" => items.push(Item { kind: Kind::Dir, rel, src: path.into(), dst, size: 0, top }),
+                "d" => {
+                    dirs.insert(sub.to_string());
+                    items.push(Item { kind: Kind::Dir, rel, src: path.into(), dst, size: 0, top })
+                }
                 "f" => items.push(Item { kind: Kind::File, rel, src: path.into(), dst, size: size.parse().unwrap_or(0), top }),
                 "l" => errors.push(err_entry(&rel, "saltato: collegamento simbolico")),
                 _ => errors.push(err_entry(&rel, "saltato: non è un file normale")),
@@ -620,7 +686,9 @@ pub fn execute(id: &str, req: &Request, t: &dyn Transport, cancel: &Arc<AtomicBo
     let (mut ok, mut files) = (0u64, 0u64);
     let mut dead_dirs: Vec<String> = Vec::new();
     let mut was_cancelled = c.cancelled();
-    for item in &items {
+    // voci non copiate perché la connessione è caduta (il trasferimento si ferma lì)
+    let mut lost: Option<usize> = None;
+    for (n, item) in items.iter().enumerate() {
         if was_cancelled || c.cancelled() {
             was_cancelled = true;
             break;
@@ -645,6 +713,11 @@ pub fn execute(id: &str, req: &Request, t: &dyn Transport, cancel: &Arc<AtomicBo
                 was_cancelled = true;
                 break;
             }
+            Err(ItemErr::Failed(m)) if is_lost(&m) => {
+                errors.push(err_entry(&item.rel, LOST));
+                lost = Some(items.len() - n);
+                break;
+            }
             Err(ItemErr::Failed(m)) => {
                 errors.push(err_entry(&item.rel, m));
                 if item.kind == Kind::Dir {
@@ -660,6 +733,9 @@ pub fn execute(id: &str, req: &Request, t: &dyn Transport, cancel: &Arc<AtomicBo
             n => format!("Annullato: {n} file già copiati restano a destinazione"),
         };
         (TransferState::Cancelled, m)
+    } else if let Some(n) = lost {
+        let m = if n == 1 { "Connessione persa: 1 voce non copiata".to_string() } else { format!("Connessione persa: {n} voci non copiate") };
+        (TransferState::Error, m)
     } else if ok == 0 && !errors.is_empty() {
         (TransferState::Error, "Nessun elemento copiato".to_string())
     } else if errors.is_empty() {
@@ -667,6 +743,7 @@ pub fn execute(id: &str, req: &Request, t: &dyn Transport, cancel: &Arc<AtomicBo
     } else {
         (TransferState::Done, format!("Completato con {} errori", errors.len()))
     };
+    let errors = capped(errors);
     c.p.finish(state, errors.clone(), message);
     Outcome { state, errors, files_copied: files }
 }

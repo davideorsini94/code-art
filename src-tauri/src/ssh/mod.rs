@@ -133,6 +133,10 @@ pub fn validate_server(s: &ServerInput) -> Result<(), String> {
     }
     if let Some(d) = &s.start_dir {
         validate_text("Cartella iniziale", d)?;
+        let d = d.trim();
+        if !(d.is_empty() || d == "~" || d.starts_with("~/") || d.starts_with('/')) {
+            return Err("Cartella iniziale: percorso assoluto («/…») o nella home («~», «~/…»)".into());
+        }
     }
     Ok(())
 }
@@ -141,8 +145,10 @@ fn non_empty(v: &Option<String>) -> Option<String> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// Crea o aggiorna un server salvato (mai uno da config: il suo id inizia con `config:`).
-pub fn save_server(store: &Store, secrets: &dyn Secrets, input: &ServerInput) -> Result<Server, String> {
+/// Crea o aggiorna un server salvato (mai uno da config: il suo id inizia con `config:`). Un server esistente passa
+/// prima da `disconnect` (dopo la validazione, prima della scrittura): la connessione aperta porterebbe al vecchio
+/// indirizzo.
+pub fn save_server(store: &Store, secrets: &dyn Secrets, input: &ServerInput, disconnect: &dyn Fn(&str)) -> Result<Server, String> {
     validate_server(input)?;
     let id = match input.id.as_deref() {
         Some(id) if id.starts_with("config:") => return Err("I server di ~/.ssh/config non si modificano qui".into()),
@@ -150,6 +156,7 @@ pub fn save_server(store: &Store, secrets: &dyn Secrets, input: &ServerInput) ->
             if !store.ssh_server_exists(id)? {
                 return Err("Server non trovato".into());
             }
+            disconnect(id);
             id.to_string()
         }
         None => uuid::Uuid::new_v4().to_string(),
@@ -170,11 +177,13 @@ pub fn save_server(store: &Store, secrets: &dyn Secrets, input: &ServerInput) ->
     Ok(server)
 }
 
-/// Elimina un server salvato e la sua password: prima il Portachiavi, così non restano segreti senza server.
-pub fn delete_server(store: &Store, secrets: &dyn Secrets, id: &str) -> Result<(), String> {
+/// Elimina un server salvato e la sua password: prima la connessione (`disconnect`), poi il Portachiavi, così non
+/// restano segreti senza server.
+pub fn delete_server(store: &Store, secrets: &dyn Secrets, id: &str, disconnect: &dyn Fn(&str)) -> Result<(), String> {
     if id.starts_with("config:") {
         return Err("I server di ~/.ssh/config non si eliminano qui".into());
     }
+    disconnect(id);
     secrets.clear(id)?;
     store.ssh_server_delete(id)
 }
@@ -285,13 +294,25 @@ pub async fn ssh_servers(app: AppHandle, window: WebviewWindow) -> Result<Vec<Se
 #[tauri::command]
 pub async fn ssh_server_save(app: AppHandle, window: WebviewWindow, input: ServerInput) -> Result<Server, String> {
     let store = trusted_store(&app, &window)?;
-    crate::projects::off_main(move || save_server(&store, &Keychain, &input)).await
+    let conns = app.state::<Arc<conn::Connections>>().inner().clone();
+    crate::projects::off_main(move || {
+        save_server(&store, &Keychain, &input, &|id| {
+            conns.disconnect_if_live(id);
+        })
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ssh_server_delete(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
     let store = trusted_store(&app, &window)?;
-    crate::projects::off_main(move || delete_server(&store, &Keychain, &id)).await
+    let conns = app.state::<Arc<conn::Connections>>().inner().clone();
+    crate::projects::off_main(move || {
+        delete_server(&store, &Keychain, &id, &|id| {
+            conns.disconnect_if_live(id);
+        })
+    })
+    .await
 }
 
 /// Salva la password di un server nel Portachiavi; la password non torna mai alla WebView.
@@ -486,6 +507,15 @@ mod tests {
         assert!(validate_server(&u).is_ok());
         u.start_dir = Some("/home/\ndev".into());
         assert!(validate_server(&u).is_err());
+        // cartella iniziale: vuota, `~`, `~/…` o assoluta
+        for ok in ["", "  ", "~", "~/app", "/", "/srv/app", " /srv/app "] {
+            u.start_dir = Some(ok.into());
+            assert!(validate_server(&u).is_ok(), "{ok:?}");
+        }
+        for bad in ["app", "./app", "~dev/app", "../x", "$HOME/app"] {
+            u.start_dir = Some(bad.into());
+            assert!(validate_server(&u).unwrap_err().starts_with("Cartella iniziale"), "{bad:?}");
+        }
         u.start_dir = None;
         u.identity_file = Some("a\u{0}".into());
         assert!(validate_server(&u).is_err());
@@ -497,36 +527,63 @@ mod tests {
     #[test]
     fn save_update_list_delete() {
         let (_d, st) = store();
-        let a = save_server(&st, &Fake::default(), &input(" Beta ", "b.example.test")).unwrap();
+        let a = save_server(&st, &Fake::default(), &input(" Beta ", "b.example.test"), &|_| {}).unwrap();
         assert_eq!(a.name, "Beta");
         let mut second = input("Alfa", "a.example.test");
         second.port = Some(2200);
         second.user = Some("dev".into());
         second.start_dir = Some("/home/dev".into());
-        let b = save_server(&st, &Fake::default(), &second).unwrap();
+        let b = save_server(&st, &Fake::default(), &second, &|_| {}).unwrap();
         assert_ne!(a.id, b.id);
         let names: Vec<_> = list_servers(&st, &Fake::default(), None).unwrap().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["Alfa", "Beta"]);
         let mut upd = input("Alfa 2", "a2.example.test");
         upd.id = Some(b.id.clone());
-        let u = save_server(&st, &Fake::default(), &upd).unwrap();
+        let u = save_server(&st, &Fake::default(), &upd, &|_| {}).unwrap();
         assert_eq!(u.id, b.id);
         let all = list_servers(&st, &Fake::default(), None).unwrap();
         assert_eq!(all.len(), 2);
         let got = all.iter().find(|s| s.id == b.id).unwrap();
         assert_eq!((got.host.as_str(), got.user.clone(), got.port), ("a2.example.test", None, None));
-        delete_server(&st, &Fake::default(), &a.id).unwrap();
+        delete_server(&st, &Fake::default(), &a.id, &|_| {}).unwrap();
         assert_eq!(list_servers(&st, &Fake::default(), None).unwrap().len(), 1);
         let mut ghost = input("X", "x.example.test");
         ghost.id = Some("manca".into());
-        assert!(save_server(&st, &Fake::default(), &ghost).is_err());
-        assert!(save_server(&st, &Fake::default(), &input("X", "-bad")).is_err());
+        assert!(save_server(&st, &Fake::default(), &ghost, &|_| {}).is_err());
+        assert!(save_server(&st, &Fake::default(), &input("X", "-bad"), &|_| {}).is_err());
+    }
+
+    #[test]
+    fn saving_or_deleting_an_existing_server_disconnects_it_first() {
+        let (_d, st) = store();
+        let k = Fake::default();
+        let calls = std::cell::RefCell::new(Vec::<String>::new());
+        let rec = |id: &str| calls.borrow_mut().push(id.to_string());
+        // nuovo: niente da disconnettere
+        let a = save_server(&st, &k, &input("A", "a.example.test"), &rec).unwrap();
+        assert!(calls.borrow().is_empty());
+        // modifica non valida: nessuna disconnessione, nessuna scrittura
+        let mut bad = input("A", "-x");
+        bad.id = Some(a.id.clone());
+        assert!(save_server(&st, &k, &bad, &rec).is_err());
+        assert!(calls.borrow().is_empty());
+        // modifica: prima la disconnessione, poi il record nuovo
+        let mut upd = input("A", "staging.example.test");
+        upd.id = Some(a.id.clone());
+        let seen = std::cell::RefCell::new(None);
+        save_server(&st, &k, &upd, &|id| *seen.borrow_mut() = Some(find_server(&st, None, id).unwrap().host)).unwrap();
+        assert_eq!(seen.borrow().as_deref(), Some("a.example.test"), "disconnesso prima di scrivere");
+        // eliminazione: disconnesso
+        delete_server(&st, &k, &a.id, &rec).unwrap();
+        assert_eq!(calls.borrow().as_slice(), std::slice::from_ref(&a.id));
+        assert!(delete_server(&st, &k, "config:web", &rec).is_err());
+        assert_eq!(calls.borrow().len(), 1);
     }
 
     #[test]
     fn config_servers_are_listed_read_only() {
         let (_d, st) = store();
-        save_server(&st, &Fake::default(), &input("Mio", "m.example.test")).unwrap();
+        save_server(&st, &Fake::default(), &input("Mio", "m.example.test"), &|_| {}).unwrap();
         let cfg = "Host web\n HostName w.example.test\n User dev\nHost solo\nHost -bad a,b u@h\n";
         let all = list_servers(&st, &Fake::default(), Some(cfg)).unwrap();
         let ids: Vec<_> = all.iter().map(|s| s.id.as_str()).collect();
@@ -536,15 +593,15 @@ mod tests {
         assert_eq!(all[2].host, "solo");
         let mut edit = input("X", "x.example.test");
         edit.id = Some("config:web".into());
-        assert!(save_server(&st, &Fake::default(), &edit).is_err());
-        assert!(delete_server(&st, &Fake::default(), "config:web").is_err());
+        assert!(save_server(&st, &Fake::default(), &edit, &|_| {}).is_err());
+        assert!(delete_server(&st, &Fake::default(), "config:web", &|_| {}).is_err());
     }
 
     #[test]
     fn passwords_live_in_secrets_for_known_servers_only() {
         let (_d, st) = store();
         let k = Fake::default();
-        let a = save_server(&st, &k, &input("A", "a.example.test")).unwrap();
+        let a = save_server(&st, &k, &input("A", "a.example.test"), &|_| {}).unwrap();
         assert!(!a.has_password);
         let cfg = Some("Host web\n HostName w.example.test\n");
         set_password(&st, &k, cfg, &a.id, "pàss word").unwrap();
@@ -555,7 +612,7 @@ mod tests {
         // aggiornare un server conserva la password e lo dice
         let mut upd = input("A2", "a.example.test");
         upd.id = Some(a.id.clone());
-        assert!(save_server(&st, &k, &upd).unwrap().has_password);
+        assert!(save_server(&st, &k, &upd, &|_| {}).unwrap().has_password);
         // server sconosciuti: né salvati né alias attuali della config
         for id in ["manca", "config:altro", ""] {
             assert_eq!(set_password(&st, &k, cfg, id, "x").unwrap_err(), "Server non trovato");
@@ -565,7 +622,7 @@ mod tests {
         clear_password(&st, &k, cfg, "config:web").unwrap();
         assert!(!list_servers(&st, &k, cfg).unwrap()[1].has_password);
         // eliminare il server elimina anche la password
-        delete_server(&st, &k, &a.id).unwrap();
+        delete_server(&st, &k, &a.id, &|_| {}).unwrap();
         assert!(k.0.borrow().is_empty());
     }
 
@@ -573,7 +630,7 @@ mod tests {
     fn password_rules_never_echo_the_secret() {
         let (_d, st) = store();
         let k = Fake::default();
-        let a = save_server(&st, &k, &input("A", "a.example.test")).unwrap();
+        let a = save_server(&st, &k, &input("A", "a.example.test"), &|_| {}).unwrap();
         let long = "s".repeat(1025);
         for bad in ["", long.as_str(), "segreto\nriga", "segreto\r", "segreto\0"] {
             let e = set_password(&st, &k, None, &a.id, bad).unwrap_err();
@@ -588,7 +645,7 @@ mod tests {
     #[test]
     fn find_server_covers_saved_and_config() {
         let (_d, st) = store();
-        let a = save_server(&st, &Fake::default(), &input("A", "a.example.test")).unwrap();
+        let a = save_server(&st, &Fake::default(), &input("A", "a.example.test"), &|_| {}).unwrap();
         let cfg = Some("Host web\n HostName w.example.test\n");
         assert_eq!(find_server(&st, cfg, &a.id).unwrap().host, "a.example.test");
         let w = find_server(&st, cfg, "config:web").unwrap();

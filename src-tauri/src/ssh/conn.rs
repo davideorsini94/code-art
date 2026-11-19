@@ -39,6 +39,8 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const AUTH: &str = "auth";
 pub const DISCONNECTED: &str = "Non connesso al server";
 pub const CANCELLED: &str = "Connessione annullata";
+/// Motivo della disconnessione quando il server è cambiato (modificato, eliminato o config diversa) dopo la connessione.
+pub const CHANGED: &str = "Server modificato: riconnetti";
 
 /// Dialogo per un server nuovo (titolo fisso; "Annulla" è il primo pulsante, quindi il predefinito di NSAlert).
 pub const NEW_HOST_TITLE: &str = "Nuovo server SSH";
@@ -117,6 +119,18 @@ pub fn destination(server: &Server) -> String {
     }
 }
 
+/// Stesso indirizzo di connessione: destinazione, host, utente, porta e chiave. Un client del master non controlla
+/// mai la destinazione, quindi un server modificato dopo la connessione userebbe ancora il master del vecchio
+/// indirizzo. Per i server della config i campi sono quelli letti da `~/.ssh/config` (alias modificato = diverso).
+pub fn same_target(a: &Server, b: &Server) -> bool {
+    a.source == b.source
+        && destination(a) == destination(b)
+        && a.host == b.host
+        && a.user == b.user
+        && a.port == b.port
+        && a.identity_file == b.identity_file
+}
+
 /// Destinazione e utente validi (`validate_host`, `validate_target`): l'unica difesa contro l'iniezione di opzioni.
 pub fn check_server(server: &Server) -> Result<(), String> {
     validate_host("Host", &destination(server))?;
@@ -167,7 +181,8 @@ fn args_with(server: &Server, paths: &SshPaths, mode: Mode, extra: &[&str]) -> V
         "ServerAliveCountMax=3".into(),
     ];
     if mode == Mode::Run {
-        a.extend(["-o".into(), "PreferredAuthentications=none".into()]);
+        // `RemoteCommand` della config impedirebbe il comando (OpenSSH rifiuta entrambi): `none` lo annulla
+        a.extend(["-o".into(), "PreferredAuthentications=none".into(), "-o".into(), "RemoteCommand=none".into()]);
     }
     if server.source == ServerSource::Saved {
         if let Some(p) = server.port {
@@ -196,10 +211,10 @@ pub fn control_args(server: &Server, paths: &SshPaths, op: &str) -> Vec<String> 
     args_with(server, paths, Mode::Client, &["-O", op])
 }
 
-/// Argomenti di `run`: mai un'autenticazione (vedi `Mode::Run`), niente terminale (i byte passano intatti), niente
-/// inoltri della config, poi il comando.
+/// Argomenti di `run`: mai un'autenticazione (vedi `Mode::Run`), niente terminale (i byte passano intatti, anche con
+/// `RequestTTY` nella config), niente inoltri della config, poi il comando.
 pub fn run_args(server: &Server, paths: &SshPaths, script: &str, args: &[&str]) -> Vec<String> {
-    let mut a = args_with(server, paths, Mode::Run, &["-T", "-o", "ClearAllForwardings=yes"]);
+    let mut a = args_with(server, paths, Mode::Run, &["-T", "-o", "RequestTTY=no", "-o", "ClearAllForwardings=yes"]);
     a.push(remote_cmd(script, args));
     a
 }
@@ -626,12 +641,20 @@ impl Connections {
         crate::lock(&self.entries).get(id).map(|e| e.generation)
     }
 
-    /// Connette `server`. Già connesso o in connessione: `Ok` subito, senza un secondo dialogo né un secondo master
+    /// Connette `server`. Già connesso o in connessione con gli stessi dati (`same_target`): `Ok` subito, senza un secondo dialogo né un secondo master
     /// (lo stato arriva con `ssh:state`); la decisione e l'iscrizione avvengono sotto lo stesso lucchetto.
     /// `confirm` mostra il dialogo nativo per un server nuovo e dice se l'utente l'ha accettato.
     /// Da chiamare fuori dal thread principale.
     pub fn connect(self: &Arc<Self>, server: &Server, confirm: &dyn Fn(&str) -> bool) -> Result<(), String> {
         check_server(server)?;
+        // connesso con dati vecchi (server modificato, alias cambiato nella config): si chiude e si riconnette
+        let stale = crate::lock(&self.entries)
+            .get(&server.id)
+            .filter(|e| matches!(e.state, ConnState::Connecting | ConnState::Connected) && !same_target(&e.server, server))
+            .map(|e| e.generation);
+        if let Some(g) = stale {
+            self.close(&server.id, Some(CHANGED.into()), Some(g));
+        }
         let socket = self.paths.socket(&server.id);
         let generation = {
             let mut map = crate::lock(&self.entries);
@@ -709,15 +732,54 @@ impl Connections {
 
     /// Chiude la connessione condivisa di `id` (`ssh -O exit`); già chiusa = nulla da fare.
     pub fn disconnect(&self, id: &str) -> Result<(), String> {
+        self.close(id, None, None);
+        Ok(())
+    }
+
+    /// Prima di modificare o eliminare il server `id`: se è connesso o in connessione lo disconnette (`ssh -O exit`;
+    /// i terminali remoti terminano da soli). `true` = era attivo.
+    pub fn disconnect_if_live(&self, id: &str) -> bool {
+        let live = matches!(self.state_of(id), Some(ConnState::Connecting | ConnState::Connected));
+        if live {
+            self.close(id, None, None);
+        }
+        live
+    }
+
+    /// Nuova generazione `disconnected` con `message` e `ssh -O exit`; con `only` solo se la generazione è ancora
+    /// quella (un'altra chiamata può averla già superata).
+    fn close(&self, id: &str, message: Option<String>, only: Option<u64>) {
         let server = {
             let mut map = crate::lock(&self.entries);
-            let Some(server) = map.get(id).map(|e| e.server.clone()) else { return Ok(()) };
+            let Some(e) = map.get(id) else { return };
+            if only.is_some_and(|g| g != e.generation) {
+                return;
+            }
+            let server = e.server.clone();
             self.insert_locked(&mut map, &server, ConnState::Disconnected);
+            if let Some(e) = map.get_mut(id) {
+                e.message = message.clone();
+            }
             server
         };
-        self.emit(id, ConnState::Disconnected, None);
+        self.emit(id, ConnState::Disconnected, message);
         self.ops.exit(&server);
-        Ok(())
+    }
+
+    /// Generazione della connessione `connected` di `server`. Server diverso da quello connesso (modificato dopo la
+    /// connessione, anche nella config): la connessione si chiude e l'operazione si rifiuta, perché il master
+    /// porterebbe al vecchio indirizzo.
+    fn live_generation(&self, server: &Server) -> Result<u64, String> {
+        let generation = {
+            let map = crate::lock(&self.entries);
+            match map.get(&server.id) {
+                Some(e) if e.state == ConnState::Connected && same_target(&e.server, server) => return Ok(e.generation),
+                Some(e) if e.state == ConnState::Connected => e.generation,
+                _ => return Err(DISCONNECTED.into()),
+            }
+        };
+        self.close(&server.id, Some(CHANGED.into()), Some(generation));
+        Err(DISCONNECTED.into())
     }
 
     /// Esegue `script` sul server con `args` (via `remote_cmd`) sulla connessione condivisa; serve lo stato
@@ -737,13 +799,7 @@ impl Connections {
         timeout: Duration,
     ) -> Result<ToolOutput, String> {
         check_server(server)?;
-        let generation = {
-            let map = crate::lock(&self.entries);
-            match map.get(&server.id) {
-                Some(e) if e.state == ConnState::Connected => e.generation,
-                _ => return Err(DISCONNECTED.into()),
-            }
-        };
+        let generation = self.live_generation(server)?;
         if !self.paths.socket(&server.id).exists() {
             self.set_if(&server.id, generation, ConnState::Disconnected, Some(Failure::Disconnected.message()));
             return Err(DISCONNECTED.into());
@@ -762,8 +818,8 @@ impl Connections {
     /// gestisce il chiamante (stdin/stdout a pezzi). Serve lo stato `connected`; mai una connessione diretta.
     pub fn stream_command(&self, server: &Server, script: &str, args: &[&str]) -> Result<Command, String> {
         check_server(server)?;
-        let connected = matches!(crate::lock(&self.entries).get(&server.id), Some(e) if e.state == ConnState::Connected);
-        if !connected || !self.paths.socket(&server.id).exists() {
+        self.live_generation(server)?;
+        if !self.paths.socket(&server.id).exists() {
             return Err(DISCONNECTED.into());
         }
         let mut c = command(SSH);
@@ -774,8 +830,8 @@ impl Connections {
     /// Argomenti di `ssh` per una sessione interattiva (terminale): serve lo stato `connected`.
     pub fn interactive(&self, server: &Server, script: &str, args: &[&str]) -> Result<Vec<String>, String> {
         check_server(server)?;
-        let connected = matches!(crate::lock(&self.entries).get(&server.id), Some(e) if e.state == ConnState::Connected);
-        if !connected || !self.paths.socket(&server.id).exists() {
+        self.live_generation(server)?;
+        if !self.paths.socket(&server.id).exists() {
             return Err(DISCONNECTED.into());
         }
         Ok(interactive_args(server, &self.paths, script, args))
@@ -1109,7 +1165,11 @@ mod tests {
             assert!(other.contains(&"BatchMode=no".to_string()));
             assert!(!other.iter().any(|a| a.starts_with("PreferredAuthentications")));
         }
-        assert_eq!(&r[r.len() - 5..r.len() - 1], ["-T", "-o", "ClearAllForwardings=yes", "example.test"].map(String::from));
+        assert_eq!(&r[r.len() - 7..r.len() - 1], ["-T", "-o", "RequestTTY=no", "-o", "ClearAllForwardings=yes", "example.test"].map(String::from));
+        assert!(r.contains(&"RemoteCommand=none".to_string()));
+        let i = interactive_args(&s, &p, "true", &[]);
+        assert!(i.contains(&"RemoteCommand=none".to_string()) && i.contains(&"-t".to_string()));
+        assert!(!i.iter().any(|a| a.starts_with("RequestTTY")), "il terminale chiede la tty con -t");
         assert_eq!(r.last().unwrap(), "sh -c 'cat -- \"$1\"' _ '/home/dev/a b'");
     }
 
@@ -1582,6 +1642,108 @@ example.test ssh-rsa AAAA extra\n";
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(fake.checks_done.load(Ordering::SeqCst), 1);
         assert_eq!(states_of(&log), [ConnState::Connecting, ConnState::Connected]);
+    }
+
+    /// `RemoteCommand` e `RequestTTY` di un alias della config non valgono per le operazioni (`ssh -G` non si connette).
+    #[test]
+    fn run_args_override_remote_command_and_request_tty_of_the_config() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config");
+        std::fs::write(&cfg, "Host web\n  HostName w.example.test\n  RemoteCommand tmux attach\n  RequestTTY yes\n").unwrap();
+        let p = paths("/home/dev/data");
+        let mut a = run_args(&config("web"), &p, "true", &[]);
+        a.pop(); // il comando
+        let out = Command::new(SSH).arg("-G").arg("-F").arg(&cfg).args(&a).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.lines().any(|l| l.starts_with("remotecommand ")), "{text}");
+        assert!(text.lines().any(|l| l == "requesttty false"), "{text}");
+    }
+
+    #[test]
+    fn same_target_compares_the_connection_fields_only() {
+        let a = saved("id-1");
+        let mut b = a.clone();
+        b.name = "Altro nome".into();
+        b.start_dir = Some("/home/dev/x".into());
+        b.has_password = true;
+        assert!(same_target(&a, &b));
+        let changes: [fn(&mut Server); 4] = [
+            |s: &mut Server| s.host = "staging.example.test".into(),
+            |s: &mut Server| s.user = Some("root".into()),
+            |s: &mut Server| s.port = Some(22),
+            |s: &mut Server| s.identity_file = None,
+        ];
+        for change in changes {
+            let mut c = a.clone();
+            change(&mut c);
+            assert!(!same_target(&a, &c));
+        }
+        // config: HostName, porta o utente cambiati in ~/.ssh/config
+        let w = config("web");
+        let mut w2 = w.clone();
+        w2.host = "w2.example.test".into();
+        assert!(same_target(&w, &w.clone()) && !same_target(&w, &w2));
+    }
+
+    #[test]
+    fn a_server_changed_after_connect_is_disconnected_and_refused() {
+        let (c, fake, log, _) = fake_conns(false, SLOW);
+        let s = saved("id-1");
+        assert_eq!(c.connect(&s, &|_| true), Ok(()));
+        // stesso server: si passa al controllo del socket (assente qui), senza chiudere la connessione
+        assert_eq!(c.stream_command(&s, "true", &[]).unwrap_err(), DISCONNECTED);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Connected));
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 0);
+        // modificato (staging al posto di produzione): rifiutato, connessione chiusa con il motivo
+        let mut staging = s.clone();
+        staging.host = "staging.example.test".into();
+        assert_eq!(c.run(&staging, "true", &[], None).unwrap_err(), DISCONNECTED);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 1);
+        let last = log.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last, StateEvent { id: "id-1".into(), state: ConnState::Disconnected, message: Some(CHANGED.into()) });
+        // poi tutto rifiuta, anche con il server vecchio, finché non si riconnette
+        assert_eq!(c.interactive(&s, "true", &[]).unwrap_err(), DISCONNECTED);
+        assert_eq!(c.stream_command(&staging, "true", &[]).unwrap_err(), DISCONNECTED);
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 1);
+        // riconnesso con i dati nuovi: valgono quelli
+        assert_eq!(c.connect(&staging, &|_| true), Ok(()));
+        assert_eq!(fake.establish_calls.load(Ordering::SeqCst), 2);
+        // connect con dati diversi mentre è connesso: chiude il vecchio master e ne apre uno nuovo
+        assert_eq!(c.connect(&s, &|_| true), Ok(()));
+        assert_eq!((fake.establish_calls.load(Ordering::SeqCst), fake.exits.load(Ordering::SeqCst)), (3, 2));
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Connected));
+        assert_eq!(c.connect(&staging, &|_| true), Ok(()));
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 3);
+        let mut port = staging.clone();
+        port.port = Some(2200);
+        assert_eq!(c.interactive(&port, "true", &[]).unwrap_err(), DISCONNECTED);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert_eq!(fake.exits.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn disconnect_if_live_only_touches_live_connections() {
+        let (c, fake, log, ctl) = fake_conns(true, SLOW);
+        assert!(!c.disconnect_if_live("id-1"), "mai connesso");
+        let (entered, release) = ctl.unwrap();
+        let s = saved("id-1");
+        let (c2, s2) = (c.clone(), s.clone());
+        let first = std::thread::spawn(move || c2.connect(&s2, &|_| true));
+        entered.recv().unwrap();
+        // in connessione: si chiude anche questa
+        assert!(c.disconnect_if_live("id-1"));
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap().unwrap_err(), CANCELLED);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert!(!c.disconnect_if_live("id-1"), "già disconnesso");
+        assert_eq!(c.connect(&s, &|_| true), Ok(()));
+        let exits = fake.exits.load(Ordering::SeqCst);
+        assert!(c.disconnect_if_live("id-1"));
+        assert_eq!(fake.exits.load(Ordering::SeqCst), exits + 1);
+        assert_eq!(c.state_of("id-1"), Some(ConnState::Disconnected));
+        assert_eq!(log.lock().unwrap().last().unwrap().message, None);
     }
 
     #[test]

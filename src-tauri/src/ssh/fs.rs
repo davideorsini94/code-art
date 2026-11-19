@@ -21,63 +21,77 @@ const EXIT_TOO_LARGE: i32 = 7;
 const EXIT_WRITE: i32 = 8;
 const EXIT_PROTECTED: i32 = 9;
 
+// Ogni script è una riga sola (istruzioni separate da `;`) e non contiene mai `!`: la shell di login del server legge
+// `sh -c '<script>'` prima di `sh`, e csh/tcsh rifiutano gli a capo dentro gli apici singoli ed espandono `!`
+// (cronologia) anche lì. Lo controlla un test su tutti gli script.
+
 /// `size:mtime` di `$1` (segue i link) in `$s`: `stat` GNU, poi BSD, poi `wc -c` con mtime 0.
 macro_rules! ver_fn {
     () => {
         "ver() { if s=$(stat -L -c '%s:%Y' -- \"$1\" 2>/dev/null); then return 0; fi; \
          if s=$(stat -L -f '%z:%m' -- \"$1\" 2>/dev/null); then return 0; fi; \
-         [ -e \"$1\" ] || return 1; s=\"$(wc -c < \"$1\" | tr -d ' '):0\"; }\n"
+         [ -e \"$1\" ] || return 1; s=\"$(wc -c < \"$1\" | tr -d ' '):0\"; }; "
     };
 }
 
 pub const HOME_SCRIPT: &str = "printf %s \"$HOME\"";
 
-/// Voci di `$1` come `tipo\tnome\0`: `d` cartella, `f` altro, `l` link, `L` link a una cartella. Dotfile compresi,
-/// nessun `ls`. Si ferma a `MAX_ENTRIES + 1` voci.
-pub const LIST_SCRIPT: &str = "cd -- \"$1\" || exit 5\n\
-i=0\n\
-for f in ./* ./.[!.]* ./..?*; do\n\
-  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n\
-  i=$((i+1))\n\
-  [ \"$i\" -gt 10001 ] && break\n\
-  if [ -L \"$f\" ]; then if [ -d \"$f\" ]; then t=L; else t=l; fi\n\
-  elif [ -d \"$f\" ]; then t=d; else t=f; fi\n\
-  printf '%s\\t%s\\0' \"$t\" \"${f#./}\"\n\
-done\n";
+/// Voci di `$1` come `tipo\tnome\0`: `d` cartella, `f` altro, `l` link, `L` link a una cartella. Dotfile compresi
+/// (`./.*` senza `.` e `..`), nessun `ls`. Si ferma a `MAX_ENTRIES + 1` voci.
+pub const LIST_SCRIPT: &str = "cd -- \"$1\" || exit 5; i=0; \
+for f in ./* ./.*; do \
+case ${f#./} in .|..) continue;; esac; \
+[ -e \"$f\" ] || [ -L \"$f\" ] || continue; \
+i=$((i+1)); \
+[ \"$i\" -gt 10001 ] && break; \
+if [ -L \"$f\" ]; then if [ -d \"$f\" ]; then t=L; else t=l; fi; \
+elif [ -d \"$f\" ]; then t=d; else t=f; fi; \
+printf '%s\\t%s\\0' \"$t\" \"${f#./}\"; \
+done";
 
-pub const STAT_SCRIPT: &str = concat!(ver_fn!(), "ver \"$1\" || exit 6\nprintf %s \"$s\"\n");
+pub const STAT_SCRIPT: &str = concat!(ver_fn!(), "ver \"$1\" || exit 6; printf %s \"$s\"");
 
 /// `size:mtime`, a capo, contenuto; rifiuta oltre 5 MB (uscita 7).
 pub const READ_SCRIPT: &str = concat!(
     ver_fn!(),
-    "ver \"$1\" || exit 6\n[ -d \"$1\" ] && exit 10\n[ \"${s%%:*}\" -gt 5242880 ] && exit 7\nprintf '%s\\n' \"$s\"\ncat -- \"$1\"\n"
+    "ver \"$1\" || exit 6; [ -d \"$1\" ] && exit 10; [ \"${s%%:*}\" -gt 5242880 ] && exit 7; printf '%s\\n' \"$s\"; cat -- \"$1\""
 );
 
 /// `$1` percorso, `$2` versione attesa (vuota = il file non deve esistere); contenuto da stdin. Versione diversa =
-/// uscita 3. Scrive in `$1.codeart-tmp` e `mv -f` (un link si scrive attraverso); stampa la nuova versione.
+/// uscita 3. Scrive in `$1.codeart-tmp` e `mv -f` (un link si scrive attraverso); stampa la nuova versione. Il file
+/// temporaneo si crea solo se non esiste (né come link: uscita 4) e in modo esclusivo (`set -C`), così in una
+/// cartella condivisa nessuno può farlo puntare altrove; prende i permessi del file originale (`stat`, se c'è).
 pub const WRITE_SCRIPT: &str = concat!(
     ver_fn!(),
-    "tmp=\"$1.codeart-tmp\"\ncur=\"\"\nif [ -e \"$1\" ]; then ver \"$1\" || exit 6; cur=$s; fi\n\
-[ \"$cur\" = \"$2\" ] || exit 3\n\
-if [ -L \"$1\" ]; then cat > \"$1\" || exit 8\n\
-else\n\
-  if [ -e \"$1\" ]; then cp -p -- \"$1\" \"$tmp\" 2>/dev/null || :; fi\n\
-  cat > \"$tmp\" || { rm -f -- \"$tmp\"; exit 8; }\n\
-  mv -f -- \"$tmp\" \"$1\" || { rm -f -- \"$tmp\"; exit 8; }\n\
-fi\n\
-ver \"$1\" || exit 6\nprintf %s \"$s\"\n"
+    "tmp=\"$1.codeart-tmp\"; cur=\"\"; \
+if [ -e \"$1\" ]; then ver \"$1\" || exit 6; cur=$s; fi; \
+[ \"$cur\" = \"$2\" ] || exit 3; \
+if [ -L \"$1\" ]; then cat > \"$1\" || exit 8; \
+else \
+if [ -e \"$tmp\" ] || [ -L \"$tmp\" ]; then exit 4; fi; \
+m=\"\"; if [ -e \"$1\" ]; then m=$(stat -L -c %a -- \"$1\" 2>/dev/null || stat -L -f %Lp -- \"$1\" 2>/dev/null); fi; \
+set -C; cat > \"$tmp\" || { rm -f -- \"$tmp\"; exit 8; }; set +C; \
+case $m in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) chmod \"$m\" \"$tmp\" 2>/dev/null;; esac; \
+mv -f -- \"$tmp\" \"$1\" || { rm -f -- \"$tmp\"; exit 8; }; \
+fi; \
+ver \"$1\" || exit 6; printf %s \"$s\""
 );
 
 pub const MKDIR_SCRIPT: &str = "mkdir -- \"$1\"";
 
 /// Mai sopra una destinazione che esiste (anche un link rotto).
-pub const RENAME_SCRIPT: &str = "if [ -e \"$2\" ] || [ -L \"$2\" ]; then exit 4; fi\nmv -- \"$1\" \"$2\"";
+pub const RENAME_SCRIPT: &str = "if [ -e \"$2\" ] || [ -L \"$2\" ]; then exit 4; fi; mv -- \"$1\" \"$2\"";
 
 /// Tipo di `$1` per la conferma: `d`, `l`, `f`. Rifiuta `/` e la home.
-pub const KIND_SCRIPT: &str = "[ \"$1\" = / ] && exit 9\n[ \"$1\" = \"$HOME\" ] && exit 9\n\
+pub const KIND_SCRIPT: &str = "[ \"$1\" = / ] && exit 9; [ \"$1\" = \"$HOME\" ] && exit 9; \
 if [ -L \"$1\" ]; then printf l; elif [ -d \"$1\" ]; then printf d; elif [ -e \"$1\" ]; then printf f; else exit 6; fi";
 
-pub const DELETE_SCRIPT: &str = "set -e\n[ \"$1\" = / ] && exit 9\n[ \"$1\" = \"$HOME\" ] && exit 9\nrm -rf -- \"$1\"";
+pub const DELETE_SCRIPT: &str = "set -e; [ \"$1\" = / ] && exit 9; [ \"$1\" = \"$HOME\" ] && exit 9; rm -rf -- \"$1\"";
+
+/// Tutti gli script di questo modulo (per i test delle shell).
+#[cfg(test)]
+pub const ALL_SCRIPTS: &[&str] =
+    &[HOME_SCRIPT, LIST_SCRIPT, STAT_SCRIPT, READ_SCRIPT, WRITE_SCRIPT, MKDIR_SCRIPT, RENAME_SCRIPT, KIND_SCRIPT, DELETE_SCRIPT];
 
 pub type Runner<'a> = &'a dyn Fn(&str, &[&str], Option<Vec<u8>>) -> Result<ToolOutput, String>;
 
@@ -173,7 +187,8 @@ fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") }
 }
 
-/// Record `tipo\tnome\0`; voci malformate (senza tipo noto, nome vuoto o con `/`) scartate; tetto `MAX_ENTRIES`.
+/// Record `tipo\tnome\0`; voci malformate (senza tipo noto, nome vuoto o con `/`) scartate, come i nomi non UTF-8
+/// (un nome sostituito non si potrebbe aprire, e due diversi diventerebbero uguali); tetto `MAX_ENTRIES`.
 /// Dirs prima, poi il nome senza distinguere maiuscole.
 pub fn parse_list(dir: &str, out: &[u8]) -> RemoteListing {
     let mut entries = Vec::new();
@@ -181,7 +196,7 @@ pub fn parse_list(dir: &str, out: &[u8]) -> RemoteListing {
     for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let Some(tab) = rec.iter().position(|b| *b == b'\t') else { continue };
         let (kind, name) = (&rec[..tab], &rec[tab + 1..]);
-        let name = String::from_utf8_lossy(name).into_owned();
+        let Ok(name) = String::from_utf8(name.to_vec()) else { continue };
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
             continue;
         }
@@ -274,7 +289,14 @@ pub fn write(r: Runner, path: &str, text: &str, version: &str) -> Result<String,
     if !version.is_empty() && parse_version(version).is_none() {
         return Err(err("io", "versione non valida"));
     }
-    let out = run(r, WRITE_SCRIPT, &[path, version], Some(text.as_bytes().to_vec()), "scrittura")?;
+    let out = r(WRITE_SCRIPT, &[path, version], Some(text.as_bytes().to_vec())).map_err(|e| err("io", e))?;
+    if out.status == EXIT_EXISTS {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        return Err(err("io", format!("sul server c'è già «{}.codeart-tmp»: eliminalo e riprova", sanitize_display(name))));
+    }
+    if out.status != 0 {
+        return Err(script_error(&out, "scrittura"));
+    }
     let v = String::from_utf8_lossy(&out.stdout).into_owned();
     parse_version(&v).map(str::to_string).ok_or_else(|| err("io", "risposta non valida"))
 }
@@ -340,6 +362,97 @@ mod tests {
             let o = child.wait_with_output().map_err(|e| e.to_string())?;
             let _ = t.join();
             Ok(ToolOutput { status: o.status.code().unwrap_or(-1), stdout: o.stdout, stderr: String::from_utf8_lossy(&o.stderr).into_owned() })
+        }
+    }
+
+    /// Come sul server con una shell di login `login` (csh/tcsh compresi): `login -c "sh -c '<script>' _ <args>"`.
+    fn via_login(login: &'static str) -> impl Fn(&str, &[&str], Option<Vec<u8>>) -> Result<ToolOutput, String> {
+        move |script, args, stdin| {
+            use std::io::Write;
+            let mut c = Command::new(login);
+            c.arg("-f").arg("-c").arg(crate::ssh::conn::remote_cmd(script, args));
+            c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = c.spawn().map_err(|e| e.to_string())?;
+            let mut si = child.stdin.take().unwrap();
+            let data = stdin.unwrap_or_default();
+            let t = std::thread::spawn(move || {
+                let _ = si.write_all(&data);
+            });
+            let o = child.wait_with_output().map_err(|e| e.to_string())?;
+            let _ = t.join();
+            Ok(ToolOutput { status: o.status.code().unwrap_or(-1), stdout: o.stdout, stderr: String::from_utf8_lossy(&o.stderr).into_owned() })
+        }
+    }
+
+    #[test]
+    fn every_remote_script_is_one_line_without_bang() {
+        let mut all: Vec<&str> = ALL_SCRIPTS.to_vec();
+        all.extend_from_slice(crate::ssh::transfer::ALL_SCRIPTS);
+        all.push(crate::pty::REMOTE_SHELL_SCRIPT);
+        for s in all {
+            assert!(!s.contains('\n') && !s.contains('\r'), "a capo in {s:?}");
+            assert!(!s.contains('!'), "«!» in {s:?}");
+        }
+    }
+
+    /// Server con csh/tcsh come shell di login: ogni operazione sui file funziona lo stesso.
+    #[test]
+    fn csh_login_shells_run_every_script() {
+        for login in ["/bin/tcsh", "/bin/csh"] {
+            if !std::path::Path::new(login).exists() {
+                continue;
+            }
+            let r = via_login(login);
+            let d = dir();
+            std::fs::write(d.path().join(".hidden"), "h").unwrap();
+            std::fs::write(d.path().join("..dots"), "d").unwrap();
+            std::fs::create_dir(d.path().join("sub")).unwrap();
+            let names: Vec<String> = list(&r, &p(&d, "")).unwrap().entries.into_iter().map(|e| e.name).collect();
+            assert_eq!(names, ["sub", "..dots", ".hidden"], "{login}");
+            assert!(home(&r).unwrap().starts_with('/'));
+            let f = p(&d, "f.txt");
+            let v1 = write(&r, &f, "uno\n", "").unwrap();
+            let c = read(&r, &f).unwrap();
+            assert_eq!((c.text.as_str(), c.version.as_str()), ("uno\n", v1.as_str()), "{login}");
+            write(&r, &f, "due", &v1).unwrap();
+            mkdir(&r, &p(&d, "nuova")).unwrap();
+            rename(&r, &f, &p(&d, "g.txt")).unwrap();
+            delete(&r, "Dev", &p(&d, "nuova"), &|_| true).unwrap();
+            assert_eq!(std::fs::read_to_string(p(&d, "g.txt")).unwrap(), "due");
+            assert!(!d.path().join("nuova").exists() && !d.path().join("f.txt").exists());
+        }
+    }
+
+    #[test]
+    fn write_never_follows_a_planted_temp_file() {
+        for sh in ["/bin/sh", "/bin/dash"] {
+            if !std::path::Path::new(sh).exists() {
+                continue;
+            }
+            let r = local(sh);
+            let d = dir();
+            let f = p(&d, "conf");
+            let v = write(&r, &f, "a", "").unwrap();
+            // qualcun altro ha messo `conf.codeart-tmp` come link verso un suo file: rifiutato, nulla scritto
+            let target = p(&d, "altrove");
+            std::fs::write(&target, "intatto").unwrap();
+            symlink(&target, p(&d, "conf.codeart-tmp")).unwrap();
+            let e = write(&r, &f, "nuovo", &v).unwrap_err();
+            assert!(e.message.contains("conf.codeart-tmp"), "{sh}: {}", e.message);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "intatto");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "a");
+            // anche un link rotto o un file normale
+            std::fs::remove_file(p(&d, "conf.codeart-tmp")).unwrap();
+            symlink(p(&d, "manca"), p(&d, "conf.codeart-tmp")).unwrap();
+            assert!(write(&r, &f, "nuovo", &v).is_err());
+            assert!(!d.path().join("manca").exists());
+            std::fs::remove_file(p(&d, "conf.codeart-tmp")).unwrap();
+            std::fs::write(p(&d, "conf.codeart-tmp"), "suo").unwrap();
+            assert!(write(&r, &f, "nuovo", &v).is_err());
+            assert_eq!(std::fs::read_to_string(p(&d, "conf.codeart-tmp")).unwrap(), "suo");
+            std::fs::remove_file(p(&d, "conf.codeart-tmp")).unwrap();
+            write(&r, &f, "nuovo", &v).unwrap();
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "nuovo");
         }
     }
 
@@ -429,8 +542,9 @@ mod tests {
         assert!(!l.entries[6].is_dir && l.entries[6].is_link);
         assert_eq!(parse_list("/", b"f\tx\0").entries[0].path, "/x");
         assert!(parse_list("/", b"").entries.is_empty());
-        // UTF-8 non valido: sostituito, non scartato
-        assert_eq!(parse_list("/", b"f\tb\xffd\0").entries[0].name, "b\u{fffd}d");
+        // UTF-8 non valido: scartato (non si potrebbe aprire; due nomi diversi diventerebbero uguali)
+        let l = parse_list("/", b"f\tb\xffd\0f\tb\xfed\0f\tok\0");
+        assert_eq!(l.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["ok"]);
         let many: Vec<u8> = (0..MAX_ENTRIES + 1).flat_map(|i| format!("f\tn{i}\0").into_bytes()).collect();
         let l = parse_list("/", &many);
         assert_eq!((l.entries.len(), l.truncated), (MAX_ENTRIES, true));
@@ -486,6 +600,11 @@ mod tests {
             if std::path::Path::new(sh).exists() {
                 check_list(sh);
                 check_stat(sh);
+                let d = dir();
+                let f = p(&d, "w");
+                let v = write(&local(sh), &f, "x", "").unwrap();
+                write(&local(sh), &f, "yy", &v).unwrap();
+                assert_eq!(std::fs::read_to_string(&f).unwrap(), "yy", "{sh}");
             }
         }
     }

@@ -389,3 +389,169 @@ fn scripts_are_constants_and_paths_travel_as_arguments() {
     let a = super::super::conn::remote_cmd(UPLOAD_SCRIPT, &["/home/dev/it's here.codeart-part"]);
     assert!(a.ends_with("_ '/home/dev/it'\\''s here.codeart-part'"));
 }
+
+/// Server ostile: per `WALK_SCRIPT` risponde con `walk` (record costruiti a mano), il resto come `LocalSh`.
+struct Hostile {
+    inner: LocalSh,
+    walk: Vec<u8>,
+}
+
+impl Transport for Hostile {
+    fn command(&self, script: &str, args: &[&str]) -> Result<Command, String> {
+        self.inner.command(script, args)
+    }
+    fn run(&self, script: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+        if script == WALK_SCRIPT {
+            return Ok(ToolOutput { status: 0, stdout: self.walk.clone(), stderr: String::new() });
+        }
+        self.inner.run(script, args, stdin)
+    }
+}
+
+fn run_with(t: &dyn Transport, req: &Request) -> Outcome {
+    execute("t1", req, t, &no_cancel(), &|_| {}, EVENT_GAP)
+}
+
+#[test]
+fn hostile_walker_output_never_writes_outside_the_destination() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (local, remote, outside) = (tmp.path().join("l"), tmp.path().join("r"), tmp.path().join("fuori"));
+    for d in [&local, &remote, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(remote.join("x"), b"veleno").unwrap();
+    // nella cartella del progetto c'è già `proj`, un link verso una cartella fuori
+    std::os::unix::fs::symlink(&outside, local.join("proj")).unwrap();
+    let root = remote.join("proj").to_string_lossy().into_owned();
+    let rx = remote.join("x").to_string_lossy().into_owned();
+    let cases: Vec<Vec<u8>> = vec![
+        // manca il record della sorgente: si va dritti al contenuto
+        format!("f\t6\t{root}/x\0").into_bytes(),
+        // primo record di un'altra radice
+        format!("d\t0\t{rx}\0f\t6\t{root}/x\0").into_bytes(),
+        // primo record non UTF-8
+        b"f\t6\t\xff\0".to_vec(),
+    ];
+    let src = || Request::Download { sources: vec![root.clone()], local_dir: local.clone() };
+    for walk in cases {
+        let t = Hostile { inner: LocalSh::new(tmp.path()), walk };
+        let out = run_with(&t, &src());
+        assert_eq!(out.state, TransferState::Error);
+        assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
+        assert!(out.errors[0].message.contains("inattesa"), "{:?}", out.errors);
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "scritto fuori dal progetto");
+    }
+    // radice presente ma il contenuto sta sotto un link o un file, o in una cartella mai annunciata
+    std::fs::remove_file(local.join("proj")).unwrap();
+    std::fs::create_dir_all(remote.join("proj")).unwrap();
+    std::fs::write(remote.join("proj/c"), b"c").unwrap();
+    let walk = format!("d\t0\t{root}\0l\t0\t{root}/a\0f\t6\t{root}/a/x\0f\t6\t{root}/b/x\0f\t6\t{root}/c\0f\t6\t{root}/c/x\0").into_bytes();
+    let t = Hostile { inner: LocalSh::new(tmp.path()), walk };
+    let out = run_with(&t, &src());
+    let mut msgs: Vec<_> = out.errors.iter().map(|e| (e.path.as_str(), e.message.as_str())).collect();
+    msgs.sort();
+    // i tre record fuori posto danno lo stesso errore: una voce sola
+    assert_eq!(msgs, [("proj", "percorso inatteso dal server: voce saltata"), ("proj/a", "saltato: collegamento simbolico")]);
+    assert_eq!(std::fs::read(local.join("proj/c")).unwrap(), b"c");
+    assert!(!local.join("proj/a").exists() && !local.join("proj/b").exists());
+}
+
+#[test]
+fn local_parents_must_be_real_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (base, outside) = (tmp.path().join("l"), tmp.path().join("fuori"));
+    std::fs::create_dir_all(base.join("proj/sub")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    assert!(local_parents_ok(&base.join("proj/sub/f"), "proj/sub/f").is_ok());
+    assert!(local_parents_ok(&base.join("proj"), "proj").is_ok());
+    std::os::unix::fs::symlink(&outside, base.join("proj/link")).unwrap();
+    assert!(local_parents_ok(&base.join("proj/link/f"), "proj/link/f").is_err(), "cartella intermedia link");
+    assert!(local_parents_ok(&base.join("proj/link"), "proj/link").is_err(), "destinazione link");
+    assert!(local_parents_ok(&base.join("proj/manca/f"), "proj/manca/f").is_err(), "cartella mai creata");
+}
+
+/// Trasporto che perde la connessione dopo `left` operazioni (script brevi o processi).
+struct Flaky {
+    inner: LocalSh,
+    left: std::sync::atomic::AtomicUsize,
+}
+
+impl Flaky {
+    fn take(&self) -> Result<(), String> {
+        let ok = self.left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok();
+        if ok { Ok(()) } else { Err(super::super::conn::DISCONNECTED.into()) }
+    }
+}
+
+impl Transport for Flaky {
+    fn command(&self, script: &str, args: &[&str]) -> Result<Command, String> {
+        self.take()?;
+        self.inner.command(script, args)
+    }
+    fn run(&self, script: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<ToolOutput, String> {
+        self.take()?;
+        self.inner.run(script, args, stdin)
+    }
+}
+
+#[test]
+fn lost_connection_stops_the_transfer_with_one_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (local, remote) = (tmp.path().join("l"), tmp.path().join("r"));
+    std::fs::create_dir_all(&local).unwrap();
+    for i in 0..30 {
+        std::fs::create_dir_all(remote.join(format!("proj/d{i:02}"))).unwrap();
+        std::fs::write(remote.join(format!("proj/d{i:02}/f")), b"x").unwrap();
+    }
+    // download: il giro dell'albero e il primo file passano, poi la connessione cade
+    let t = Flaky { inner: LocalSh::new(tmp.path()), left: 2.into() };
+    let events = Mutex::new(Vec::new());
+    let out = execute("t1", &down(&[&remote.join("proj")], &local), &t, &no_cancel(), &|e| events.lock().unwrap().push(e), EVENT_GAP);
+    assert_eq!(out.state, TransferState::Error);
+    assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
+    assert_eq!(out.errors[0].message, LOST);
+    assert_eq!(out.files_copied, 1);
+    let last = events.into_inner().unwrap().pop().unwrap();
+    // 61 voci (radice, 30 cartelle, 30 file): copiate radice, d00, d00/f, d01; cade su d01/f
+    assert_eq!(last.message.as_deref(), Some("Connessione persa: 57 voci non copiate"));
+    // nessuna cartella creata dopo la caduta
+    let dirs: Vec<_> = std::fs::read_dir(local.join("proj")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(dirs.len(), 2, "{dirs:?}"); // d00 e d01 (creata prima del suo file)
+    no_parts(&local);
+
+    // upload: si ferma al primo errore di connessione
+    let up_src = tmp.path().join("src");
+    for i in 0..20 {
+        std::fs::create_dir_all(up_src.join(format!("d{i:02}"))).unwrap();
+    }
+    let dest = tmp.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let t = Flaky { inner: LocalSh::new(tmp.path()), left: 3.into() };
+    let out = run_with(&t, &up(&[&up_src], &dest));
+    assert_eq!(out.state, TransferState::Error);
+    assert_eq!(out.errors, vec![err_entry("src/d02", LOST)]);
+}
+
+#[test]
+fn final_errors_are_deduplicated_and_capped() {
+    let many: Vec<TransferError> = (0..150).map(|i| err_entry(&format!("f{i}"), "x")).chain([err_entry("f0", "x"), err_entry("f0", "y")]).collect();
+    let c = capped(many);
+    assert_eq!(c.len(), MAX_ERRORS + 1);
+    assert_eq!(c.last().unwrap(), &TransferError { path: String::new(), message: "e altri 51 errori".into() });
+    let few = capped(vec![err_entry("a", "x"), err_entry("a", "x"), err_entry("a", "y")]);
+    assert_eq!(few, vec![err_entry("a", "x"), err_entry("a", "y")]);
+    // dall'evento finale di un trasferimento vero: 150 link saltati
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..150 {
+        std::os::unix::fs::symlink("/nowhere", src.join(format!("l{i:03}"))).unwrap();
+    }
+    let dest = tmp.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (out, ev) = run_req(&LocalSh::new(tmp.path()), &up(&[&src], &dest), EVENT_GAP);
+    assert_eq!(out.errors.len(), MAX_ERRORS + 1);
+    let last = ev.last().unwrap();
+    assert_eq!(last.errors.as_ref().unwrap().len(), MAX_ERRORS + 1);
+    assert_eq!(last.message.as_deref(), Some("Completato con 150 errori"));
+}
