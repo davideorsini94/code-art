@@ -4,7 +4,7 @@ import type { SshStateEvent } from './types'
 
 /** Eventi del core legati a un progetto. Il nome reale porta l'id del progetto (`conv:event:<id>`): lo stesso
  *  schema di `projects::project_event` in src-tauri/src/projects.rs. */
-export type ProjectEvent = 'conv:event' | 'conv:upsert' | 'conv:removed' | 'conv:focus' | 'fs:changed' | 'pty:data' | 'pty:exit' | 'search:hits' | 'search:done' | 'git:changed' | 'git:progress' | 'git:op_done' | 'lsp:message' | 'lsp:exit'
+export type ProjectEvent = 'conv:event' | 'conv:upsert' | 'conv:removed' | 'conv:focus' | 'fs:changed' | 'pty:data' | 'pty:exit' | 'search:hits' | 'search:done' | 'git:changed' | 'git:progress' | 'git:op_done' | 'lsp:message' | 'lsp:exit' | 'ssh:transfer'
 
 export const projectEventName = (name: ProjectEvent, projectId: string) => `${name}:${projectId}`
 

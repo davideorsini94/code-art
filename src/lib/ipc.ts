@@ -176,3 +176,11 @@ export const sshMkdir = (id: string, path: string) => invoke<void>('ssh_mkdir', 
 export const sshRename = (id: string, from: string, to: string) => invoke<void>('ssh_rename', { id, from, to })
 /** Il core chiede la conferma con un dialogo nativo («Elimina sul server»); annullata = errore `io`. */
 export const sshDelete = (id: string, path: string) => invoke<void>('ssh_delete', { id, path })
+
+/** Trasferimenti: ritornano l'id; avanzamento su `ssh:transfer` (vedi `listenProject`). I percorsi locali devono stare
+ *  dentro il progetto. Una destinazione che esiste non si sovrascrive mai: è un errore di quella voce. */
+export const sshUpload = (id: string, localPaths: string[], remoteDir: string) =>
+  invoke<string>('ssh_upload', { id, localPaths, remoteDir })
+export const sshDownload = (id: string, remotePaths: string[], localDir: string) =>
+  invoke<string>('ssh_download', { id, remotePaths, localDir })
+export const sshTransferCancel = (transferId: string) => invoke<void>('ssh_transfer_cancel', { transferId })

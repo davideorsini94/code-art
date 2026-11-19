@@ -326,11 +326,11 @@ const TRUST_GATED: &[&str] = &[
     "gh_remote", "gh_repo_create", "gh_pr_list", "gh_pr_checks", "gh_pr_create", "gh_pr_merge", "lsp_start", "lsp_send",
     "search_replace", "ssh_servers", "ssh_server_save", "ssh_server_delete", "ssh_password_set", "ssh_password_clear",
     "ssh_connect", "ssh_disconnect", "ssh_states", "ssh_home", "ssh_list", "ssh_read", "ssh_write", "ssh_mkdir", "ssh_rename",
-    "ssh_delete",
+    "ssh_delete", "ssh_upload", "ssh_download",
 ];
-/// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel` e `lsp_stop`
+/// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel`, `lsp_stop` e `ssh_transfer_cancel`
 /// fermano soltanto processi già avviati dalla finestra stessa.
-const NO_TRUST_NEEDED: &[&str] = &["gh_accounts", "gh_repo_list", "gh_clone", "git_cancel", "lsp_stop"];
+const NO_TRUST_NEEDED: &[&str] = &["gh_accounts", "gh_repo_list", "gh_clone", "git_cancel", "lsp_stop", "ssh_transfer_cancel"];
 
 #[test]
 fn new_process_commands_are_all_classified() {

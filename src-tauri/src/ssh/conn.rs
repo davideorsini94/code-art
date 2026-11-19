@@ -750,6 +750,19 @@ impl Connections {
         Ok(out)
     }
 
+    /// Comando `ssh` per uno script di lunga durata (trasferimenti): stessi argomenti di `run`, ma lo stream lo
+    /// gestisce il chiamante (stdin/stdout a pezzi). Serve lo stato `connected`; mai una connessione diretta.
+    pub fn stream_command(&self, server: &Server, script: &str, args: &[&str]) -> Result<Command, String> {
+        check_server(server)?;
+        let connected = matches!(crate::lock(&self.entries).get(&server.id), Some(e) if e.state == ConnState::Connected);
+        if !connected || !self.paths.socket(&server.id).exists() {
+            return Err(DISCONNECTED.into());
+        }
+        let mut c = command(SSH);
+        c.args(run_args(server, &self.paths, script, args));
+        Ok(c)
+    }
+
     /// Uscita dall'app: `ssh -O exit` per ogni connessione (in parallelo), prima di fermare i processi.
     pub fn close_all(&self) {
         let servers: Vec<Server> = crate::lock(&self.entries)

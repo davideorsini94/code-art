@@ -87,6 +87,7 @@ pub fn run() {
                 let _ = handle.emit("ssh:state", e);
             });
             app.manage(Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit)));
+            app.manage(Arc::new(ssh::transfer::Transfers::default()));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
             projects::rebuild_menu(app.handle())?;
@@ -163,6 +164,9 @@ pub fn run() {
             ssh::ssh_mkdir,
             ssh::ssh_rename,
             ssh::ssh_delete,
+            ssh::transfer::ssh_upload,
+            ssh::transfer::ssh_download,
+            ssh::transfer::ssh_transfer_cancel,
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,

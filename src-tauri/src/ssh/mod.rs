@@ -6,6 +6,7 @@ pub mod config;
 pub mod conn;
 pub mod fs;
 pub mod keychain;
+pub mod transfer;
 
 use crate::fs_tree::FsError;
 use crate::store::Store;
