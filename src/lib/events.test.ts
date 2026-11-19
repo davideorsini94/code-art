@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () =>
 const globalListen = vi.fn()
 vi.mock('@tauri-apps/api/event', () => ({ listen: globalListen }))
 
-import { listenProject, projectEventName } from './events'
+import { listenProject, listenSshState, projectEventName } from './events'
 
 describe('listenProject', () => {
   it('subscribes on the current window to the name suffixed with the project id', async () => {
@@ -20,6 +20,15 @@ describe('listenProject', () => {
     for (const n of ['conv:event', 'conv:upsert', 'conv:removed', 'conv:focus', 'fs:changed', 'pty:data', 'pty:exit'] as const) {
       expect(projectEventName(n, 'abc')).toBe(`${n}:abc`)
     }
+  })
+})
+
+describe('listenSshState', () => {
+  it('listens to the app-wide ssh:state on the current window', async () => {
+    const cb = () => {}
+    await listenSshState(cb)
+    expect(winListen).toHaveBeenCalledWith('ssh:state', cb)
+    expect(globalListen).not.toHaveBeenCalled()
   })
 })
 

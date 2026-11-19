@@ -1,11 +1,14 @@
 //! SSH con l'`ssh` di sistema (nessuna libreria). Questo modulo: elenco dei server, salvati nel database dell'app
-//! oltre a quelli letti (sola lettura) da `~/.ssh/config`, e le loro password (solo nel Portachiavi).
+//! oltre a quelli letti (sola lettura) da `~/.ssh/config`, e le loro password (solo nel Portachiavi); le connessioni
+//! condivise sono in `conn`.
 pub mod askpass;
 pub mod config;
+pub mod conn;
 pub mod keychain;
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Dimensione massima di `~/.ssh/config` che si legge.
@@ -285,6 +288,53 @@ pub async fn ssh_password_clear(app: AppHandle, window: WebviewWindow, id: Strin
     crate::projects::off_main(move || clear_password(&store, &Keychain, read_user_config().as_deref(), &id)).await
 }
 
+/// Il server `id` (salvato o alias attuale di `~/.ssh/config`), senza toccare il Portachiavi.
+pub fn find_server(store: &Store, config_text: Option<&str>, id: &str) -> Result<Server, String> {
+    let mut all = store.ssh_servers()?;
+    all.extend(config_text.map(config_servers).unwrap_or_default());
+    all.into_iter().find(|s| s.id == id).ok_or_else(|| "Server non trovato".into())
+}
+
+/// Connette il server (connessione condivisa da tutte le finestre). Server nuovo: le impronte della sua chiave in un
+/// dialogo nativo sulla finestra chiamante (titolo fisso, "Annulla" predefinito). `Err("auth")`: serve una password.
+/// Già connesso o in connessione: `Ok` subito, lo stato arriva con l'evento `ssh:state`.
+#[tauri::command]
+pub async fn ssh_connect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    let store = trusted_store(&app, &window)?;
+    let conns = app.state::<Arc<conn::Connections>>().inner().clone();
+    crate::projects::off_main(move || {
+        let server = find_server(&store, read_user_config().as_deref(), &id)?;
+        let confirm = |message: &str| {
+            let answer = app
+                .dialog()
+                .message(message)
+                .title(conn::NEW_HOST_TITLE)
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(conn::BTN_CANCEL.into(), conn::BTN_TRUST_HOST.into()))
+                .parent(&window)
+                .blocking_show_with_result();
+            matches!(answer, MessageDialogResult::Custom(l) if l == conn::BTN_TRUST_HOST)
+        };
+        conns.connect(&server, &confirm)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn ssh_disconnect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    trusted_store(&app, &window)?;
+    let conns = app.state::<Arc<conn::Connections>>().inner().clone();
+    crate::projects::off_main(move || conns.disconnect(&id)).await
+}
+
+/// Stato delle connessioni note in questo avvio (le altre sono `disconnected`).
+#[tauri::command]
+pub async fn ssh_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<conn::StateEvent>, String> {
+    trusted_store(&app, &window)?;
+    Ok(app.state::<Arc<conn::Connections>>().states())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +484,18 @@ mod tests {
         assert!(k.0.borrow().is_empty());
         set_password(&st, &k, None, &a.id, &"s".repeat(1024)).unwrap();
         assert!(validate_password("è").is_ok());
+    }
+
+    #[test]
+    fn find_server_covers_saved_and_config() {
+        let (_d, st) = store();
+        let a = save_server(&st, &Fake::default(), &input("A", "a.example.test")).unwrap();
+        let cfg = Some("Host web\n HostName w.example.test\n");
+        assert_eq!(find_server(&st, cfg, &a.id).unwrap().host, "a.example.test");
+        let w = find_server(&st, cfg, "config:web").unwrap();
+        assert_eq!((w.source, conn::destination(&w).as_str()), (ServerSource::Config, "web"));
+        assert_eq!(find_server(&st, None, "config:web").unwrap_err(), "Server non trovato");
+        assert_eq!(find_server(&st, cfg, "manca").unwrap_err(), "Server non trovato");
     }
 
     #[test]

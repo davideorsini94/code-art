@@ -159,6 +159,9 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `ssh_server_delete` | `id` | progetto fidato; mai i server `config:`; elimina prima la password dal Portachiavi (assente = già fatto), poi il server | finestra | Portachiavi |
 | `ssh_password_set` | `id`, `password` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; password non vuota, ≤ 1024 byte, senza a capo né caratteri nulli; la password non compare mai in log, eventi, errori né torna alla WebView | finestra | Portachiavi (servizio `Code Art SSH`, account = id del server) |
 | `ssh_password_clear` | `id` | progetto fidato; `id` come `ssh_password_set`; assente = già fatto | finestra | Portachiavi |
+| `ssh_connect` | `id` | progetto fidato; `id` di un server salvato o di un alias attuale di `$HOME/.ssh/config`; destinazione e utente ri-validati (`check_server`); server sconosciuto (`ssh-keygen -F` su `~/.ssh/known_hosts`, `<dati app>/known_hosts`, `/etc/ssh/ssh_known_hosts*`, con nome e porta reali da `ssh -G`) → `ssh-keyscan`, impronte SHA256 in un dialogo nativo del core (titolo fisso «Nuovo server SSH», «Annulla» predefinito), solo con conferma le righe (tipi noti, base64) si aggiungono a `<dati app>/known_hosts` (0600; mai `~/.ssh`); chiave cambiata = errore senza conferma possibile; errore `auth` = serve una password | globale (connessione condivisa da tutte le finestre; evento `ssh:state` a tutte) | processi `/usr/bin/ssh`, `ssh-keygen`, `ssh-keyscan`; socket 0700 nei dati dell'app; Portachiavi (via askpass) |
+| `ssh_disconnect` | `id` | progetto fidato; `ssh -O exit` sul socket; connessione assente = già fatto | globale | processo `ssh` |
+| `ssh_states` | — | progetto fidato; solo id, stato e messaggio d'errore di ssh (nessun segreto) | globale | — |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
@@ -336,8 +339,21 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   `OSStatus`, mai il segreto. La legge solo l'app stessa rilanciata da `ssh` come `SSH_ASKPASS` (`ssh/askpass.rs`):
   con `CODEART_ASKPASS_ACCOUNT` nell'ambiente `main()` non avvia Tauri, risponde solo a prompt che finiscono con
   `password:` (mai passphrase né domande sì/no sulla chiave del server) stampando la password su stdout ed esce 0,
-  altrimenti esce 1 senza stampare nulla. Test: `answers_only_password_prompts`, `password_rules_never_echo_the_secret`,
-  `keychain_round_trip` (ignorato: richiede il Portachiavi di login sbloccato).
+  altrimenti esce 1 senza stampare nulla; prima di leggere il Portachiavi verifica che il processo padre sia
+  `/usr/bin/ssh` (`getppid` + `proc_pidpath`), altrimenti esce 1. Test: `answers_only_password_prompts`,
+  `only_system_ssh_may_ask`, `password_rules_never_echo_the_secret`, `keychain_round_trip` (ignorato: richiede il
+  Portachiavi di login sbloccato).
+- Connessioni SSH (`ssh/conn.rs`): sempre `/usr/bin/ssh`, `/usr/bin/ssh-keygen`, `/usr/bin/ssh-keyscan` (mai dal
+  `PATH`) con lista di argomenti; un master per server (`ControlMaster`, `-N`, `ControlPersist=600`: si chiude da solo
+  dopo 10 minuti senza client anche se l'app termina male) con socket in `<dati app>/s/<8 hex>` (cartella 0700; se il
+  percorso è troppo lungo per un socket Unix, `$TMPDIR/codeart-<uid>/`, poi `/tmp/codeart-<uid>/`, cartella 0700 di
+  proprietà dell'utente, mai un link simbolico). `StrictHostKeyChecking=yes` con
+  `UserKnownHostsFile="~/.ssh/known_hosts" "<dati app>/known_hosts"`. Le operazioni sono client del master
+  (`ControlMaster=no`, `-T`, `ClearAllForwardings=yes`) e girano solo se lo stato è `connected`; sul server l'unica
+  shell è `sh -c '<script costante>' _ <argomenti>` con ogni argomento passato da `quote_sh` (presupposto: shell di
+  login POSIX sul server). All'uscita dall'app `ssh -O exit` per ogni connessione, poi il registro dei processi.
+  Test: `quote_sh_survives_hostile_names` (eseguito con `/bin/sh`), `option_values_with_spaces_quotes_and_percent_reach_openssh_intact`,
+  `classifies_real_openssh_errors`, `keyscan_lines_are_filtered_and_renamed`, `known_hosts_lookup_append_and_hashed_entries`.
 
 ## Dipendenze (2026-11-11)
 

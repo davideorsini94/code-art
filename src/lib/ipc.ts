@@ -154,3 +154,11 @@ export const sshServerDelete = (id: string) => invoke<void>('ssh_server_delete',
 /** La password va solo nel Portachiavi del Mac (il core non la restituisce mai); `hasPassword` dice se c'è. */
 export const sshPasswordSet = (id: string, password: string) => invoke<void>('ssh_password_set', { id, password })
 export const sshPasswordClear = (id: string) => invoke<void>('ssh_password_clear', { id })
+import type { SshStateEvent } from './types'
+/** Connessione condivisa (una per server, per tutte le finestre). Server nuovo: il core mostra le impronte della sua
+ *  chiave in un dialogo nativo. Errore `'auth'` = serve una password (`sshPasswordSet`, poi di nuovo `sshConnect`).
+ *  Gli aggiornamenti arrivano con l'evento `ssh:state` (vedi `listenSshState`). */
+export const sshConnect = (id: string) => invoke<void>('ssh_connect', { id })
+export const sshDisconnect = (id: string) => invoke<void>('ssh_disconnect', { id })
+/** Stato delle connessioni note in questo avvio; un server assente è `disconnected`. */
+export const sshStates = () => invoke<SshStateEvent[]>('ssh_states')

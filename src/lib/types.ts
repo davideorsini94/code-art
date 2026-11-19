@@ -150,6 +150,9 @@ export type Server = {
   source: ServerSource
   hasPassword: boolean
 }
+export type SshConnState = 'connecting' | 'connected' | 'disconnected' | 'error'
+/** Evento `ssh:state` e voce di `sshStates` (specchio di `ssh::conn::StateEvent`). */
+export type SshStateEvent = { id: string; state: SshConnState; message?: string }
 /** Campi modificabili di un server salvato; `id` assente = nuovo server. */
 export type ServerInput = {
   id?: string | null

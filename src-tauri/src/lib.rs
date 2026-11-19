@@ -79,6 +79,14 @@ pub fn run() {
             app.manage(titles);
             app.manage(store.clone());
             app.manage(life.clone());
+            // connessioni SSH: valgono per tutta l'app (un server può comparire in più finestre), quindi `ssh:state`
+            // va a tutte le finestre; non contiene segreti (id del server, stato, messaggio d'errore di ssh)
+            let handle = app.handle().clone();
+            let emit: ssh::conn::Emitter = Arc::new(move |e: ssh::conn::StateEvent| {
+                use tauri::Emitter;
+                let _ = handle.emit("ssh:state", e);
+            });
+            app.manage(Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit)));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
             projects::rebuild_menu(app.handle())?;
@@ -145,6 +153,9 @@ pub fn run() {
             ssh::ssh_server_delete,
             ssh::ssh_password_set,
             ssh::ssh_password_clear,
+            ssh::ssh_connect,
+            ssh::ssh_disconnect,
+            ssh::ssh_states,
             trust::trust_check,
             trust::trust_accept,
             lifecycle::editor_set_dirty,
@@ -205,6 +216,10 @@ pub fn run() {
                 app.state::<Arc<lsp::Lsp>>().stop_all();
                 // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
                 app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                // connessioni SSH condivise: `ssh -O exit` prima di fermare i processi (servono `run_tool`)
+                if let Some(c) = app.try_state::<Arc<ssh::conn::Connections>>() {
+                    c.close_all();
+                }
                 tools::stop_all();
             }
             _ => {}
