@@ -324,7 +324,7 @@ const TRUST_GATED: &[&str] = &[
     "git_repos", "git_status", "git_diff", "git_branches", "git_log", "git_stage", "git_unstage", "git_discard", "git_commit",
     "git_checkout", "git_create_branch", "git_delete_branch", "git_merge", "git_merge_abort", "git_init", "git_remote_op",
     "gh_remote", "gh_repo_create", "gh_pr_list", "gh_pr_checks", "gh_pr_create", "gh_pr_merge", "lsp_start", "lsp_send",
-    "search_replace",
+    "search_replace", "ssh_servers", "ssh_server_save", "ssh_server_delete",
 ];
 /// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel` e `lsp_stop`
 /// fermano soltanto processi già avviati dalla finestra stessa.
@@ -333,7 +333,7 @@ const NO_TRUST_NEEDED: &[&str] = &["gh_accounts", "gh_repo_list", "gh_clone", "g
 #[test]
 fn new_process_commands_are_all_classified() {
     let declared = declared_commands();
-    for c in declared.iter().filter(|c| ["git_", "gh_", "lsp_"].iter().any(|p| c.starts_with(p)) || *c == "search_replace") {
+    for c in declared.iter().filter(|c| ["git_", "gh_", "lsp_", "ssh_"].iter().any(|p| c.starts_with(p)) || *c == "search_replace") {
         assert!(TRUST_GATED.contains(&c.as_str()) || NO_TRUST_NEEDED.contains(&c.as_str()), "{c}: classificalo in security.rs");
     }
     for c in TRUST_GATED.iter().chain(NO_TRUST_NEEDED) {
