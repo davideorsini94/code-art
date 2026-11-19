@@ -4,6 +4,7 @@
   import { errorText } from '../../lib/errors'
   import { sshList, sshMkdir, sshRename, sshWrite, sshDelete } from '../../lib/ipc'
   import { ssh } from '../../lib/stores/ssh.svelte'
+  import { terminals } from '../../lib/stores/terminals.svelte'
   import { editor } from '../../lib/stores/editor.svelte'
   import { LOCAL_DRAG, REMOTE_DRAG } from '../../lib/drag'
   import FileIcon from '../FileIcon.svelte'
@@ -70,7 +71,7 @@
   })
 
   const MENU_W = 190
-  const MENU_H = 190
+  const MENU_H = 220
   const menuAt = (x: number, y: number) => ({
     x: Math.max(4, Math.min(x, window.innerWidth - MENU_W - 4)),
     y: Math.max(4, Math.min(y, window.innerHeight - MENU_H - 4)),
@@ -257,6 +258,7 @@
       <button role="menuitem" use:tooltip={'Cambia il nome'} onclick={() => startRename(menu!.entry)}>Rinomina</button>
       <button role="menuitem" use:tooltip={'Elimina sul server (chiede conferma)'} onclick={() => void remove(menu!.entry)}>Elimina</button>
     {/if}
+    <button role="menuitem" use:tooltip={'Apre un terminale sul server in questa cartella'} onclick={() => { const e = menu!.entry; menu = null; terminals.openRemote(serverId, e.isDir ? e.path : parentOf(e.path)) }}>Apri terminale qui</button>
     <button role="menuitem" use:tooltip={'Copia nella prima cartella del progetto'} onclick={() => { const p = menu!.entry.path; menu = null; void ssh.download(serverId, p) }}>Scarica nel progetto…</button>
   </div>
 {/if}

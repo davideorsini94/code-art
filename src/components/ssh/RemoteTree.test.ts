@@ -25,6 +25,9 @@ vi.mock('../../lib/stores/project.svelte', () => ({ projectStore: { project: { i
 const editorMock = vi.hoisted(() => ({ openRemote: vi.fn() }))
 vi.mock('../../lib/stores/editor.svelte', () => ({ editor: editorMock }))
 
+const termMock = vi.hoisted(() => ({ openRemote: vi.fn() }))
+vi.mock('../../lib/stores/terminals.svelte', () => ({ terminals: termMock }))
+
 import * as ipc from '../../lib/ipc'
 import RemoteTree from './RemoteTree.svelte'
 
@@ -34,6 +37,17 @@ afterEach(() => {
 })
 
 describe('RemoteTree', () => {
+  it('opens a remote terminal in the folder, or in the parent of a file', async () => {
+    render(RemoteTree, { serverId: 's1', root: '/home/dev' })
+    const dir = (await screen.findByText('src')).closest('[role="treeitem"]')!
+    await fireEvent.contextMenu(dir)
+    await fireEvent.click(await screen.findByText('Apri terminale qui'))
+    expect(termMock.openRemote).toHaveBeenLastCalledWith('s1', '/home/dev/src')
+    await fireEvent.contextMenu(screen.getByText('a.ts').closest('[role="treeitem"]')!)
+    await fireEvent.click(await screen.findByText('Apri terminale qui'))
+    expect(termMock.openRemote).toHaveBeenLastCalledWith('s1', '/home/dev')
+  })
+
   it('opens a file in the editor on double click, not a folder', async () => {
     render(RemoteTree, { serverId: 's1', root: '/home/dev' })
     const file = (await screen.findByText('a.ts')).closest('[role="treeitem"]')!

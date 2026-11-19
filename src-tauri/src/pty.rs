@@ -205,6 +205,58 @@ pub async fn pty_spawn(
     Ok(SpawnInfo { id, shell })
 }
 
+/// Script remoto del terminale: la cartella arriva solo come `$1`.
+pub const REMOTE_SHELL_SCRIPT: &str = "cd -- \"$1\" && exec \"${SHELL:-sh}\" -l";
+
+/// Terminale su un server: `ssh -t` sulla connessione condivisa, nello stesso registro dei PTY locali.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn pty_spawn_ssh(
+    app: AppHandle,
+    window: WebviewWindow,
+    store: State<'_, Store>,
+    ptys: State<'_, Ptys>,
+    server_id: String,
+    dir: String,
+    cols: u16,
+    rows: u16,
+) -> Result<SpawnInfo, String> {
+    use tauri::Manager;
+    let project_id = crate::projects::window_project_id(&window)?;
+    crate::trust::ensure_project_trusted(&store, &project_id)?;
+    let conns = app.state::<Arc<crate::ssh::conn::Connections>>().inner().clone();
+    let store2 = store.inner().clone();
+    let ptys2 = ptys.inner().clone();
+    let label = window.label().to_string();
+    let (a1, p1) = (app.clone(), project_id.clone());
+    let (a2, p2) = (app, project_id);
+    blocking(move || {
+        let server = crate::ssh::find_server(&store2, crate::ssh::read_user_config().as_deref(), &server_id)?;
+        let run = |script: &str, args: &[&str], stdin: Option<Vec<u8>>| conns.run(&server, script, args, stdin);
+        let dir = crate::ssh::fs::resolve(&run, &dir).map_err(|e| e.message)?;
+        let args = conns.interactive(&server, REMOTE_SHELL_SCRIPT, &[&dir])?;
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let cwd = std::env::var("HOME").map(PathBuf::from).ok().filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
+        let id = ptys2.spawn(
+            &label,
+            crate::ssh::conn::SSH,
+            &refs,
+            &cwd,
+            cols,
+            rows,
+            move |id, bytes| {
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                crate::projects::emit_to_project(&a1, &p1, "pty:data", DataEvent { id, data });
+            },
+            move |id| {
+                crate::projects::emit_to_project(&a2, &p2, "pty:exit", ExitEvent { id });
+            },
+        )?;
+        Ok(SpawnInfo { id, shell: "ssh".into() })
+    })
+    .await
+}
+
 /// Esegue un'operazione potenzialmente bloccante fuori dai worker async.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
@@ -335,6 +387,44 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), stuck);
         assert!(t.elapsed() < Duration::from_secs(2));
         p.kill_owner("w1");
+    }
+
+    fn fake_server() -> crate::ssh::Server {
+        crate::ssh::Server {
+            id: "s1".into(), name: "Dev".into(), host: "example.test".into(), user: None, port: None,
+            identity_file: None, start_dir: None, source: crate::ssh::ServerSource::Saved, has_password: false,
+        }
+    }
+
+    #[test]
+    fn remote_terminal_args_never_contain_the_dir_in_the_script() {
+        use crate::ssh::conn::{interactive_args, quote_sh, SshPaths};
+        let paths = SshPaths::new(PathBuf::from("/tmp/ca-data"));
+        let dir = "/home/dev/a b'$(touch x)\"";
+        let a = interactive_args(&fake_server(), &paths, REMOTE_SHELL_SCRIPT, &[dir]);
+        let cmd = a.last().unwrap();
+        assert!(a.contains(&"-t".to_string()) && !a.contains(&"-T".to_string()));
+        assert!(a.contains(&"BatchMode=yes".to_string()) && a.contains(&"PreferredAuthentications=none".to_string()));
+        let t = a.iter().position(|x| x == "-t").unwrap();
+        assert!(t < a.len() - 2, "-t prima della destinazione");
+        assert_eq!(a[a.len() - 2], "example.test");
+        assert!(cmd.starts_with(&format!("sh -c {} _ ", quote_sh(REMOTE_SHELL_SCRIPT))));
+        assert!(cmd.ends_with(&quote_sh(dir)));
+        assert!(!REMOTE_SHELL_SCRIPT.contains("touch") && !REMOTE_SHELL_SCRIPT.contains("/home"));
+    }
+
+    #[test]
+    fn remote_command_cds_into_a_hostile_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("a b'c$(touch pwned)\"d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().to_string();
+        let cmd = crate::ssh::conn::remote_cmd(&REMOTE_SHELL_SCRIPT.replace("exec \"${SHELL:-sh}\" -l", "pwd"), &[&dir_s]);
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let got = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(std::fs::canonicalize(got.trim_end()).unwrap(), std::fs::canonicalize(&dir).unwrap());
+        assert!(!base.path().join("pwned").exists() && !dir.join("pwned").exists());
     }
 
     #[test]

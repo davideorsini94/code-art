@@ -1,4 +1,4 @@
-export type TerminalRequest = { cwd: string | undefined; seq: number }
+export type TerminalRequest = { kind: 'local'; cwd: string | undefined; seq: number } | { kind: 'remote'; serverId: string; dir: string; seq: number }
 
 /** Punto d'ingresso unico per "apri un terminale in questa cartella". */
 export class TerminalStore {
@@ -17,7 +17,13 @@ export class TerminalStore {
   /** Mostra il pannello e accoda la richiesta; senza `cwd` = cartella principale. */
   open(cwd?: string) {
     this.visible = true
-    this.requests = [...this.requests, { cwd, seq: ++this.seq }]
+    this.requests = [...this.requests, { kind: 'local', cwd, seq: ++this.seq }]
+  }
+
+  /** Mostra il pannello e accoda un terminale su un server, nella cartella `dir` (assoluta o `~`). */
+  openRemote(serverId: string, dir: string) {
+    this.visible = true
+    this.requests = [...this.requests, { kind: 'remote', serverId, dir, seq: ++this.seq }]
   }
 
   /** Restituisce e svuota la coda (la consuma TerminalPane). */

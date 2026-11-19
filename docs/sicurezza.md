@@ -174,6 +174,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `ssh_transfer_cancel` | `transfer_id` | nessuna fiducia richiesta (come `git_cancel`: ferma solo processi già avviati); solo un trasferimento avviato dallo stesso progetto, altrimenti nulla; uccide il gruppo del processo `ssh` in corso, cancella il `.codeart-part` (in locale o con `rm -f --` sul server), i file già completati restano; stato `cancelled` | finestra | — |
 | `pty_pick_cwd` | — | selettore nativo aperto dal core (partenza: cartella principale); la cartella scelta passa da `ensure_inside` (link risolti) e deve esistere, altrimenti "La cartella deve stare dentro il progetto"; non concede fiducia (la chiede `pty_spawn`) | finestra | — |
 | `pty_spawn` | `cwd`, `cols`, `rows` | `ensure_inside` + cartella esistente; progetto fidato; 1–1000; ≤ 16 per finestra | finestra | P (`$SHELL -l`) |
+| `pty_spawn_ssh` | `server_id`, `dir`, `cols`, `rows` | progetto fidato; server noto e `connected`; `dir` assoluta dopo `~` (validata); 1–1000; ≤ 16 per finestra (stesso registro); la cartella è solo l'argomento quotato `$1` di uno script costante | finestra | P (`ssh -t` sulla connessione condivisa) |
 | `pty_write` | `id`, `data` | PTY della stessa finestra; ≤ 1 MB | finestra | P |
 | `pty_resize` | `id`, `cols`, `rows` | PTY della stessa finestra; 1–1000 | finestra | P |
 | `pty_kill` | `id` | PTY della stessa finestra | finestra | P |

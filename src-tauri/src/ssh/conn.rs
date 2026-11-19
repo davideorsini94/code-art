@@ -204,6 +204,14 @@ pub fn run_args(server: &Server, paths: &SshPaths, script: &str, args: &[&str]) 
     a
 }
 
+/// Argomenti di una sessione interattiva sulla connessione condivisa: come `run_args` ma con un terminale (`-t`,
+/// prima della destinazione) e senza `-T`.
+pub fn interactive_args(server: &Server, paths: &SshPaths, script: &str, args: &[&str]) -> Vec<String> {
+    let mut a = args_with(server, paths, Mode::Run, &["-t", "-o", "ClearAllForwardings=yes"]);
+    a.push(remote_cmd(script, args));
+    a
+}
+
 /// Parola per la shell POSIX: tra apici singoli, ogni `'` diventa `'\''`.
 pub fn quote_sh(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -761,6 +769,16 @@ impl Connections {
         let mut c = command(SSH);
         c.args(run_args(server, &self.paths, script, args));
         Ok(c)
+    }
+
+    /// Argomenti di `ssh` per una sessione interattiva (terminale): serve lo stato `connected`.
+    pub fn interactive(&self, server: &Server, script: &str, args: &[&str]) -> Result<Vec<String>, String> {
+        check_server(server)?;
+        let connected = matches!(crate::lock(&self.entries).get(&server.id), Some(e) if e.state == ConnState::Connected);
+        if !connected || !self.paths.socket(&server.id).exists() {
+            return Err(DISCONNECTED.into());
+        }
+        Ok(interactive_args(server, &self.paths, script, args))
     }
 
     /// Uscita dall'app: `ssh -O exit` per ogni connessione (in parallelo), prima di fermare i processi.

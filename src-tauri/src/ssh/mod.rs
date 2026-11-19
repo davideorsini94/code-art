@@ -256,7 +256,7 @@ pub fn list_servers(store: &Store, secrets: &dyn Secrets, config_text: Option<&s
 }
 
 /// `$HOME/.ssh/config` come testo: file assente, illeggibile, troppo grande o non UTF-8 = nessun server da config.
-fn read_user_config() -> Option<String> {
+pub fn read_user_config() -> Option<String> {
     let path = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".ssh/config");
     read_config_file(&path)
 }

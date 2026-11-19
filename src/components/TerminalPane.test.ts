@@ -33,6 +33,7 @@ vi.mock('../lib/events', () => ({ listenProject: vi.fn(async () => () => {}) }))
 vi.mock('../lib/external', () => ({ openExternal: vi.fn() }))
 vi.mock('../lib/ipc', () => ({
   ptySpawn: vi.fn(async () => ({ id: 1, shell: 'zsh' })),
+  ptySpawnSsh: vi.fn(async () => ({ id: 2, shell: 'ssh' })),
   ptyWrite: vi.fn(async () => {}),
   ptyResize: vi.fn(async () => {}),
   ptyKill: vi.fn(async () => {}),
@@ -47,10 +48,13 @@ import * as ipc from '../lib/ipc'
 import { projectStore } from '../lib/stores/project.svelte'
 import { terminals } from '../lib/stores/terminals.svelte'
 import { git } from '../lib/stores/git.svelte'
+import { ssh } from '../lib/stores/ssh.svelte'
 
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} })
   vi.mocked(ipc.ptySpawn).mockClear()
+  vi.mocked(ipc.ptySpawnSsh).mockClear()
+  vi.mocked(ipc.projectBranch).mockClear()
   projectStore.project = { id: 'p1', name: 'demo', folders: ['/Users/dev/app'] } as never
   terminals.requests = []
   terminals.visible = false
@@ -64,6 +68,18 @@ afterEach(() => {
 const tabs = () => screen.queryAllByRole('tab')
 
 describe('TerminalPane', () => {
+  it('opens a remote tab through ptySpawnSsh with the server name in the title', async () => {
+    ssh.servers = [{ id: 's1', name: 'Dev', host: 'example.test', source: 'saved', hasPassword: false }] as never
+    terminals.openRemote('s1', '/home/dev/app')
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(ipc.ptySpawnSsh).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(ipc.ptySpawnSsh).mock.calls[0].slice(0, 2)).toEqual(['s1', '/home/dev/app'])
+    expect(ipc.ptySpawn).not.toHaveBeenCalled()
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    expect(tabs()[0].textContent).toContain('Dev:app')
+    expect(ipc.projectBranch).not.toHaveBeenCalled()
+  })
+
   it('opens a default tab in the primary folder when first shown', async () => {
     render(TerminalPane, { visible: true })
     await waitFor(() => expect(ipc.ptySpawn).toHaveBeenCalledTimes(1))
