@@ -24,3 +24,9 @@ Su un progetto con più repository (una cartella che ne contiene diversi):
 - [ ] **Vista Git**: l'icona del terminale nell'intestazione di ogni repository (o accanto alla barra di sincronizzazione
   con un solo repository) apre un terminale in quel repository e mostra il pannello se era nascosto.
 - [ ] **⌃`** continua a mostrare e nascondere il pannello; i link nel terminale si aprono nel browser.
+
+## Limiti noti
+
+- "Altra cartella…" restituisce il percorso reale (link simbolici risolti): se la cartella del progetto è stata aperta
+  attraverso un link (es. `/tmp` invece di `/private/tmp`), il tooltip della scheda mostra il percorso assoluto e il
+  branch letto all'apertura può mancare. Caso raro, lasciato per dopo.
