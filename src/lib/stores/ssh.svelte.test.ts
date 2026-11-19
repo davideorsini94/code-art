@@ -24,7 +24,7 @@ vi.mock('../ipc', () => ({
 vi.mock('./project.svelte', () => ({ projectStore: { project: { folders: ['/Users/dev/app'] } } }))
 
 import * as ipc from '../ipc'
-import { SshStore } from './ssh.svelte'
+import { SshStore, resolveRoot } from './ssh.svelte'
 
 let s: SshStore
 beforeEach(() => {
@@ -68,5 +68,31 @@ describe('SshStore', () => {
     await s.download('a', '/home/dev/f.txt')
     expect(ipc.sshDownload).toHaveBeenCalledWith('a', ['/home/dev/f.txt'], '/Users/dev/app')
     expect(s.notice).toContain('/Users/dev/app')
+  })
+
+  it('a cancelled host-key dialog leaves the server disconnected, without an error', async () => {
+    vi.mocked(ipc.sshConnect).mockRejectedValueOnce('Connessione annullata')
+    await s.connect('a')
+    expect(s.stateOf('a')).toBe('disconnected')
+    expect(s.errors.a).toBeUndefined()
+    expect(s.passwordFor).toBeNull()
+  })
+
+  it('saving or removing a server forgets its tree root', async () => {
+    vi.mocked(ipc.sshServerSave).mockResolvedValueOnce({ id: 'a' } as never)
+    s.roots = { a: '/home/dev', b: '/srv' }
+    await s.save({ id: 'a', name: 'Prova', host: 'staging.example.test', user: null, port: null, identityFile: null, startDir: null })
+    expect(s.roots).toEqual({ b: '/srv' })
+    await s.remove('b')
+    expect(s.roots).toEqual({})
+  })
+
+  it('resolves the tree root to an absolute path', () => {
+    expect(resolveRoot(null, '/home/dev')).toBe('/home/dev')
+    expect(resolveRoot('~', '/home/dev/')).toBe('/home/dev')
+    expect(resolveRoot('~/app/', '/home/dev')).toBe('/home/dev/app')
+    expect(resolveRoot('/srv/app//', '/home/dev')).toBe('/srv/app')
+    expect(resolveRoot('/', '/home/dev')).toBe('/')
+    expect(resolveRoot('~', '/')).toBe('/')
   })
 })

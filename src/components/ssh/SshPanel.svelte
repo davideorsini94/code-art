@@ -4,8 +4,8 @@
   import InfoToast from '../InfoToast.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { errorText } from '../../lib/errors'
-  import { sshHome } from '../../lib/ipc'
-  import { ssh } from '../../lib/stores/ssh.svelte'
+  import { asFsError, sshHome } from '../../lib/ipc'
+  import { ssh, resolveRoot } from '../../lib/stores/ssh.svelte'
   import ServerForm from './ServerForm.svelte'
   import RemoteTree from './RemoteTree.svelte'
   import Transfers from './Transfers.svelte'
@@ -13,22 +13,32 @@
 
   let form = $state<{ server: Server | null } | null>(null)
   let promptPw = $state('')
-  let roots = $state<Record<string, string>>({})
+  const roots = $derived(ssh.roots)
+  const resolving = new Set<string>()
   let openIds = $state<Record<string, boolean>>({})
 
   onMount(() => void ssh.init())
 
   const STATE_LABEL = { connecting: 'Connessione…', connected: 'Connesso', disconnected: 'Non connesso', error: 'Errore' } as const
 
-  // radice dell'albero: cartella iniziale, altrimenti la home del server
+  // radice dell'albero: cartella iniziale, altrimenti la home del server; sempre assoluta (`~` risolta con la home),
+  // così i percorsi dell'albero si confrontano con la radice (trascinamenti compresi)
   $effect(() => {
     for (const s of ssh.servers) {
-      if (ssh.stateOf(s.id) !== 'connected' || roots[s.id]) continue
-      if (s.startDir) roots[s.id] = s.startDir
-      else
-        sshHome(s.id)
-          .then((h) => (roots[s.id] = h))
-          .catch((e) => (ssh.errors[s.id] = errorText(e)))
+      if (ssh.stateOf(s.id) !== 'connected' || roots[s.id] || resolving.has(s.id)) continue
+      const sd = s.startDir
+      if (sd && sd.trim().startsWith('/')) {
+        ssh.roots[s.id] = resolveRoot(sd, '/')
+        continue
+      }
+      resolving.add(s.id)
+      sshHome(s.id)
+        .then((h) => {
+          // server modificato nel frattempo: si rifà al prossimo giro
+          if (ssh.servers.find((x) => x.id === s.id)?.startDir === sd && ssh.stateOf(s.id) === 'connected') ssh.roots[s.id] = resolveRoot(sd, h)
+        })
+        .catch((e) => (ssh.errors[s.id] = errorText(asFsError(e).message)))
+        .finally(() => resolving.delete(s.id))
     }
   })
 

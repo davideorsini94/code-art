@@ -8,6 +8,16 @@ import type { Server, ServerInput, SshConnState, SshStateEvent, TransferEvent } 
 export type TransferView = TransferEvent & { dest?: { serverId: string; dir: string; remote: boolean } }
 
 const HIDE_AFTER_MS = 8000
+/** Errore di `ssh_connect` quando l'utente annulla il dialogo del server nuovo (`conn::CANCELLED`). */
+const CANCELLED = 'Connessione annullata'
+
+/** Radice assoluta dalla cartella iniziale (`~`, `~/…` o assoluta) e dalla home del server, senza `/` finali. */
+export function resolveRoot(startDir: string | null | undefined, home: string): string {
+  const h = home.replace(/\/+$/, '')
+  const d = startDir?.trim() || '~'
+  const abs = d === '~' ? h || '/' : d.startsWith('~/') ? `${h}/${d.slice(2)}` : d
+  return abs.replace(/\/+$/, '') || '/'
+}
 
 /** Server SSH e stato delle connessioni (condivise da tutte le finestre). Nessuna password passa di qui: arriva al
  *  core con `setPassword` e non viene conservata. */
@@ -23,6 +33,8 @@ export class SshStore {
   loaded = $state(false)
   /** Trasferimenti attivi o recenti, in ordine di avvio. */
   transfers = $state<TransferView[]>([])
+  /** Radice (assoluta) dell'albero di ogni server connesso; si dimentica quando il server si modifica o si elimina. */
+  roots = $state<Record<string, string>>({})
   /** Cartella del server da rileggere dopo un trasferimento finito (la ascolta `RemoteTree`). */
   reloadDir = $state<{ serverId: string; dir: string; n: number } | null>(null)
   private started = false
@@ -168,6 +180,11 @@ export class SshStore {
         this.passwordFor = id
         return
       }
+      if (String(e) === CANCELLED) {
+        // dialogo del server nuovo annullato: non è un errore
+        this.states[id] = { state: 'disconnected' }
+        return
+      }
       this.errors[id] = errorText(e)
       this.states[id] = { state: 'error', message: this.errors[id] }
     }
@@ -196,14 +213,18 @@ export class SshStore {
     await this.refresh()
   }
 
+  /** Un server modificato si disconnette nel core (la connessione aperta porterebbe al vecchio indirizzo): l'albero
+   *  si dimentica e si ricostruisce alla prossima connessione. */
   async save(input: ServerInput): Promise<Server> {
     const s = await ipc.sshServerSave(input)
+    delete this.roots[s.id]
     await this.refresh()
     return s
   }
 
   async remove(id: string) {
     await ipc.sshServerDelete(id)
+    delete this.roots[id]
     await this.refresh()
   }
 

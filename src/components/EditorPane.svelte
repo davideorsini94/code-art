@@ -460,6 +460,8 @@
 
   {#if active?.remote && !active.error && active.message}
     <div class="bar" role="alert"><span>Salvataggio non riuscito: {active.message}</span></div>
+  {:else if active?.remote && !active.error && active.notice}
+    <div class="bar" role="status"><span>{active.notice}</span></div>
   {/if}
 
   <div class="body">

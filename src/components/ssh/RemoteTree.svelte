@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { tooltip } from '../../lib/tooltip'
   import { errorText } from '../../lib/errors'
-  import { sshList, sshMkdir, sshRename, sshWrite, sshDelete } from '../../lib/ipc'
+  import { asFsError, sshList, sshMkdir, sshRename, sshWrite, sshDelete } from '../../lib/ipc'
   import { ssh } from '../../lib/stores/ssh.svelte'
   import { terminals } from '../../lib/stores/terminals.svelte'
   import { editor } from '../../lib/stores/editor.svelte'
@@ -27,6 +27,8 @@
   const parentOf = (p: string) => p.slice(0, p.lastIndexOf('/')) || '/'
   const nameOf = (p: string) => p.slice(p.lastIndexOf('/') + 1)
   const join = (dir: string, name: string) => (dir === '/' ? `/${name}` : `${dir}/${name}`)
+  // i comandi dei file remoti rifiutano con `FsError` (`{ code, message }`), non con una stringa
+  const failure = (e: unknown) => errorText(asFsError(e).message)
   const rootEntry = $derived<RemoteEntry>({ name: root, path: root, isDir: true, isLink: false })
 
   async function load(dir: string) {
@@ -36,7 +38,7 @@
       truncated[dir] = !!l.truncated
     } catch (e) {
       delete children[dir]
-      error = errorText(e)
+      error = failure(e)
     }
   }
 
@@ -83,7 +85,7 @@
       await op()
       return true
     } catch (e) {
-      error = errorText(e)
+      error = failure(e)
       return false
     }
   }
@@ -108,8 +110,9 @@
     const value = ed?.value.trim()
     if (!ed || !value || value.includes('/')) return
     if (ed.kind === 'rename' && ed.path) {
-      const to = join(parentOf(ed.path), value)
-      if (to !== ed.path) await run(() => sshRename(serverId, ed.path!, to))
+      const from = ed.path
+      const to = join(parentOf(from), value)
+      if (to !== from && (await run(() => sshRename(serverId, from, to)))) editor.repathRemote(serverId, from, to)
     } else if (ed.parent) {
       const path = join(ed.parent, value)
       await run(() => (ed.kind === 'dir' ? sshMkdir(serverId, path) : sshWrite(serverId, path, '', '')))
@@ -120,7 +123,10 @@
   async function remove(e: RemoteEntry) {
     menu = null
     // la conferma è nativa, del core: annullata = errore, e va bene così
-    if (await run(() => sshDelete(serverId, e.path))) selected = null
+    if (await run(() => sshDelete(serverId, e.path))) {
+      selected = null
+      editor.markRemoteRemoved(serverId, e.path)
+    }
     await reloadAll()
   }
 
@@ -150,6 +156,7 @@
     const to = join(target.path, nameOf(from))
     void run(async () => {
       await sshRename(serverId, from!, to)
+      editor.repathRemote(serverId, from!, to)
       expanded[target.path] = true
       await reloadAll()
     })
@@ -235,7 +242,7 @@
       {#if editing && editing.kind !== 'rename' && editing.parent === e.path}
         {@render inputRow(depth + 1)}
       {/if}
-      {#each children[e.path] ?? [] as c (c.path)}
+      {#each children[e.path] ?? [] as c, i (`${i}:${c.path}`)}
         {@render node(c, depth + 1)}
       {/each}
       {#if truncated[e.path]}<p class="more" style:padding-left="{8 + (depth + 1) * 14}px">Elenco troncato (oltre 10 000 voci)</p>{/if}

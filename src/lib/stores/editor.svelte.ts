@@ -31,6 +31,22 @@ export function repath<T extends { path: string; name: string; diff: unknown; ke
   })
 }
 
+/** Sposta le schede di file del server `serverId` il cui percorso è `from` o sta dentro `from` (rinomina/spostamento
+ *  sul server): cambiano percorso, chiave e nome, la versione resta (`mv` non la cambia). */
+export function repathRemote<T extends { path: string; name: string; key: string; remote?: { serverId: string; path: string; version: string } }>(
+  tabs: T[],
+  serverId: string,
+  from: string,
+  to: string,
+): T[] {
+  return tabs.map((t) => {
+    const r = t.remote
+    if (!r || r.serverId !== serverId || (r.path !== from && !r.path.startsWith(from + '/'))) return t
+    const path = to + r.path.slice(from.length)
+    return { ...t, path, key: remoteKey(serverId, path), name: baseName(path), remote: { ...r, path } }
+  })
+}
+
 /** Collegamento al modello Monaco: il testo si legge solo quando serve (salvataggio). */
 export type Binding = { snapshot: () => { text: string; commit: () => void } }
 
@@ -46,6 +62,8 @@ export type Tab = {
   error: 'too_large' | 'not_text' | 'forbidden' | 'io' | 'remote_preview' | null
   /** Testo dell'ultimo errore (apertura o salvataggio di un file sul server). */
   message?: string
+  /** Avviso su un file del server (es. eliminato dall'albero remoto): resta finché non si salva o ricarica. */
+  notice?: string
   /** File sul server: `path` è il percorso remoto, `version` quella da ridare a `sshWrite`. */
   remote?: { serverId: string; path: string; version: string }
   prompt: boolean // "Cambiato su disco" in attesa di scelta
@@ -77,6 +95,10 @@ class EditorStore {
   private reloadTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private watching = false
   private bindings = new Map<number, Binding>()
+  /** Salvataggio in corso per scheda (id) e quello in coda dietro di lui: due ⌘S di fila non partono insieme (sul
+   *  server il secondo userebbe la versione vecchia e troverebbe un falso conflitto). */
+  private saving = new Map<number, Promise<void>>()
+  private queuedSave = new Map<number, Promise<void>>()
 
   get activeTab(): Tab | undefined {
     return this.tabs.find((t) => t.key === this.active)
@@ -177,6 +199,7 @@ class EditorStore {
       t.remote = { ...r, version }
       t.baseText = text
       t.message = undefined
+      t.notice = undefined
       t.prompt = false
       commit()
     } catch (e) {
@@ -222,15 +245,43 @@ class EditorStore {
     this.active = tab.key
   }
 
-  /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". */
-  async save(path: string, key = tabKey(path, false)) {
+  /** Salva la tab; su conflitto di mtime (o file sparito) mostra la barra "Cambiato su disco". Un salvataggio chiesto
+   *  mentre un altro della stessa scheda è in corso parte dopo di lui (con il testo di quel momento); più richieste
+   *  nel frattempo diventano una sola. */
+  save(path: string, key = tabKey(path, false)): Promise<void> {
     const t = this.tabs.find((x) => x.key === key)
+    if (!t) return Promise.resolve()
+    const id = t.id
+    const queued = this.queuedSave.get(id)
+    if (queued) return queued
+    const running = this.saving.get(id)
+    if (!running) return this.startSave(id)
+    const next = running
+      .catch(() => {})
+      .then(() => {
+        this.queuedSave.delete(id)
+        return this.startSave(id)
+      })
+    this.queuedSave.set(id, next)
+    return next
+  }
+
+  private startSave(id: number): Promise<void> {
+    const p: Promise<void> = this.saveNow(id).finally(() => {
+      if (this.saving.get(id) === p) this.saving.delete(id)
+    })
+    this.saving.set(id, p)
+    return p
+  }
+
+  private async saveNow(id: number) {
+    const t = this.tabs.find((x) => x.id === id)
     if (!t || (t.diff && !t.diff.editable) || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
     if (t.remote) return this.saveRemote(t, snap.text, snap.commit)
     try {
-      t.mtimeMs = await fsWrite(path, snap.text, t.mtimeMs)
+      t.mtimeMs = await fsWrite(t.path, snap.text, t.mtimeMs)
       t.baseText = snap.text
       snap.commit()
       t.prompt = false
@@ -287,6 +338,26 @@ class EditorStore {
     for (const t of [...this.tabs]) if (!t.remote && (t.path === path || t.path.startsWith(path + '/'))) this.close(t.key)
   }
 
+  /** Dopo rinomina/spostamento sul server: le schede di quei file seguono il nuovo percorso. */
+  repathRemote(serverId: string, from: string, to: string) {
+    const active = this.activeTab
+    this.tabs = repathRemote(this.tabs, serverId, from, to)
+    if (active) this.active = this.tabs.find((t) => t.id === active.id)?.key ?? this.active
+  }
+
+  /** Dopo un'eliminazione sul server: le schede di quei file restano con il loro testo, modificate, senza versione
+   *  (salvare ricrea il file) e con un avviso. */
+  markRemoteRemoved(serverId: string, path: string) {
+    for (const t of this.tabs) {
+      const r = t.remote
+      if (!r || r.serverId !== serverId || (r.path !== path && !r.path.startsWith(path + '/'))) continue
+      t.remote = { ...r, version: '' }
+      t.dirty = true
+      t.prompt = false
+      t.notice = 'Eliminato sul server: salvando lo ricrei (se la cartella esiste ancora)'
+    }
+  }
+
   /** Dopo rinomina/spostamento: le tab seguono il nuovo percorso. */
   repath(from: string, to: string) {
     const active = this.activeTab
@@ -307,6 +378,7 @@ class EditorStore {
         t.dirty = false
         t.prompt = false
         t.message = undefined
+        t.notice = undefined
       } catch (e) {
         t.message = asFsError(e).message
       }

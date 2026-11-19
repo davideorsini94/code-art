@@ -275,4 +275,83 @@ describe('remote tabs', () => {
     editor.closeUnder('/home/dev/app')
     expect(editor.tabs).toHaveLength(1)
   })
+
+  it('two saves in a row do not overlap: the second uses the new version (no false conflict)', async () => {
+    const t = await dirtyRemote()
+    let release!: () => void
+    sshWrite.mockImplementationOnce(
+      (_id, _p, _t, v) =>
+        new Promise((res, rej) => {
+          release = () => (v === '5:1' ? res('6:2') : rej({ code: 'conflict', message: 'cambiato' }))
+        }),
+    )
+    sshWrite.mockImplementation(async (_id, _p, _t, v) => {
+      if (v !== '6:2') throw { code: 'conflict', message: 'cambiato' }
+      return '7:3'
+    })
+    const first = editor.save(t.path, t.key)
+    const second = editor.save(t.path, t.key)
+    const third = editor.save(t.path, t.key)
+    await Promise.resolve()
+    expect(sshWrite).toHaveBeenCalledTimes(1)
+    release()
+    await Promise.all([first, second, third])
+    expect(sshWrite).toHaveBeenCalledTimes(2) // la terza si è unita alla seconda
+    expect(sshWrite.mock.calls.map((c) => c[3])).toEqual(['5:1', '6:2'])
+    expect(t.prompt).toBe(false)
+    expect(t.remote!.version).toBe('7:3')
+  })
+
+  it('local saves are serialized too', async () => {
+    await editor.open('/p/z.ts')
+    const t = editor.tabs.find((x) => x.key === '/p/z.ts')!
+    editor.bind(t.id, { snapshot: () => ({ text: 'mio', commit: () => {} }) })
+    let release!: () => void
+    fsWrite.mockImplementationOnce(() => new Promise((res) => (release = () => res(5))))
+    fsWrite.mockImplementation(async (_p, _t, m) => (m === 5 ? 6 : Promise.reject({ code: 'conflict' })))
+    const a = editor.save(t.path)
+    const b = editor.save(t.path)
+    await Promise.resolve()
+    expect(fsWrite).toHaveBeenCalledTimes(1)
+    release()
+    await Promise.all([a, b])
+    expect(fsWrite.mock.calls.map((c) => c[2])).toEqual([1, 5])
+    expect(t.prompt).toBe(false)
+    fsWrite.mockImplementation(async () => 2)
+  })
+
+  it('a rename on the server moves the open tabs of that server only', async () => {
+    await editor.openRemote('s1', '/home/dev/app/a.ts')
+    await editor.openRemote('s1', '/home/dev/app2/b.ts')
+    await editor.openRemote('s2', '/home/dev/app/a.ts')
+    const active = editor.active
+    editor.repathRemote('s1', '/home/dev/app', '/home/dev/lib')
+    expect(editor.tabs.map((t) => t.key)).toEqual(['ssh:s1:/home/dev/lib/a.ts', 'ssh:s1:/home/dev/app2/b.ts', 'ssh:s2:/home/dev/app/a.ts'])
+    expect(editor.tabs[0].remote).toEqual({ serverId: 's1', path: '/home/dev/lib/a.ts', version: '5:1' })
+    expect(editor.tabs[0].path).toBe('/home/dev/lib/a.ts')
+    expect(editor.active).toBe(active)
+    editor.repathRemote('s1', '/home/dev/lib/a.ts', '/home/dev/lib/c.ts')
+    expect(editor.tabs[0].name).toBe('c.ts')
+    editor.active = editor.tabs[0].key
+    const t = editor.tabs[0]
+    editor.bind(t.id, { snapshot: () => ({ text: 'mio', commit: () => {} }) })
+    await editor.save(t.path, t.key)
+    expect(sshWrite).toHaveBeenLastCalledWith('s1', '/home/dev/lib/c.ts', 'mio', '5:1')
+  })
+
+  it('a delete on the server keeps the tab text, dirty, and saving re-creates the file', async () => {
+    const t = await dirtyRemote()
+    editor.setDirty(t.id, false)
+    await editor.openRemote('s1', '/home/dev/other.ts')
+    editor.markRemoteRemoved('s1', '/home/dev/app')
+    expect(t.dirty).toBe(true)
+    expect(t.remote!.version).toBe('')
+    expect(t.notice).toMatch(/Eliminato sul server/)
+    expect(editor.tabs.find((x) => x.path === '/home/dev/other.ts')!.notice).toBeUndefined()
+    expect(editor.tabs).toHaveLength(2)
+    await editor.save(t.path, t.key)
+    expect(sshWrite).toHaveBeenLastCalledWith('s1', '/home/dev/app/a.ts', 'mio', '')
+    expect(t.notice).toBeUndefined()
+    expect(t.dirty).toBe(false)
+  })
 })

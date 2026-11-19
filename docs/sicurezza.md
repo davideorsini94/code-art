@@ -358,13 +358,19 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   Portachiavi di login sbloccato).
 - Connessioni SSH (`ssh/conn.rs`): sempre `/usr/bin/ssh`, `/usr/bin/ssh-keygen`, `/usr/bin/ssh-keyscan` (mai dal
   `PATH`) con lista di argomenti; un master per server (`ControlMaster`, `-N`, `ControlPersist=600`: si chiude da solo
-  dopo 10 minuti senza client anche se l'app termina male) con socket in `<dati app>/s/<8 hex>` (cartella 0700; se il
+  dopo 10 minuti senza client anche se l'app termina male) con socket in `<dati app>/s/<16 hex>` (cartella 0700; se il
   percorso è troppo lungo per un socket Unix, `$TMPDIR/codeart-<uid>/`, poi `/tmp/codeart-<uid>/`, cartella 0700 di
   proprietà dell'utente, mai un link simbolico). `StrictHostKeyChecking=yes` con
   `UserKnownHostsFile="~/.ssh/known_hosts" "<dati app>/known_hosts"`. Le operazioni sono client del master
-  (`ControlMaster=no`, `-T`, `ClearAllForwardings=yes`) e girano solo se lo stato è `connected`; hanno anche
+  (`ControlMaster=no`, `-T`, `RequestTTY=no`, `ClearAllForwardings=yes`, `RemoteCommand=none` contro un
+  `RemoteCommand` della config) e girano solo se lo stato è `connected`; hanno anche
   `BatchMode=yes` e `PreferredAuthentications=none`: se il master è sparito OpenSSH ripiegherebbe su una connessione
-  diretta, che così non può autenticarsi (un client del master non si autentica mai). Un'uscita 255 conta come
+  diretta, che così non può autenticarsi (un client del master non si autentica mai). Un client del master non
+  controlla la destinazione: salvare o eliminare un server connesso lo disconnette prima (`ssh -O exit`; i terminali
+  remoti terminano da soli), e ogni operazione (`run`, trasferimenti, terminale) confronta destinazione, host, utente,
+  porta e chiave del server con quelli della connessione: se sono cambiati (anche in `~/.ssh/config`) la connessione si
+  chiude («Server modificato: riconnetti») e l'operazione è rifiutata. Test: `a_server_changed_after_connect_is_disconnected_and_refused`,
+  `saving_or_deleting_an_existing_server_disconnects_it_first`. Un'uscita 255 conta come
   connessione persa solo con un messaggio di ssh riconosciuto e il master che non risponde a `-O check`; il controllo
   periodico dichiara `disconnected` dopo due `-O check` falliti di fila. All'interfaccia arrivano solo messaggi
   italiani fissi, mai lo stderr grezzo di ssh (banner del server compresi). Socket con 16 cifre esadecimali (FNV-1a a
@@ -372,8 +378,13 @@ Tutti avviati con lista di argomenti, mai tramite shell con testo composto:
   ASCII, `.`, `-`, `_`, `:` (`validate_host`, anche per gli alias della config e per `hostname`/`hostkeyalias` di
   `ssh -G`); il nome scritto in known_hosts è `host` o `[host]:porta` con quei caratteri (niente jolly, liste,
   marcatori); al massimo 8 chiavi e 16 KB da `ssh-keyscan`, oltre la connessione è rifiutata; sul server l'unica
-  shell è `sh -c '<script costante>' _ <argomenti>` con ogni argomento passato da `quote_sh` (presupposto: shell di
-  login POSIX sul server). All'uscita dall'app `ssh -O exit` per ogni connessione, poi il registro dei processi.
+  shell è `sh -c '<script costante>' _ <argomenti>` con ogni argomento passato da `quote_sh`; gli script sono su una
+  riga e senza `!`, così passano anche da una shell di login csh/tcsh (test `every_remote_script_is_one_line_without_bang`,
+  `csh_login_shells_run_every_script`). Il file temporaneo del salvataggio remoto si crea solo se non esiste (né come
+  link) e in modo esclusivo (`set -C`). I download accettano dal server solo un albero coerente (primo record = la
+  sorgente, ogni voce dentro una cartella già annunciata) e non scrivono mai attraverso un collegamento simbolico
+  locale (`symlink_metadata` della destinazione e delle cartelle create): test
+  `hostile_walker_output_never_writes_outside_the_destination`, `write_never_follows_a_planted_temp_file`. All'uscita dall'app `ssh -O exit` per ogni connessione, poi il registro dei processi.
   Test: `quote_sh_survives_hostile_names` (eseguito con `/bin/sh`), `option_values_with_spaces_quotes_and_percent_reach_openssh_intact`,
   `classifies_real_openssh_errors`, `keyscan_lines_are_filtered_and_renamed`, `known_hosts_lookup_append_and_hashed_entries`.
 

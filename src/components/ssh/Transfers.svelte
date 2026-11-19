@@ -35,7 +35,7 @@
           </button>
           {#if open[t.transferId]}
             <ul class="errs">
-              {#each errs as e (e.path)}<li><b>{nameOf(e.path)}</b>: {e.message}</li>{/each}
+              {#each errs as e, i (i)}<li>{#if e.path}<b>{nameOf(e.path)}</b>{': '}{/if}{e.message}</li>{/each}
             </ul>
           {/if}
         {/if}

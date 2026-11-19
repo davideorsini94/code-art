@@ -17,6 +17,7 @@ vi.mock('../../lib/ipc', () => ({
   sshRename: vi.fn(),
   sshDelete: vi.fn(),
   sshDownload: vi.fn(),
+  asFsError: (e: unknown) => (e && typeof e === 'object' && 'code' in e ? e : { code: 'io', message: String(e) }),
 }))
 vi.mock('../../lib/stores/project.svelte', () => ({ projectStore: { project: { folders: ['/Users/dev/app'] } } }))
 
@@ -35,6 +36,7 @@ beforeEach(() => {
   ssh.errors = {}
   ssh.passwordFor = null
   ssh.loaded = false
+  ssh.roots = {}
 })
 afterEach(cleanup)
 
@@ -87,6 +89,27 @@ describe('SshPanel', () => {
     await fireEvent.click(screen.getAllByText('Connetti')[0])
     await waitFor(() => expect(ipc.sshPasswordSet).toHaveBeenCalledWith('a', 'pw-finta'))
     await waitFor(() => expect(ipc.sshConnect).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('SshPanel tree root', () => {
+  it('resolves a ~ start dir with the server home, so the root is absolute', async () => {
+    vi.mocked(ipc.sshServers).mockResolvedValue([srv({ startDir: '~/app/' })] as never)
+    vi.mocked(ipc.sshStates).mockResolvedValue([{ id: 'a', state: 'connected' }] as never)
+    vi.mocked(ipc.sshList).mockResolvedValue({ entries: [], truncated: false } as never)
+    render(SshPanel)
+    await waitFor(() => expect(ssh.roots.a).toBe('/home/dev/app'))
+    await waitFor(() => expect(ipc.sshList).toHaveBeenCalledWith('a', '/home/dev/app'))
+    expect(ipc.sshHome).toHaveBeenCalledTimes(1)
+  })
+
+  it('an absolute start dir is used as is, without asking for the home', async () => {
+    vi.mocked(ipc.sshServers).mockResolvedValue([srv({ startDir: '/srv/app/' })] as never)
+    vi.mocked(ipc.sshStates).mockResolvedValue([{ id: 'a', state: 'connected' }] as never)
+    vi.mocked(ipc.sshList).mockResolvedValue({ entries: [], truncated: false } as never)
+    render(SshPanel)
+    await waitFor(() => expect(ssh.roots.a).toBe('/srv/app'))
+    expect(ipc.sshHome).not.toHaveBeenCalled()
   })
 })
 

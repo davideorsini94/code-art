@@ -54,4 +54,18 @@ describe('Transfers', () => {
     await fireEvent.click(screen.getByLabelText('Chiudi'))
     expect(screen.queryByText('1 errore')).toBeNull()
   })
+
+  it('lists repeated error paths (keyed by position) and the "and N more" entry without a name', async () => {
+    render(Transfers)
+    const errors = [
+      { path: 'proj', message: 'percorso inatteso dal server: voce saltata' },
+      { path: 'proj', message: 'nome non valido (non UTF-8): voce saltata' },
+      { path: '', message: 'e altri 51 errori' },
+    ]
+    ssh.applyTransfer(ev({ state: 'done', errors }))
+    flushSync()
+    await fireEvent.click(screen.getByText('3 errori'))
+    const items = screen.getAllByRole('listitem').map((li) => li.textContent)
+    expect(items).toEqual(['proj: percorso inatteso dal server: voce saltata', 'proj: nome non valido (non UTF-8): voce saltata', 'e altri 51 errori'])
+  })
 })
