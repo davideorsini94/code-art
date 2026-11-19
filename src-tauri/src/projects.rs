@@ -290,7 +290,20 @@ async fn pick_folder_for(app: &AppHandle, window: &WebviewWindow, title: &str) -
 
 /// Selettore nativo di cartella come foglio della finestra, senza concedere fiducia. `None` = annullato.
 pub(crate) async fn pick_folder(app: &AppHandle, window: &WebviewWindow, title: &str) -> Result<Option<String>> {
-    let dialog = app.dialog().file().set_title(title).set_parent(window);
+    pick_folder_in(app, window, title, None).await
+}
+
+/// Come `pick_folder`, partendo da `start` se indicata.
+pub(crate) async fn pick_folder_in(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    title: &str,
+    start: Option<std::path::PathBuf>,
+) -> Result<Option<String>> {
+    let mut dialog = app.dialog().file().set_title(title).set_parent(window);
+    if let Some(dir) = start {
+        dialog = dialog.set_directory(dir);
+    }
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
         .await
         .map_err(|e| e.to_string())?;
@@ -716,6 +729,23 @@ mod tests {
         assert_eq!(name(&s).as_deref(), Some("0123456"));
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         assert_eq!(name(&s), None);
+    }
+
+    #[test]
+    fn branch_accepts_a_directory_and_picks_the_deepest_repo() {
+        let (d, s) = store();
+        let ws = d.path().join("ws");
+        for (r, b) in [("a", "dev"), ("b", "main")] {
+            std::fs::create_dir_all(ws.join(r).join(".git")).unwrap();
+            std::fs::write(ws.join(r).join(".git/HEAD"), format!("ref: refs/heads/{b}\n")).unwrap();
+        }
+        std::fs::create_dir_all(ws.join("b/src/deep")).unwrap();
+        let p = open_folder(&s, ws.to_str().unwrap()).unwrap();
+        let root = p.folders[0].clone();
+        let got = branch(&s, &p.id, Some(&format!("{root}/b/src/deep"))).unwrap().unwrap();
+        assert_eq!((got.repo.as_str(), got.name.as_str()), (format!("{root}/b").as_str(), "main"));
+        let got = branch(&s, &p.id, Some(&format!("{root}/a"))).unwrap().unwrap();
+        assert_eq!(got.name, "dev");
     }
 
     #[test]
