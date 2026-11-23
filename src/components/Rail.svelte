@@ -19,6 +19,7 @@
   ]
 
   const sidebarOpen = $derived(!collapsed.has('sidebar'))
+  const settingsOn = $derived(sidebarOpen && sidebar.view === 'settings')
 
   // vista attiva con il pannello aperto: lo chiude; altrimenti apre il pannello su quella vista
   function pick(id: SidebarViewId) {
@@ -46,7 +47,16 @@
       <Icon name={it.icon} size={18} />
     </button>
   {/each}
-  <button class="bottom" use:tooltip={'Impostazioni: in arrivo'} aria-label="Impostazioni" aria-disabled="true"><Icon name="settings" size={18} /></button>
+  <button
+    class="bottom"
+    class:on={settingsOn}
+    aria-pressed={settingsOn}
+    use:tooltip={{ text: `${settingsOn ? 'Nascondi' : 'Mostra'} le impostazioni`, shortcut: '⌘,' }}
+    aria-label="Impostazioni"
+    onclick={() => pick('settings')}
+  >
+    <Icon name="settings" size={18} />
+  </button>
 </nav>
 
 <style>
@@ -58,5 +68,4 @@
   }
   button.on { background: var(--glass2); color: var(--txt); box-shadow: inset 0 1px 0 var(--hi); }
   .bottom { margin-top: auto; }
-  .bottom[aria-disabled='true'] { opacity: 0.4; cursor: default; }
 </style>

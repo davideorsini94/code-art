@@ -111,12 +111,13 @@
     shownId = id
   })
 
-  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git, ⌘⇧C Conversazioni, ⌘⇧S SSH, ⌘⇧D Database: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
+  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git, ⌘⇧C Conversazioni, ⌘⇧S SSH, ⌘⇧D Database, ⌘, Impostazioni: aprono il pannello
+  // laterale su quella vista (anche con il focus in Monaco o xterm)
   onMount(() => {
     const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git', c: 'convs', s: 'ssh', d: 'db' }
     const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || !e.shiftKey || e.ctrlKey || e.altKey || !projectStore.project) return
-      const view = views[e.key.toLowerCase()]
+      if (!e.metaKey || e.ctrlKey || e.altKey || !projectStore.project) return
+      const view = e.shiftKey ? views[e.key.toLowerCase()] : e.key === ',' ? 'settings' : undefined
       if (!view) return
       e.preventDefault()
       e.stopPropagation()

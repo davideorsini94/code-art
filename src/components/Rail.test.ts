@@ -81,4 +81,14 @@ describe('Rail views', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Conversazione' }))
     expect(ontoggle).toHaveBeenCalledWith('conv')
   })
+
+  it('Impostazioni apre la sua vista nel pannello laterale', async () => {
+    const ontoggle = vi.fn()
+    render(Rail, { collapsed: new Set(['sidebar']), ontoggle })
+    const btn = screen.getByRole('button', { name: 'Impostazioni' })
+    expect(btn.getAttribute('aria-disabled')).toBeNull()
+    await fireEvent.click(btn)
+    expect(sidebar.view).toBe('settings')
+    expect(ontoggle).toHaveBeenCalledWith('sidebar')
+  })
 })

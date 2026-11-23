@@ -3,6 +3,7 @@
   import SearchPanel from './SearchPanel.svelte'
   import SshPanel from './ssh/SshPanel.svelte'
   import ConvList from './ConvList.svelte'
+  import SettingsPanel from './SettingsPanel.svelte'
   import { sidebar } from '../lib/stores/sidebar.svelte'
 </script>
 
@@ -14,6 +15,8 @@
   <SshPanel />
 {:else if sidebar.view === 'convs'}
   <ConvList />
+{:else if sidebar.view === 'settings'}
+  <SettingsPanel />
 {:else if sidebar.view === 'db'}
   {#await import('./db/DbPanel.svelte') then m}
     <m.default />
