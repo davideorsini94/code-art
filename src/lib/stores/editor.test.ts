@@ -9,6 +9,7 @@ vi.mock('../ipc', () => ({
   sshWrite: (id: string, p: string, t: string, v: string) => sshWrite(id, p, t, v),
   fsRead: (p: string) => fsRead(p),
   fsWrite: (p: string, t: string, m: number | null) => fsWrite(p, t, m),
+  dbQueryClose: vi.fn(async () => {}),
   asFsError: (e: unknown) => (e && typeof e === 'object' && 'code' in e ? e : { code: 'io', message: String(e) }),
 }))
 vi.mock('../events', () => ({ listenProject: vi.fn(async () => () => {}) }))
@@ -353,5 +354,35 @@ describe('remote tabs', () => {
     expect(sshWrite).toHaveBeenLastCalledWith('s1', '/home/dev/app/a.ts', 'mio', '')
     expect(t.notice).toBeUndefined()
     expect(t.dirty).toBe(false)
+  })
+})
+
+describe('schede query', () => {
+  it('chiave db:<connessione>:<n>, titolo tabella o "Query n", mai modificata', () => {
+    editor.tabs = []
+    editor.openQuery({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 'users' })
+    editor.openQuery({ connectionId: 'c1', kind: 'postgres' })
+    editor.openQuery({ connectionId: 'c1', kind: 'postgres' })
+    expect(editor.tabs.map((t) => [t.key, t.name, t.dirty])).toEqual([
+      ['db:c1:1', 'users', false],
+      ['db:c1:2', 'Query 2', false],
+      ['db:c1:3', 'Query 3', false],
+    ])
+    expect(editor.active).toBe('db:c1:3')
+    editor.openQuery({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 'users' })
+    expect(editor.tabs).toHaveLength(3) // la stessa tabella riporta in primo piano
+    expect(editor.active).toBe('db:c1:1')
+    editor.requestClose('db:c1:2')
+    expect(editor.tabs).toHaveLength(2)
+    editor.tabs = []
+  })
+  it('chiudere la scheda chiude il risultato', async () => {
+    const ipc = await import('../ipc')
+    editor.tabs = []
+    editor.openQuery({ connectionId: 'c9', kind: 'mongo', database: 'd', collection: 'c' })
+    const key = editor.active!
+    editor.setQueryResult(key, 42)
+    editor.close(key)
+    expect(ipc.dbQueryClose).toHaveBeenCalledWith(42)
   })
 })

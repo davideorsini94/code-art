@@ -13,6 +13,8 @@
   import { ssh } from '../lib/stores/ssh.svelte'
   import { LANG_LABEL, languageForPath } from '../lib/lsp/languages'
   import InfoToast from './InfoToast.svelte'
+  import QueryTab from './db/QueryTab.svelte'
+  import { db } from '../lib/stores/db.svelte'
   import { parseConflicts, resolveEdit, type Conflict, type Pick } from '../lib/conflicts'
 
   type Monaco = typeof import('monaco-editor')
@@ -36,14 +38,14 @@
   const active = $derived(editor.activeTab)
   // cartella non fidata: editor in sola lettura, niente salvataggio (il core rifiuta comunque)
   const readOnly = $derived(projectStore.untrusted.length > 0)
-  const isTextTab = (t: Tab) => !t.diff && (t.viewer === 'text' || t.viewer === 'markdown') && !t.error
+  const isTextTab = (t: Tab) => !t.query && !t.diff && (t.viewer === 'text' || t.viewer === 'markdown') && !t.error
   // markdown: Anteprima (predefinita), Modifica o Affiancate; ricordato per file
   const mdActive = $derived(active && active.viewer === 'markdown' && !active.error && !active.diff ? active : undefined)
   const mdMode = $derived<MarkdownMode>(mdActive ? editor.modeOf(mdActive.path) : 'edit')
   const showCode = $derived(!!active && isTextTab(active) && (!mdActive || mdMode !== 'preview'))
   const showPreview = $derived(!!mdActive && mdMode !== 'edit')
-  const showBinary = $derived(!!active && !active.diff && !active.remote && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
-  const showViewer = $derived(!!active && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
+  const showBinary = $derived(!!active && !active.query && !active.diff && !active.remote && (active.viewer === 'binary' || active.error === 'too_large' || active.error === 'not_text'))
+  const showViewer = $derived(!!active && !active.query && !active.diff && !active.error && isBinaryViewer(active.viewer) && active.viewer !== 'binary')
   const MODES: [MarkdownMode, string, string][] = [['preview', 'Anteprima', 'Mostra solo l\'anteprima'], ['edit', 'Modifica', 'Mostra solo il codice'], ['split', 'Affiancate', 'Codice e anteprima affiancati']]
 
   $effect(() => {
@@ -93,6 +95,14 @@
     e.preventDefault()
     void editor.save(t.path, t.key).catch(() => {})
   }
+
+  // richiesta di una scheda query dal pannello Database: si apre e si azzera
+  $effect(() => {
+    const req = db.pendingQuery
+    if (!req) return
+    db.pendingQuery = null
+    untrack(() => editor.openQuery(req))
+  })
 
   // Monaco si carica solo quando si apre il primo file di testo
   $effect(() => {
@@ -401,10 +411,10 @@
 <div class="pane">
   <div class="tabs" role="tablist">
     {#each editor.tabs as t (t.id)}
-      <div class="tab" class:on={t.key === editor.active} role="tab" use:tooltip={t.remote ? `${ssh.servers.find((x) => x.id === t.remote!.serverId)?.name ?? 'server'}:${t.path}` : t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.key === editor.active} tabindex="0"
+      <div class="tab" class:on={t.key === editor.active} role="tab" use:tooltip={t.query ? `${db.connections.find((c) => c.id === t.query!.connectionId)?.name ?? 'Connessione'} · ${t.name}` : t.remote ? `${ssh.servers.find((x) => x.id === t.remote!.serverId)?.name ?? 'server'}:${t.path}` : t.diff ? `Modifiche: ${relativeToFolders(t.path, projectStore.project?.folders ?? [])}` : relativeToFolders(t.path, projectStore.project?.folders ?? [])} aria-selected={t.key === editor.active} tabindex="0"
         onclick={() => (editor.active = t.key)} onkeydown={(e) => e.key === 'Enter' && (editor.active = t.key)}
         onauxclick={(e) => { if (e.button === 1) { e.preventDefault(); editor.requestClose(t.key) } }}>
-        {#if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
+        {#if t.query}<span class="ticon"><Icon name="database" size={14} /></span>{:else if !t.diff}{@const spec = iconFor(t.name, false, false)}<span class="ticon"><FileIcon id={spec.id} dim={spec.dim} size={14} /></span>{/if}
         <span class="tname">{t.name}</span>
         {#if t.dirty}<span class="dot" role="img" use:tooltip={{ text: 'Modifiche non salvate', shortcut: '⌘S' }}></span>{/if}
         <button class="x" aria-label="Chiudi {t.name}" use:tooltip={'Chiudi scheda'} onclick={(e) => { e.stopPropagation(); editor.requestClose(t.key) }}><Icon name="x" size={14} /></button>
@@ -465,12 +475,17 @@
   {/if}
 
   <div class="body">
+    {#each editor.tabs.filter((t) => t.query) as t (t.id)}
+      <div class="qwrap" class:hidden={t.key !== editor.active}><QueryTab tab={t} /></div>
+    {/each}
     {#if editor.tabs.length === 0}
       <p class="empty">Apri un file dall'albero</p>
     {:else if showBinary && active}
       {#await import('./BinaryPanel.svelte') then m}
         {#key active.id}<m.default path={active.path} name={active.name} />{/key}
       {/await}
+    {:else if active?.query}
+      <!-- scheda query: disegnata sopra, sempre montata per non perdere risultati -->
     {:else if active?.error === 'forbidden'}
       <p class="empty">Percorso fuori dal progetto</p>
     {:else if active?.error === 'remote_preview'}
@@ -536,6 +551,8 @@
   .ldot.pronto { color: var(--work); }
   .ldot.fermo { color: var(--err); }
   .pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .qwrap { position: absolute; inset: 0; min-height: 0; }
+  .qwrap.hidden { display: none; }
   .tabs { display: flex; align-items: center; gap: 2px; padding: 6px 6px 0; overflow-x: auto; flex: none; }
   .tab {
     display: flex; align-items: center; gap: 6px; padding: 5px 8px 5px 12px; border-radius: 8px 8px 0 0;
