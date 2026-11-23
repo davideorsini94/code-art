@@ -12,6 +12,7 @@
     loading = false,
     onmore,
     pk,
+    readOnlyCols,
     edits = emptyEdits(),
     onedit,
     note,
@@ -26,6 +27,8 @@
     onmore?: () => void
     /** Indici delle colonne della chiave primaria: presente = griglia modificabile. */
     pk?: number[]
+    /** Colonne (per indice) che non si modificano. */
+    readOnlyCols?: Set<number>
     edits?: PendingEdits
     onedit?: (e: PendingEdits) => void
     /** Motivo della sola lettura, mostrato in fondo. */
@@ -54,7 +57,7 @@
   /** Cella troncata a 64 KB (righe lette): sola lettura, riscriverla salverebbe il valore accorciato. */
   const isTrunc = (r: number, c: number) => r >= ni && truncated.has(cellKey(r - ni, c))
   function startEdit(r: number, c: number) {
-    if (!canEdit || rowState(r) === 'del' || isTrunc(r, c)) return
+    if (!canEdit || rowState(r) === 'del' || isTrunc(r, c) || readOnlyCols?.has(c)) return
     sel = { r, c }
     const initial = val(r, c)
     editing = { r, c, text: initial ?? '', initial, touched: false }

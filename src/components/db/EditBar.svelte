@@ -11,9 +11,10 @@
     table,
     edits,
     count,
+    oracle = false,
     onapplied,
     onclear,
-  }: { connId: string; schema: string; table: string; edits: PgRowEdit[]; count: number; onapplied: () => void; onclear: () => void } = $props()
+  }: { connId: string; schema: string; table: string; edits: PgRowEdit[]; count: number; oracle?: boolean; onapplied: () => void; onclear: () => void } = $props()
 
   let busy = $state(false)
   let error = $state<string | null>(null)
@@ -26,7 +27,7 @@
     error = null
     info = null
     try {
-      preview = await ipc.dbPgPreviewEdits(connId, schema, table, edits)
+      preview = await (oracle ? ipc.dbOraPreviewEdits : ipc.dbPgPreviewEdits)(connId, schema, table, edits)
     } catch (e) {
       error = errorText(e)
     } finally {
@@ -41,7 +42,7 @@
     info = null
     preview = null
     try {
-      await ipc.dbPgApplyEdits(connId, schema, table, edits)
+      await (oracle ? ipc.dbOraApplyEdits : ipc.dbPgApplyEdits)(connId, schema, table, edits)
       onapplied()
     } catch (e) {
       const msg = errorText(e)
@@ -59,6 +60,7 @@
   <button disabled={busy} use:tooltip={'Mostra le istruzioni SQL che verrebbero eseguite, senza eseguirle'} onclick={() => void showPreview()}>Anteprima</button>
   <button class="apply" disabled={busy} use:tooltip={'Applica le modifiche in una transazione (chiede conferma)'} onclick={() => void apply()}>Applica</button>
   <button disabled={busy} use:tooltip={'Scarta tutte le modifiche in sospeso'} onclick={onclear}>Annulla tutto</button>
+  {#if oracle}<span class="dim">In Oracle una stringa vuota è NULL</span>{/if}
   {#if error}<span class="err" role="alert">{error}</span>{/if}
   {#if info}<span class="dim" role="status">{info}</span>{/if}
 </div>
