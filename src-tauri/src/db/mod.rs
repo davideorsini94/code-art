@@ -1,6 +1,7 @@
 //! Connessioni ai database (Postgres, MongoDB): elenco delle connessioni salvate nel database dell'app, le loro
 //! password (solo nel Portachiavi, servizio `Code Art DB`) e la cronologia delle query. Niente rete qui: le sessioni
 //! stanno nei moduli dei driver.
+pub mod mongo;
 pub mod pg;
 pub mod pg_edit;
 pub mod pg_query;
@@ -312,6 +313,7 @@ pub async fn db_history_add(app: AppHandle, window: WebviewWindow, id: String, t
 pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
     let store = ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
     let (conn, password, server) = crate::projects::off_main(move || {
         let conn = store.db_connections()?.into_iter().find(|c| c.id == id).ok_or_else(|| "Connessione non trovata".to_string())?;
         let server = match &conn.ssh_server_id {
@@ -325,8 +327,7 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
     .await?;
     match conn.kind {
         DbKind::Postgres => sessions.connect(&conn.id, pg::PgParams::from_connection(&conn), password, server).await,
-        // Task 5: MongoDB
-        DbKind::Mongo => Err("tipo di connessione non ancora supportato".into()),
+        DbKind::Mongo => mongo_sessions.connect(&conn.id, mongo::MongoParams::from_connection(&conn), password, server).await,
     }
 }
 
@@ -334,8 +335,10 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
 pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
     crate::projects::off_main(move || {
         sessions.disconnect(&id);
+        mongo_sessions.disconnect(&id);
         Ok(())
     })
     .await
@@ -345,7 +348,10 @@ pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) ->
 #[tauri::command]
 pub async fn db_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<ssh::conn::StateEvent>, String> {
     ssh::trusted_store(&app, &window)?;
-    Ok(app.state::<Arc<pg::Sessions>>().states())
+    let mut all = app.state::<Arc<pg::Sessions>>().states();
+    all.extend(app.state::<Arc<mongo::MongoSessions>>().states());
+    all.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(all)
 }
 
 /// Schemi, tabelle e viste della connessione (esclusi gli schemi di sistema).
@@ -418,6 +424,9 @@ pub async fn db_query(app: AppHandle, window: WebviewWindow, id: String, text: S
 #[tauri::command]
 pub async fn db_query_more(app: AppHandle, window: WebviewWindow, result_id: u64) -> Result<pg_query::QueryPage, String> {
     ssh::trusted_store(&app, &window)?;
+    if mongo::is_mongo_result(result_id) {
+        return app.state::<Arc<mongo::MongoSessions>>().more(result_id).await;
+    }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().more(&sessions, result_id).await
 }
@@ -425,6 +434,10 @@ pub async fn db_query_more(app: AppHandle, window: WebviewWindow, result_id: u64
 #[tauri::command]
 pub async fn db_query_close(app: AppHandle, window: WebviewWindow, result_id: u64) -> Result<(), String> {
     ssh::trusted_store(&app, &window)?;
+    if mongo::is_mongo_result(result_id) {
+        app.state::<Arc<mongo::MongoSessions>>().close(result_id);
+        return Ok(());
+    }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().close(&sessions, result_id).await
 }
@@ -435,6 +448,97 @@ pub async fn db_query_cancel(app: AppHandle, window: WebviewWindow, id: String) 
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     pg_query::cancel(&sessions, &id).await
+}
+
+/// Conferma nativa del core (titolo fisso, «Annulla» predefinito); rifiutata = `Err("annullato")`.
+async fn confirm_native(app: &AppHandle, window: &WebviewWindow, title: &'static str, message: String, action: &'static str) -> Result<(), String> {
+    let confirm = crate::git::write::NativeConfirm { app: app.clone(), window: window.clone() };
+    let ok = crate::projects::off_main(move || {
+        use crate::git::write::Confirm;
+        Ok(confirm.confirm(title, &message, action))
+    })
+    .await?;
+    if ok { Ok(()) } else { Err(pg_query::DECLINED.into()) }
+}
+
+/// Database e collezioni della connessione MongoDB.
+#[tauri::command]
+pub async fn db_mongo_tree(app: AppHandle, window: WebviewWindow, id: String) -> Result<Vec<mongo::MongoDb>, String> {
+    ssh::trusted_store(&app, &window)?;
+    app.state::<Arc<mongo::MongoSessions>>().tree(&id).await
+}
+
+/// Ricerca: filtro, ordinamento e proiezione sono testo JSON esteso analizzato nel core (vuoto = `{}`); 500 documenti
+/// per pagina, il resto con `db_query_more`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // i parametri arrivano piatti dalla WebView
+pub async fn db_mongo_find(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: String,
+    db: String,
+    coll: String,
+    filter: String,
+    sort: String,
+    projection: String,
+) -> Result<pg_query::QueryResult, String> {
+    ssh::trusted_store(&app, &window)?;
+    app.state::<Arc<mongo::MongoSessions>>().find(&id, &db, &coll, &filter, &sort, &projection).await
+}
+
+/// Aggregazione (pipeline = array JSON di stadi). Con `$out`/`$merge`: conferma nativa «La pipeline scrive dati».
+#[tauri::command]
+pub async fn db_mongo_aggregate(app: AppHandle, window: WebviewWindow, id: String, db: String, coll: String, pipeline: String) -> Result<pg_query::QueryResult, String> {
+    ssh::trusted_store(&app, &window)?;
+    let stages = mongo::parse_pipeline(&pipeline)?;
+    if mongo::pipeline_writes(&stages) {
+        let message = format!("La pipeline contiene $out o $merge e scrive in una collezione.\n\n{db}.{coll}");
+        confirm_native(&app, &window, mongo::WRITES_TITLE, message, mongo::BTN_RUN).await?;
+    }
+    app.state::<Arc<mongo::MongoSessions>>().aggregate(&id, &db, &coll, stages).await
+}
+
+/// Sostituisce il documento con quell'`_id` (esattamente uno). `doc_json` deve essere un oggetto; il suo `_id`, se
+/// c'è, deve coincidere. Conferma nativa «Modifica documento».
+#[tauri::command]
+pub async fn db_mongo_replace(app: AppHandle, window: WebviewWindow, id: String, db: String, coll: String, id_json: String, doc_json: String) -> Result<(), String> {
+    ssh::trusted_store(&app, &window)?;
+    let key = mongo::parse_value("_id non valido", &id_json)?;
+    let doc = mongo::parse_document("Documento non valido", &doc_json, false)?;
+    if let Some(inner) = doc.get("_id")
+        && inner != &key
+    {
+        return Err("Documento non valido: l'_id non coincide con quello del documento da sostituire".into());
+    }
+    let sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    sessions.handle(&id)?;
+    let message = mongo::confirm_message(&db, &coll, &key, "Sostituire il documento con la nuova versione?");
+    confirm_native(&app, &window, mongo::EDIT_TITLE, message, mongo::BTN_SAVE).await?;
+    sessions.replace(&id, &db, &coll, &key, doc).await
+}
+
+/// Inserisce un documento; restituisce il suo `_id` (JSON esteso rilassato). Conferma nativa «Modifica documento».
+#[tauri::command]
+pub async fn db_mongo_insert(app: AppHandle, window: WebviewWindow, id: String, db: String, coll: String, doc_json: String) -> Result<String, String> {
+    ssh::trusted_store(&app, &window)?;
+    let doc = mongo::parse_document("Documento non valido", &doc_json, false)?;
+    let sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    sessions.handle(&id)?;
+    let message = format!("Inserire un nuovo documento in {db}.{coll}?");
+    confirm_native(&app, &window, mongo::EDIT_TITLE, message, mongo::BTN_INSERT).await?;
+    sessions.insert(&id, &db, &coll, doc).await
+}
+
+/// Elimina il documento con quell'`_id` (esattamente uno). Conferma nativa «Elimina documento».
+#[tauri::command]
+pub async fn db_mongo_delete(app: AppHandle, window: WebviewWindow, id: String, db: String, coll: String, id_json: String) -> Result<(), String> {
+    ssh::trusted_store(&app, &window)?;
+    let key = mongo::parse_value("_id non valido", &id_json)?;
+    let sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    sessions.handle(&id)?;
+    let message = mongo::confirm_message(&db, &coll, &key, "Eliminare il documento? L'operazione non si può annullare.");
+    confirm_native(&app, &window, mongo::DELETE_TITLE, message, mongo::BTN_DELETE).await?;
+    sessions.delete(&id, &db, &coll, &key).await
 }
 
 #[cfg(test)]

@@ -329,6 +329,9 @@ pub struct QueryResult {
     pub truncated: Vec<[usize; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+    /// Solo MongoDB: il documento intero (JSON esteso rilassato) di ogni riga.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub docs: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -340,6 +343,11 @@ pub struct QueryPage {
     pub truncated: Vec<[usize; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+    /// Solo MongoDB: i documenti interi e le colonne di questa pagina (l'unione dei campi di primo livello).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub docs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<QueryColumn>,
 }
 
 /// Tronca a `MAX_CELL` byte su un confine di carattere. `true` se ha troncato.
@@ -509,7 +517,7 @@ impl Queries {
         if c.overflow {
             notices.push("solo le prime 500 righe: usa una sola SELECT per la paginazione".to_string());
         }
-        Ok(QueryResult { result_id: None, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices })
+        Ok(QueryResult { result_id: None, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices, docs: Vec::new() })
     }
 
     /// `Ok(None)` = il testo non può stare in un cursore (SQLSTATE 0A000): va eseguito direttamente.
@@ -546,6 +554,7 @@ impl Queries {
             affected: None,
             truncated: page.truncated,
             notices: Vec::new(),
+            docs: Vec::new(),
         }))
     }
 
@@ -590,7 +599,7 @@ impl Queries {
         } else {
             self.close_locked(&mut cur, Some(&h)).await;
         }
-        Ok(QueryPage { rows: page.rows, has_more, truncated: page.truncated, notices })
+        Ok(QueryPage { rows: page.rows, has_more, truncated: page.truncated, notices, ..Default::default() })
     }
 
     /// Chiude un risultato (COMMIT). Già chiuso o scaduto: nulla.

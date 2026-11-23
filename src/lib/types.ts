@@ -223,6 +223,17 @@ export type DbQueryColumn = { name: string }
  * Una pagina di righe: valori già testo, `null` = NULL (distinto da ''). Le celle oltre 64 KB arrivano troncate e
  * sono elencate in `truncated` come coppie `[riga della pagina, colonna]`.
  */
-export type DbQueryPage = { rows: (string | null)[][]; hasMore: boolean; truncated?: [number, number][]; notices?: string[] }
+export type DbQueryPage = {
+  rows: (string | null)[][]
+  hasMore: boolean
+  truncated?: [number, number][]
+  notices?: string[]
+  /** Solo MongoDB: il documento intero (JSON esteso rilassato) di ogni riga, e le colonne di questa pagina. */
+  docs?: string[]
+  columns?: DbQueryColumn[]
+}
 /** `resultId` c'è solo se restano righe (cursore aperto); `affected` = conteggio di ogni istruzione (senza cursore). */
 export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[] }
+
+/** Un database MongoDB con le sue collezioni (in ordine alfabetico). */
+export type MongoDb = { database: string; collections: string[] }

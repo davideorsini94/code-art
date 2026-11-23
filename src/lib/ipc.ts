@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DbConnection, DbQueryPage, DbQueryResult, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
+import type { DbConnection, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -212,6 +212,19 @@ export const dbPgPreviewEdits = (id: string, schema: string, table: string, edit
 /** Conferma nativa, poi una transazione; `Err('annullato')` = rifiutata. Ogni UPDATE/DELETE deve toccare una sola riga. */
 export const dbPgApplyEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
   invoke<{ affected: number }>('db_pg_apply_edits', { id, schema, table, edits })
+/** MongoDB: filtro, ordinamento, proiezione e pipeline sono testo JSON esteso, analizzato nel core. */
+export const dbMongoTree = (id: string) => invoke<MongoDb[]>('db_mongo_tree', { id })
+export const dbMongoFind = (id: string, db: string, coll: string, filter: string, sort: string, projection: string) =>
+  invoke<DbQueryResult>('db_mongo_find', { id, db, coll, filter, sort, projection })
+export const dbMongoAggregate = (id: string, db: string, coll: string, pipeline: string) =>
+  invoke<DbQueryResult>('db_mongo_aggregate', { id, db, coll, pipeline })
+/** Conferma nativa del core; `idJson`/`docJson` sono JSON esteso. */
+export const dbMongoReplace = (id: string, db: string, coll: string, idJson: string, docJson: string) =>
+  invoke<void>('db_mongo_replace', { id, db, coll, idJson, docJson })
+export const dbMongoInsert = (id: string, db: string, coll: string, docJson: string) =>
+  invoke<string>('db_mongo_insert', { id, db, coll, docJson })
+export const dbMongoDelete = (id: string, db: string, coll: string, idJson: string) =>
+  invoke<void>('db_mongo_delete', { id, db, coll, idJson })
 /** Una sola SELECT/WITH/VALUES/TABLE: cursore e pagine da 500; altrimenti tutto in una volta (`affected` per istruzione). */
 export const dbQuery = (id: string, text: string) => invoke<DbQueryResult>('db_query', { id, text })
 export const dbQueryMore = (resultId: number) => invoke<DbQueryPage>('db_query_more', { resultId })
