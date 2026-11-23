@@ -2,7 +2,7 @@
 
 A lightweight, fast personal IDE for Mac, built around your conversations with [Claude Code](https://claude.com/claude-code).
 
-> **Status: stage 2 of 4 complete.** The core works (project windows, file tree, editor, previews, terminal and Claude conversations) and so do the developer tools: project-wide search and replace, Git, GitHub and language servers. SSH and databases come in the next stages.
+> **Status: all 4 stages built.** The core (project windows, file tree, editor, previews, terminal and Claude conversations), the developer tools (search and replace, Git, GitHub, language servers), terminals, SSH and databases (PostgreSQL, MongoDB) all work. Oracle is built but postponed: the installed app can't load Oracle Instant Client yet.
 
 ## Why
 
