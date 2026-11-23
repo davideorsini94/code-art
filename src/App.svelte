@@ -5,6 +5,7 @@
   import TrustBanner from './components/TrustBanner.svelte'
   import SidebarView from './components/SidebarView.svelte'
   import { ssh } from './lib/stores/ssh.svelte'
+  import { db } from './lib/stores/db.svelte'
   import GitToast from './components/git/GitToast.svelte'
   import { sidebar, type SidebarViewId } from './lib/stores/sidebar.svelte'
   import EditorPane from './components/EditorPane.svelte'
@@ -48,6 +49,7 @@
       void chat.start(p.id)
       void conversations.start(p.id)
       void ssh.init()
+      void db.init()
     })
     return () => {
       chat.stop()
@@ -109,9 +111,9 @@
     shownId = id
   })
 
-  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git, ⌘⇧C Conversazioni, ⌘⇧S SSH: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
+  // ⌘⇧E Esplora, ⌘⇧F Cerca, ⌘⇧G Git, ⌘⇧C Conversazioni, ⌘⇧S SSH, ⌘⇧D Database: aprono il pannello laterale su quella vista (anche con il focus in Monaco o xterm)
   onMount(() => {
-    const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git', c: 'convs', s: 'ssh' }
+    const views: Record<string, SidebarViewId> = { e: 'files', f: 'search', g: 'git', c: 'convs', s: 'ssh', d: 'db' }
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey || !e.shiftKey || e.ctrlKey || e.altKey || !projectStore.project) return
       const view = views[e.key.toLowerCase()]
