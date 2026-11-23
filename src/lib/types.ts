@@ -235,5 +235,8 @@ export type DbQueryPage = {
 /** `resultId` c'è solo se restano righe (cursore aperto); `affected` = conteggio di ogni istruzione (senza cursore). */
 export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[] }
 
+/** Esito di `dbExport`: percorso scelto nel selettore nativo e righe scritte (il risultato è poi chiuso). */
+export type DbExported = { path: string; rows: number }
+
 /** Un database MongoDB con le sue collezioni (in ordine alfabetico). */
 export type MongoDb = { database: string; collections: string[] }

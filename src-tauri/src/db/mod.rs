@@ -1,6 +1,7 @@
 //! Connessioni ai database (Postgres, MongoDB): elenco delle connessioni salvate nel database dell'app, le loro
 //! password (solo nel Portachiavi, servizio `Code Art DB`) e la cronologia delle query. Niente rete qui: le sessioni
 //! stanno nei moduli dei driver.
+pub mod export;
 pub mod mongo;
 pub mod pg;
 pub mod pg_edit;
@@ -440,6 +441,24 @@ pub async fn db_query_close(app: AppHandle, window: WebviewWindow, result_id: u6
     }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().close(&sessions, result_id).await
+}
+
+/// Esporta tutte le righe del risultato (già lette + restanti, fino a 100 000) in CSV o JSON. Il percorso viene solo
+/// dal selettore nativo di salvataggio; annullato = `Ok(None)` (il cursore resta com'è). Consuma il cursore: dopo,
+/// il risultato è chiuso (`hasMore = false` per la WebView).
+#[tauri::command]
+pub async fn db_export(app: AppHandle, window: WebviewWindow, result_id: u64, format: export::Format) -> Result<Option<export::Exported>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    ssh::trusted_store(&app, &window)?;
+    let (label, exts) = format.filter();
+    let dialog = app.dialog().file().set_title("Esporta il risultato").set_parent(&window).set_file_name(format.file_name()).add_filter(label, exts);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file()).await.map_err(|e| e.to_string())?;
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let queries = app.state::<Arc<pg_query::Queries>>().inner().clone();
+    let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    let rows = export::export_to(&queries, &sessions, &mongo_sessions, result_id, format, &path).await?;
+    Ok(Some(export::Exported { path: path.to_string_lossy().into_owned(), rows }))
 }
 
 /// Annulla la query in corso sulla connessione (`CancelToken`, stesso TLS).

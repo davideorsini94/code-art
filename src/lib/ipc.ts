@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DbConnection, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
+import type { DbConnection, DbExported, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -229,4 +229,5 @@ export const dbMongoDelete = (id: string, db: string, coll: string, idJson: stri
 export const dbQuery = (id: string, text: string) => invoke<DbQueryResult>('db_query', { id, text })
 export const dbQueryMore = (resultId: number) => invoke<DbQueryPage>('db_query_more', { resultId })
 export const dbQueryClose = (resultId: number) => invoke<void>('db_query_close', { resultId })
+export const dbExport = (resultId: number, format: 'csv' | 'json') => invoke<DbExported | null>('db_export', { resultId, format })
 export const dbQueryCancel = (id: string) => invoke<void>('db_query_cancel', { id })

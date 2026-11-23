@@ -462,6 +462,8 @@ struct Open {
     /// Il cursore ha già un documento pronto (letto per sapere se restano righe).
     pending: bool,
     done: bool,
+    /// Copia dei documenti già consegnati (interi, non troncati), per l'esportazione; al massimo `MAX_TOTAL`.
+    docs: Vec<Document>,
 }
 
 /// Le sessioni MongoDB aperte (una per connessione salvata) e i loro risultati con cursore (al più uno per connessione:
@@ -710,13 +712,14 @@ impl MongoSessions {
 
     async fn first_page(&self, id: &str, generation: u64, cursor: Cursor<Document>) -> Result<QueryResult, String> {
         self.drop_results_of(id);
-        let mut open = Open { conn: id.to_string(), generation, cursor, total: 0, pending: false, done: false };
+        let mut open = Open { conn: id.to_string(), generation, cursor, total: 0, pending: false, done: false, docs: Vec::new() };
         let docs = read_page(&mut open).await?;
         let built = build(&docs);
         let mut notices = Vec::new();
         let has_more = more_left(&mut open, &mut notices);
         let result_id = if has_more {
             let rid = self.next_result.fetch_add(1, Ordering::Relaxed);
+            open.docs = docs.clone();
             lock(&self.results).insert(rid, Arc::new(AsyncMutex::new(open)));
             lock(&self.by_conn).insert(id.to_string(), rid);
             Some(rid)
@@ -746,11 +749,44 @@ impl MongoSessions {
         let built = build(&docs);
         let mut notices = Vec::new();
         let has_more = more_left(&mut open, &mut notices);
+        if has_more {
+            open.docs.extend(docs);
+        }
         drop(open);
         if !has_more {
             self.remove_result(result_id);
         }
         Ok(QueryPage { rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, columns: built.columns })
+    }
+
+    /// Per l'esportazione: tutti i documenti del risultato (quelli già consegnati, tenuti in copia, più i restanti, fino
+    /// a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è chiuso.
+    pub async fn drain(&self, result_id: u64) -> Result<Vec<Document>, String> {
+        let open = lock(&self.results).get(&result_id).cloned().ok_or(EXPIRED)?;
+        let mut open = open.lock().await;
+        let alive = matches!(self.handle(&open.conn), Ok(h) if h.generation == open.generation);
+        if !alive {
+            drop(open);
+            self.remove_result(result_id);
+            return Err(EXPIRED.into());
+        }
+        let mut all = std::mem::take(&mut open.docs);
+        loop {
+            match read_page(&mut open).await {
+                Ok(d) => all.extend(d),
+                Err(e) => {
+                    drop(open);
+                    self.remove_result(result_id);
+                    return Err(e);
+                }
+            }
+            if !more_left(&mut open, &mut Vec::new()) {
+                break;
+            }
+        }
+        drop(open);
+        self.remove_result(result_id);
+        Ok(all)
     }
 
     fn remove_result(&self, result_id: u64) {

@@ -438,6 +438,9 @@ struct Open {
     generation: u64,
     cursor: String,
     total: usize,
+    /// Copia delle colonne e di tutte le righe già consegnate alla WebView (per l'esportazione; al massimo `MAX_TOTAL`).
+    columns: Vec<QueryColumn>,
+    rows: Vec<Vec<Option<String>>>,
 }
 
 /// I risultati con un cursore aperto (id unici per avvio dell'app). Per connessione c'è al più un risultato aperto:
@@ -541,7 +544,17 @@ impl Queries {
         };
         let has_more = page.rows.len() == PAGE;
         if has_more {
-            lock(&self.results).insert(rid, Open { conn: id.to_string(), generation: h.generation, cursor: name, total: page.rows.len() });
+            lock(&self.results).insert(
+                rid,
+                Open {
+                    conn: id.to_string(),
+                    generation: h.generation,
+                    cursor: name,
+                    total: page.rows.len(),
+                    columns: page.columns.clone(),
+                    rows: page.rows.clone(),
+                },
+            );
             *cur = Some(rid);
         } else {
             end_txn(&h.client, true).await;
@@ -595,11 +608,30 @@ impl Queries {
         if has_more {
             if let Some(o) = lock(&self.results).get_mut(&result_id) {
                 o.total = total;
+                o.rows.extend(page.rows.iter().cloned());
             }
         } else {
             self.close_locked(&mut cur, Some(&h)).await;
         }
         Ok(QueryPage { rows: page.rows, has_more, truncated: page.truncated, notices, ..Default::default() })
+    }
+
+    /// Per l'esportazione: colonne e tutte le righe del risultato (quelle già consegnate, tenute in copia, più le
+    /// restanti, fino a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è chiuso. Le celle sono quelle già
+    /// troncate a 64 KB.
+    pub async fn drain(&self, sessions: &Sessions, result_id: u64) -> Result<(Vec<QueryColumn>, Vec<Vec<Option<String>>>), String> {
+        let (columns, mut rows) = {
+            let g = lock(&self.results);
+            let o = g.get(&result_id).ok_or(EXPIRED)?;
+            (o.columns.clone(), o.rows.clone())
+        };
+        loop {
+            let page = self.more(sessions, result_id).await?;
+            rows.extend(page.rows);
+            if !page.has_more {
+                return Ok((columns, rows));
+            }
+        }
     }
 
     /// Chiude un risultato (COMMIT). Già chiuso o scaduto: nulla.

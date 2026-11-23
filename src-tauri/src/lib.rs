@@ -184,6 +184,7 @@ pub fn run() {
             db::db_query,
             db::db_query_more,
             db::db_query_close,
+            db::db_export,
             db::db_query_cancel,
             ssh::ssh_servers,
             ssh::ssh_server_save,
