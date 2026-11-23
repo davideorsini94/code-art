@@ -232,7 +232,7 @@ export type DbQueryPage = {
   docs?: string[]
   columns?: DbQueryColumn[]
 }
-/** `resultId` c'è solo se restano righe (cursore aperto); `affected` = conteggio di ogni istruzione (senza cursore). */
+/** `resultId` c'è per ogni risultato con righe (tenuto dal core, anche finito: serve a `dbExport`) fino a `dbQueryClose` o a una nuova query della connessione; `affected` = conteggio di ogni istruzione (senza cursore). */
 export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[] }
 
 /** Esito di `dbExport`: percorso scelto nel selettore nativo e righe scritte (il risultato è poi chiuso). */

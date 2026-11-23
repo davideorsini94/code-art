@@ -334,8 +334,10 @@ mod tests {
             assert_eq!(lines[1], "1,\"riga, \"\"1\"\"\",1");
             assert_eq!(lines[100], "100,,100");
             assert_eq!(lines[1200], "1200,,1200");
-            // il risultato è stato consumato
-            assert_eq!(q.more(&sessions, rid).await.unwrap_err(), EXPIRED);
+            // il risultato è finito (nessuna riga in più) ma tenuto: si può esportare di nuovo
+            let p = q.more(&sessions, rid).await.unwrap();
+            assert!(p.rows.is_empty() && !p.has_more);
+            assert_eq!(export_to(&q, &sessions, &mongo_sessions, rid, Format::Csv, &csv).await.unwrap(), 1200);
             // JSON su un nuovo risultato
             let rid = q.query(&sessions, "c1", sql).await.unwrap().result_id.unwrap();
             let json = dir.path().join("r.json");
@@ -347,6 +349,18 @@ mod tests {
             assert_eq!(a[0]["id_2"], "1");
             assert!(a[99]["t"].is_null());
             assert_eq!(a[1199]["id"], "1200");
+            // un risultato piccolo (3 righe, nessun cursore aperto) ha un resultId ed è esportabile
+            let r = q.query(&sessions, "c1", "SELECT g AS n, NULL::text AS t FROM generate_series(1, 3) g").await.unwrap();
+            assert!(!r.has_more);
+            let rid = r.result_id.expect("risultato piccolo tenuto");
+            let small = dir.path().join("s.csv");
+            assert_eq!(export_to(&q, &sessions, &mongo_sessions, rid, Format::Csv, &small).await.unwrap(), 3);
+            assert_eq!(std::fs::read_to_string(&small).unwrap(), "n,t\r\n1,\r\n2,\r\n3,\r\n");
+            // una nuova query sostituisce il risultato; close è idempotente
+            let r2 = q.query(&sessions, "c1", "SELECT 1 AS x").await.unwrap();
+            assert_eq!(export_to(&q, &sessions, &mongo_sessions, rid, Format::Csv, &small).await.unwrap_err(), EXPIRED);
+            q.close(&sessions, r2.result_id.unwrap()).await.unwrap();
+            assert_eq!(export_to(&q, &sessions, &mongo_sessions, r2.result_id.unwrap(), Format::Csv, &small).await.unwrap_err(), EXPIRED);
         });
     }
 }

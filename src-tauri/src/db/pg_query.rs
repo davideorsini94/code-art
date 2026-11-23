@@ -441,6 +441,9 @@ struct Open {
     /// Copia delle colonne e di tutte le righe già consegnate alla WebView (per l'esportazione; al massimo `MAX_TOTAL`).
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Option<String>>>,
+    /// Risultato finito (cursore già chiuso con `COMMIT`, o nessun cursore): resta solo la copia delle righe, per
+    /// l'esportazione, finché non lo sostituisce una nuova query della connessione o `close`.
+    done: bool,
 }
 
 /// I risultati con un cursore aperto (id unici per avvio dell'app). Per connessione c'è al più un risultato aperto:
@@ -493,6 +496,7 @@ impl Queries {
         let Some(rid) = cur.take() else { return };
         let open = lock(&self.results).remove(&rid);
         if let (Some(o), Some(h)) = (open, h)
+            && !o.done
             && o.generation == h.generation
         {
             end_txn(&h.client, true).await;
@@ -520,7 +524,19 @@ impl Queries {
         if c.overflow {
             notices.push("solo le prime 500 righe: usa una sola SELECT per la paginazione".to_string());
         }
-        Ok(QueryResult { result_id: None, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices, docs: Vec::new() })
+        let result_id = (!c.columns.is_empty()).then(|| self.retain_done(h.generation, id, &c.columns, &c.rows, &mut cur));
+        Ok(QueryResult { result_id, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices, docs: Vec::new() })
+    }
+
+    /// Tiene la copia di un risultato già finito (nessun cursore aperto), come risultato della connessione.
+    fn retain_done(&self, generation: u64, id: &str, columns: &[QueryColumn], rows: &[Vec<Option<String>>], cur: &mut Option<u64>) -> u64 {
+        let rid = self.next.fetch_add(1, Ordering::Relaxed);
+        lock(&self.results).insert(
+            rid,
+            Open { conn: id.to_string(), generation, cursor: String::new(), total: rows.len(), columns: columns.to_vec(), rows: rows.to_vec(), done: true },
+        );
+        *cur = Some(rid);
+        rid
     }
 
     /// `Ok(None)` = il testo non può stare in un cursore (SQLSTATE 0A000): va eseguito direttamente.
@@ -553,14 +569,16 @@ impl Queries {
                     total: page.rows.len(),
                     columns: page.columns.clone(),
                     rows: page.rows.clone(),
+                    done: false,
                 },
             );
             *cur = Some(rid);
         } else {
             end_txn(&h.client, true).await;
         }
+        let result_id = if has_more { rid } else { self.retain_done(h.generation, id, &page.columns, &page.rows, cur) };
         Ok(Some(QueryResult {
-            result_id: has_more.then_some(rid),
+            result_id: Some(result_id),
             columns: page.columns,
             rows: page.rows,
             has_more,
@@ -576,11 +594,14 @@ impl Queries {
         let conn = lock(&self.results).get(&result_id).map(|o| o.conn.clone()).ok_or(EXPIRED)?;
         let l = self.conn_lock(&conn);
         let mut cur = l.lock().await;
-        let info = lock(&self.results).get(&result_id).map(|o| (o.generation, o.cursor.clone(), o.total));
-        let (generation, name, total) = match info {
+        let info = lock(&self.results).get(&result_id).map(|o| (o.generation, o.cursor.clone(), o.total, o.done));
+        let (generation, name, total, done) = match info {
             Some(i) if *cur == Some(result_id) => i,
             _ => return Err(EXPIRED.into()),
         };
+        if done {
+            return Ok(QueryPage::default());
+        }
         let h = match sessions.handle(&conn) {
             Ok(h) if h.generation == generation => h,
             _ => {
@@ -605,20 +626,20 @@ impl Queries {
             has_more = false;
             notices.push(format!("limite di {MAX_TOTAL} righe raggiunto: le altre non vengono lette"));
         }
-        if has_more {
-            if let Some(o) = lock(&self.results).get_mut(&result_id) {
-                o.total = total;
-                o.rows.extend(page.rows.iter().cloned());
-            }
-        } else {
-            self.close_locked(&mut cur, Some(&h)).await;
+        if !has_more {
+            end_txn(&h.client, true).await;
+        }
+        if let Some(o) = lock(&self.results).get_mut(&result_id) {
+            o.total = total;
+            o.rows.extend(page.rows.iter().cloned());
+            o.done = !has_more;
         }
         Ok(QueryPage { rows: page.rows, has_more, truncated: page.truncated, notices, ..Default::default() })
     }
 
     /// Per l'esportazione: colonne e tutte le righe del risultato (quelle già consegnate, tenute in copia, più le
-    /// restanti, fino a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è chiuso. Le celle sono quelle già
-    /// troncate a 64 KB.
+    /// restanti, fino a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è finito (`hasMore = false`) ma resta
+    /// tenuto, quindi si può esportare di nuovo. Le celle sono quelle già troncate a 64 KB.
     pub async fn drain(&self, sessions: &Sessions, result_id: u64) -> Result<(Vec<QueryColumn>, Vec<Vec<Option<String>>>), String> {
         let (columns, mut rows) = {
             let g = lock(&self.results);
@@ -914,8 +935,10 @@ mod tests {
             let p3 = q.more(&sessions, rid).await.unwrap();
             assert_eq!((p3.rows.len(), p3.has_more), (200, false));
             assert_eq!(p3.rows[199][0], cell("1200"));
-            // finito: chiuso da solo
-            assert_eq!(q.more(&sessions, rid).await.unwrap_err(), EXPIRED);
+            // finito: tenuto (per l'esportazione), nessuna riga in più
+            let p4 = q.more(&sessions, rid).await.unwrap();
+            assert!(p4.rows.is_empty() && !p4.has_more);
+            assert_eq!(q.drain(&sessions, rid).await.unwrap().1.len(), 1200);
             // la sessione è tornata libera (nessuna transazione rimasta aperta)
             let st = sessions.client("c1").unwrap().simple_query("SELECT txid_current_if_assigned()").await.unwrap();
             assert!(!st.is_empty());
@@ -942,7 +965,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert!(!r.has_more && r.result_id.is_none());
+            assert!(!r.has_more && r.result_id.is_some());
             let row = &r.rows[0];
             assert_eq!(row[0], None);
             assert_eq!(row[1], cell(""));
@@ -972,7 +995,9 @@ mod tests {
             // WITH con DML e RETURNING: eseguito direttamente
             let r = q.query(&sessions, "c1", "WITH x AS (INSERT INTO m VALUES (9) RETURNING a) SELECT a FROM x").await.unwrap();
             assert_eq!(r.rows, [vec![cell("9")]]);
-            assert!(r.result_id.is_none());
+            assert!(r.result_id.is_some());
+            // senza righe restituite (solo conteggi): nessun risultato da esportare
+            assert!(q.query(&sessions, "c1", "INSERT INTO m VALUES (10)").await.unwrap().result_id.is_none());
             // errore: messaggio del server, la sessione resta usabile
             let e = q.query(&sessions, "c1", "SELECT * FROM non_esiste").await.unwrap_err();
             assert!(e.contains("non_esiste") && e.contains("42P01"), "{e}");

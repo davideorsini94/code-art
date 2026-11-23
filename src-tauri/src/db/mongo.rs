@@ -717,15 +717,12 @@ impl MongoSessions {
         let built = build(&docs);
         let mut notices = Vec::new();
         let has_more = more_left(&mut open, &mut notices);
-        let result_id = if has_more {
-            let rid = self.next_result.fetch_add(1, Ordering::Relaxed);
-            open.docs = docs.clone();
-            lock(&self.results).insert(rid, Arc::new(AsyncMutex::new(open)));
-            lock(&self.by_conn).insert(id.to_string(), rid);
-            Some(rid)
-        } else {
-            None
-        };
+        // il risultato resta tenuto (anche finito, con la copia dei documenti) finché `close` o una nuova ricerca lo sostituisce
+        let rid = self.next_result.fetch_add(1, Ordering::Relaxed);
+        open.docs = docs;
+        lock(&self.results).insert(rid, Arc::new(AsyncMutex::new(open)));
+        lock(&self.by_conn).insert(id.to_string(), rid);
+        let result_id = Some(rid);
         Ok(QueryResult { result_id, columns: built.columns, rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, ..Default::default() })
     }
 
@@ -749,18 +746,13 @@ impl MongoSessions {
         let built = build(&docs);
         let mut notices = Vec::new();
         let has_more = more_left(&mut open, &mut notices);
-        if has_more {
-            open.docs.extend(docs);
-        }
+        open.docs.extend(docs);
         drop(open);
-        if !has_more {
-            self.remove_result(result_id);
-        }
         Ok(QueryPage { rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, columns: built.columns })
     }
 
     /// Per l'esportazione: tutti i documenti del risultato (quelli già consegnati, tenuti in copia, più i restanti, fino
-    /// a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è chiuso.
+    /// a `MAX_TOTAL`). Consuma il cursore: alla fine il risultato è finito ma resta tenuto (si può esportare di nuovo).
     pub async fn drain(&self, result_id: u64) -> Result<Vec<Document>, String> {
         let open = lock(&self.results).get(&result_id).cloned().ok_or(EXPIRED)?;
         let mut open = open.lock().await;
@@ -770,23 +762,17 @@ impl MongoSessions {
             self.remove_result(result_id);
             return Err(EXPIRED.into());
         }
-        let mut all = std::mem::take(&mut open.docs);
-        loop {
+        while more_left(&mut open, &mut Vec::new()) {
             match read_page(&mut open).await {
-                Ok(d) => all.extend(d),
+                Ok(d) => open.docs.extend(d),
                 Err(e) => {
                     drop(open);
                     self.remove_result(result_id);
                     return Err(e);
                 }
             }
-            if !more_left(&mut open, &mut Vec::new()) {
-                break;
-            }
         }
-        drop(open);
-        self.remove_result(result_id);
-        Ok(all)
+        Ok(open.docs.clone())
     }
 
     fn remove_result(&self, result_id: u64) {
