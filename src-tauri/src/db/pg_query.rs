@@ -8,7 +8,8 @@ use crate::lock;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 use tauri::async_runtime::Mutex as AsyncMutex;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -19,6 +20,10 @@ pub const MAX_TOTAL: usize = 100_000;
 /// Byte massimi di una cella (oltre: troncata, con indicazione).
 pub const MAX_CELL: usize = 64 * 1024;
 pub const EXPIRED: &str = "risultato scaduto, riesegui la query";
+pub const IDLE_CLOSED: &str = "risultato chiuso dopo 90 s di inattività: riesegui la query";
+/// Un cursore aperto (che tiene una transazione e i suoi lock) si chiude da solo dopo tanto tempo senza pagine.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+pub const USER_TX: &str = "Chiudi prima la transazione aperta (COMMIT o ROLLBACK)";
 pub const CANCELLED: &str = "Query annullata";
 pub const DECLINED: &str = "annullato";
 pub const DESTRUCTIVE_TITLE: &str = "Istruzione distruttiva";
@@ -43,6 +48,9 @@ struct Tok {
     up: String,
     /// Profondità del gruppo di parentesi che contiene il token (aperta e chiusa: quella del genitore).
     depth: usize,
+    /// Intervallo del token nel testo.
+    s: usize,
+    e: usize,
 }
 
 /// Un'istruzione di primo livello: l'intervallo nel testo (senza spazi, commenti e `;` ai bordi) e i suoi token.
@@ -97,7 +105,7 @@ fn lex(sql: &str) -> Vec<Stmt> {
                 first = $s;
             }
             last = $e;
-            cur.push(Tok { k: $k, up: $up, depth: $d });
+            cur.push(Tok { k: $k, up: $up, depth: $d, s: $s, e: $e });
         }};
     }
     macro_rules! finish {
@@ -271,9 +279,76 @@ fn cursor_candidate(st: &Stmt) -> bool {
     }
 }
 
+/// Il testo contiene un'istruzione che apre una transazione (`BEGIN`, `START TRANSACTION`). Solo così una transazione
+/// dell'utente resta aperta tra una query e l'altra: funzioni, procedure e blocchi `DO` non possono lasciarla aperta.
+fn opens_transaction(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|st| st.toks.first().is_some_and(|t| is_word(t, "BEGIN") || is_word(t, "START")))
+}
+
+/// Un identificatore come lo vede il server: tra virgolette così com'è (`""` = `"`), senza virgolette in minuscolo
+/// (solo ASCII, come Postgres in UTF-8). `None` se il token non è un identificatore.
+fn ident(sql: &str, t: &Tok) -> Option<String> {
+    let raw = &sql[t.s..t.e];
+    match t.k {
+        K::Word => Some(raw.to_ascii_lowercase()),
+        K::Other if raw.len() >= 3 && raw.starts_with('"') && raw.ends_with('"') => {
+            let inner = &raw[1..raw.len() - 1];
+            // una virgoletta rimasta sola = identificatore non chiuso
+            if inner.replace("\"\"", "").contains('"') {
+                return None;
+            }
+            Some(inner.replace("\"\"", "\""))
+        }
+        _ => None,
+    }
+}
+
+/// La lettura di una sola tabella, così stretta che ogni riga del risultato è una riga di quella tabella: una sola
+/// istruzione `SELECT * FROM <tabella>` (nome con o senza schema, citato o no) seguita solo da `WHERE`, `ORDER BY`,
+/// `LIMIT`, `OFFSET`; niente alias, virgole, `JOIN`, `UNION`/`INTERSECT`/`EXCEPT`, raggruppamenti o sottoquery nel
+/// `FROM`. Restituisce schema (se scritto) e tabella come li risolve il server.
+fn plain_table_read(sql: &str) -> Option<(Option<String>, String)> {
+    let stmts = lex(sql);
+    let [st] = stmts.as_slice() else { return None };
+    let t = &st.toks;
+    let text = |x: &Tok| &sql[x.s..x.e];
+    if t.len() < 4 || !is_word(&t[0], "SELECT") || text(&t[1]) != "*" || !is_word(&t[2], "FROM") {
+        return None;
+    }
+    let first = ident(sql, &t[3])?;
+    let mut i = 4;
+    let (schema, table) = if t.get(i).is_some_and(|x| text(x) == ".") {
+        let second = ident(sql, t.get(i + 1)?)?;
+        i += 2;
+        (Some(first), second)
+    } else {
+        (None, first)
+    };
+    if let Some(x) = t.get(i)
+        && !(x.k == K::Word && matches!(x.up.as_str(), "WHERE" | "ORDER" | "LIMIT" | "OFFSET"))
+    {
+        return None;
+    }
+    let forbidden = |x: &Tok| {
+        x.depth == 0 && x.k == K::Word && matches!(x.up.as_str(), "UNION" | "INTERSECT" | "EXCEPT" | "JOIN" | "GROUP" | "HAVING" | "WINDOW" | "FOR" | "INTO" | "FETCH")
+    };
+    if t[i..].iter().any(forbidden) {
+        return None;
+    }
+    Some((schema, table))
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Tipi
 // ---------------------------------------------------------------------------------------------------------------
+
+/// La tabella (dal catalogo) letta da una query modificabile in griglia.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableTable {
+    pub schema: String,
+    pub table: String,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -299,8 +374,13 @@ pub struct PgTree {
 #[serde(rename_all = "camelCase")]
 pub struct PgColumn {
     pub name: String,
+    /// Tipo con i modificatori (`character varying(10)`), da mostrare.
     #[serde(rename = "type")]
     pub type_name: String,
+    /// Tipo senza modificatori (`character varying`, `bpchar`, `numeric`) per i parametri `$n::tipo`: un cast esplicito
+    /// a `varchar(10)` troncherebbe in silenzio, mentre l'assegnazione alla colonna fa rispettare lunghezza e precisione.
+    #[serde(skip)]
+    pub cast_type: String,
     pub nullable: bool,
     pub is_pk: bool,
 }
@@ -329,9 +409,14 @@ pub struct QueryResult {
     pub truncated: Vec<[usize; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
-    /// Solo MongoDB: il documento intero (JSON esteso rilassato) di ogni riga.
+    /// Solo MongoDB: il documento intero (JSON esteso canonico) di ogni riga; `None` oltre 1 MB (non modificabile).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub docs: Vec<String>,
+    pub docs: Vec<Option<String>>,
+    /// Solo MongoDB: l'`_id` di ogni riga (JSON esteso canonico), da ridare così com'è a `db_mongo_replace`/`delete`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<Option<String>>,
+    /// Solo Postgres: la tabella, se il testo è una lettura semplice di una sola tabella (griglia modificabile).
+    pub editable_table: Option<EditableTable>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -343,9 +428,11 @@ pub struct QueryPage {
     pub truncated: Vec<[usize; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
-    /// Solo MongoDB: i documenti interi e le colonne di questa pagina (l'unione dei campi di primo livello).
+    /// Solo MongoDB: i documenti interi, gli `_id` e le colonne di questa pagina (l'unione dei campi di primo livello).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub docs: Vec<String>,
+    pub docs: Vec<Option<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<Option<String>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<QueryColumn>,
 }
@@ -444,17 +531,30 @@ struct Open {
     /// Risultato finito (cursore già chiuso con `COMMIT`, o nessun cursore): resta solo la copia delle righe, per
     /// l'esportazione, finché non lo sostituisce una nuova query della connessione o `close`.
     done: bool,
+    /// Cursore chiuso per inattività: pagine ed esportazione rispondono `IDLE_CLOSED`.
+    idle_closed: bool,
+    /// Ultimo uso del cursore (apertura, pagina, esportazione).
+    last_used: Instant,
 }
 
-/// I risultati con un cursore aperto (id unici per avvio dell'app). Per connessione c'è al più un risultato aperto:
-/// una nuova query chiude il precedente (con `COMMIT`: gli effetti di funzioni chiamate dalla SELECT si conservano;
-/// `ROLLBACK` solo dopo un errore o un annullamento). Un risultato appartiene alla generazione della sessione: dopo
-/// una riconnessione è scaduto.
+type Results = Arc<Mutex<HashMap<u64, Open>>>;
+
+/// I risultati con un cursore aperto (id unici per avvio dell'app). Per connessione c'è al più un risultato aperto,
+/// condiviso da tutte le schede: una nuova query chiude il precedente (con `COMMIT`: gli effetti di funzioni chiamate
+/// dalla SELECT si conservano; `ROLLBACK` solo dopo un errore o un annullamento). Un risultato appartiene alla
+/// generazione della sessione: dopo una riconnessione è scaduto. Un cursore inattivo per `idle` si chiude da solo.
+///
+/// Le transazioni aperte dall'utente (`BEGIN` nel suo testo) non vengono mai concluse dal core: finché una è aperta,
+/// niente cursore (la query gira direttamente) e niente modifiche dalla griglia.
 pub struct Queries {
     next: AtomicU64,
-    results: Mutex<HashMap<u64, Open>>,
+    results: Results,
     /// Per connessione: il risultato aperto (o nessuno); il lucchetto serializza le query della stessa connessione.
     conns: Mutex<HashMap<String, Arc<AsyncMutex<Option<u64>>>>>,
+    /// Connessioni (con la generazione della sessione) dove l'utente ha eseguito un `BEGIN`/`START`: lì si controlla col
+    /// server se la transazione è ancora aperta. Altrove non può esserlo.
+    maybe_tx: Mutex<HashMap<String, u64>>,
+    idle: Duration,
 }
 
 impl Default for Queries {
@@ -473,22 +573,85 @@ async fn end_txn(c: &Client, commit: bool) {
     }
 }
 
+/// La transazione dell'utente è aperta? `statement_timestamp()` coincide con `now()` (l'inizio della transazione) solo
+/// nel primo comando di una transazione: fuori da un blocco ogni messaggio ne apre una sua, quindi coincidono; dentro un
+/// `BEGIN` precedente no. In una transazione fallita il server rifiuta tutto con 25P02: aperta anche quella.
+async fn server_in_transaction(c: &Client) -> Result<bool, String> {
+    match c.simple_query("SELECT now() = statement_timestamp()").await {
+        Ok(msgs) => Ok(!msgs.iter().any(|m| matches!(m, SimpleQueryMessage::Row(r) if r.get(0) == Some("t")))),
+        Err(e) if e.code().map(|c| c.code()) == Some("25P02") => Ok(true),
+        Err(e) => Err(qerr(&e)),
+    }
+}
+
+/// La tabella del catalogo per `schema.tabella` (o `tabella` risolta con `search_path`), con i nomi esatti.
+async fn resolve_table(c: &Client, schema: Option<&str>, table: &str) -> Option<EditableTable> {
+    let name = match schema {
+        Some(s) => format!("{}.{}", super::pg_edit::quote_ident(s), super::pg_edit::quote_ident(table)),
+        None => super::pg_edit::quote_ident(table),
+    };
+    let row = c
+        .query_opt(
+            "SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = to_regclass($1::text) AND c.relkind IN ('r','p','v','m')",
+            &[&name],
+        )
+        .await
+        .ok()??;
+    Some(EditableTable { schema: row.get(0), table: row.get(1) })
+}
+
 impl Queries {
     pub fn new() -> Self {
-        Queries { next: AtomicU64::new(1), results: Mutex::new(HashMap::new()), conns: Mutex::new(HashMap::new()) }
+        Self::with_idle(IDLE_TIMEOUT)
+    }
+
+    /// Con un'attesa d'inattività diversa (i test la accorciano).
+    pub fn with_idle(idle: Duration) -> Self {
+        Queries {
+            next: AtomicU64::new(1),
+            results: Arc::new(Mutex::new(HashMap::new())),
+            conns: Mutex::new(HashMap::new()),
+            maybe_tx: Mutex::new(HashMap::new()),
+            idle,
+        }
     }
 
     fn conn_lock(&self, id: &str) -> Arc<AsyncMutex<Option<u64>>> {
         lock(&self.conns).entry(id.to_string()).or_default().clone()
     }
 
+    /// C'è una transazione aperta dall'utente su questa sessione? (lucchetto della connessione già preso)
+    async fn user_tx_open(&self, h: &Handle, id: &str) -> Result<bool, String> {
+        if lock(&self.maybe_tx).get(id) != Some(&h.generation) {
+            return Ok(false);
+        }
+        let open = server_in_transaction(&h.client).await?;
+        if !open {
+            lock(&self.maybe_tx).remove(id);
+        }
+        Ok(open)
+    }
+
     /// Connessione in esclusiva (le altre query aspettano): chiude un eventuale risultato aperto, che tiene una
-    /// transazione, e dà la sessione. Il lucchetto resta preso finché vive la guardia.
+    /// transazione, e dà la sessione. Con una transazione dell'utente aperta: errore `USER_TX` (il core non la chiude).
+    /// Il lucchetto resta preso finché vive la guardia.
     pub async fn exclusive(&self, sessions: &Sessions, id: &str) -> Result<(tokio::sync::OwnedMutexGuard<Option<u64>>, Handle), String> {
         let mut guard = self.conn_lock(id).lock_owned().await;
         let h = sessions.handle(id)?;
         self.close_locked(&mut guard, Some(&h)).await;
+        if self.user_tx_open(&h, id).await? {
+            return Err(USER_TX.into());
+        }
         Ok((guard, h))
+    }
+
+    /// Errore `USER_TX` se l'utente ha una transazione aperta (prima di chiedere conferme che poi verrebbero rifiutate).
+    pub async fn check_no_user_tx(&self, sessions: &Sessions, id: &str) -> Result<(), String> {
+        let l = self.conn_lock(id);
+        let _cur = l.lock().await;
+        let h = sessions.handle(id)?;
+        if self.user_tx_open(&h, id).await? { Err(USER_TX.into()) } else { Ok(()) }
     }
 
     /// Chiude il risultato aperto della connessione (lucchetto già preso).
@@ -512,11 +675,22 @@ impl Queries {
         let mut cur = l.lock().await;
         let h = sessions.handle(id)?;
         self.close_locked(&mut cur, Some(&h)).await;
-        if stmts.len() == 1 && cursor_candidate(&stmts[0]) {
+        let in_tx = self.user_tx_open(&h, id).await?;
+        // dentro una transazione dell'utente niente cataloghi: un errore la farebbe fallire (e le modifiche sono rifiutate)
+        let editable_table = match (in_tx, plain_table_read(text)) {
+            (false, Some((schema, table))) => resolve_table(&h.client, schema.as_deref(), &table).await,
+            _ => None,
+        };
+        if !in_tx && stmts.len() == 1 && cursor_candidate(&stmts[0]) {
             let stext = &text[stmts[0].start..stmts[0].end];
-            if let Some(r) = self.open_cursor(&h, id, stext, &mut cur).await? {
+            if let Some(mut r) = self.open_cursor(&h, id, stext, &mut cur, &l).await? {
+                r.editable_table = editable_table;
                 return Ok(r);
             }
+        }
+        if opens_transaction(&stmts) {
+            // da qui in poi si chiede al server, prima di ogni cursore o modifica, se la transazione è ancora aperta
+            lock(&self.maybe_tx).insert(id.to_string(), h.generation);
         }
         let msgs = h.client.simple_query(text).await.map_err(|e| qerr(&e))?;
         let c = collect(msgs);
@@ -524,8 +698,11 @@ impl Queries {
         if c.overflow {
             notices.push("solo le prime 500 righe: usa una sola SELECT per la paginazione".to_string());
         }
+        if in_tx {
+            notices.push("transazione aperta: la query gira fuori dal cursore (al massimo 500 righe). Chiudila con COMMIT o ROLLBACK".to_string());
+        }
         let result_id = (!c.columns.is_empty()).then(|| self.retain_done(h.generation, id, &c.columns, &c.rows, &mut cur));
-        Ok(QueryResult { result_id, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices, docs: Vec::new() })
+        Ok(QueryResult { result_id, columns: c.columns, rows: c.rows, has_more: false, affected: Some(c.counts), truncated: c.truncated, notices, editable_table, ..Default::default() })
     }
 
     /// Tiene la copia di un risultato già finito (nessun cursore aperto), come risultato della connessione.
@@ -533,14 +710,24 @@ impl Queries {
         let rid = self.next.fetch_add(1, Ordering::Relaxed);
         lock(&self.results).insert(
             rid,
-            Open { conn: id.to_string(), generation, cursor: String::new(), total: rows.len(), columns: columns.to_vec(), rows: rows.to_vec(), done: true },
+            Open {
+                conn: id.to_string(),
+                generation,
+                cursor: String::new(),
+                total: rows.len(),
+                columns: columns.to_vec(),
+                rows: rows.to_vec(),
+                done: true,
+                idle_closed: false,
+                last_used: Instant::now(),
+            },
         );
         *cur = Some(rid);
         rid
     }
 
     /// `Ok(None)` = il testo non può stare in un cursore (SQLSTATE 0A000): va eseguito direttamente.
-    async fn open_cursor(&self, h: &Handle, id: &str, stext: &str, cur: &mut Option<u64>) -> Result<Option<QueryResult>, String> {
+    async fn open_cursor(&self, h: &Handle, id: &str, stext: &str, cur: &mut Option<u64>, conn: &Arc<AsyncMutex<Option<u64>>>) -> Result<Option<QueryResult>, String> {
         let rid = self.next.fetch_add(1, Ordering::Relaxed);
         let name = format!("codeart_c{rid}");
         h.client.simple_query("BEGIN").await.map_err(|e| qerr(&e))?;
@@ -570,23 +757,52 @@ impl Queries {
                     columns: page.columns.clone(),
                     rows: page.rows.clone(),
                     done: false,
+                    idle_closed: false,
+                    last_used: Instant::now(),
                 },
             );
             *cur = Some(rid);
+            self.watch_idle(rid, conn.clone(), Arc::downgrade(&h.client));
         } else {
             end_txn(&h.client, true).await;
         }
         let result_id = if has_more { rid } else { self.retain_done(h.generation, id, &page.columns, &page.rows, cur) };
-        Ok(Some(QueryResult {
-            result_id: Some(result_id),
-            columns: page.columns,
-            rows: page.rows,
-            has_more,
-            affected: None,
-            truncated: page.truncated,
-            notices: Vec::new(),
-            docs: Vec::new(),
-        }))
+        Ok(Some(QueryResult { result_id: Some(result_id), columns: page.columns, rows: page.rows, has_more, truncated: page.truncated, ..Default::default() }))
+    }
+
+    /// Chiude il cursore `rid` dopo `idle` senza pagine né esportazioni: `COMMIT` (come una chiusura normale) e
+    /// risultato segnato come chiuso per inattività. Una sessione nel frattempo sostituita non ha più il client.
+    fn watch_idle(&self, rid: u64, conn: Arc<AsyncMutex<Option<u64>>>, client: Weak<Client>) {
+        let results = self.results.clone();
+        let idle = self.idle;
+        tauri::async_runtime::spawn(async move {
+            let mut wait = idle;
+            loop {
+                tokio::time::sleep(wait).await;
+                let cur = conn.lock().await;
+                if *cur != Some(rid) {
+                    return;
+                }
+                let last = match lock(&results).get(&rid) {
+                    Some(o) if !o.done => o.last_used,
+                    _ => return,
+                };
+                let elapsed = last.elapsed();
+                if elapsed < idle {
+                    wait = idle - elapsed;
+                    continue;
+                }
+                if let Some(o) = lock(&results).get_mut(&rid) {
+                    o.done = true;
+                    o.idle_closed = true;
+                }
+                if let Some(c) = client.upgrade() {
+                    end_txn(&c, true).await;
+                }
+                drop(cur);
+                return;
+            }
+        });
     }
 
     /// Pagina successiva di un risultato con cursore aperto.
@@ -594,11 +810,14 @@ impl Queries {
         let conn = lock(&self.results).get(&result_id).map(|o| o.conn.clone()).ok_or(EXPIRED)?;
         let l = self.conn_lock(&conn);
         let mut cur = l.lock().await;
-        let info = lock(&self.results).get(&result_id).map(|o| (o.generation, o.cursor.clone(), o.total, o.done));
-        let (generation, name, total, done) = match info {
+        let info = lock(&self.results).get(&result_id).map(|o| (o.generation, o.cursor.clone(), o.total, o.done, o.idle_closed));
+        let (generation, name, total, done, idle_closed) = match info {
             Some(i) if *cur == Some(result_id) => i,
             _ => return Err(EXPIRED.into()),
         };
+        if idle_closed {
+            return Err(IDLE_CLOSED.into());
+        }
         if done {
             return Ok(QueryPage::default());
         }
@@ -633,6 +852,7 @@ impl Queries {
             o.total = total;
             o.rows.extend(page.rows.iter().cloned());
             o.done = !has_more;
+            o.last_used = Instant::now();
         }
         Ok(QueryPage { rows: page.rows, has_more, truncated: page.truncated, notices, ..Default::default() })
     }
@@ -644,6 +864,9 @@ impl Queries {
         let (columns, mut rows) = {
             let g = lock(&self.results);
             let o = g.get(&result_id).ok_or(EXPIRED)?;
+            if o.idle_closed {
+                return Err(IDLE_CLOSED.into());
+            }
             (o.columns.clone(), o.rows.clone())
         };
         loop {
@@ -733,7 +956,7 @@ pub async fn columns(sessions: &Sessions, id: &str, schema: &str, table: &str) -
     let c = sessions.client(id)?;
     let rows = c
         .query(
-            "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, \
+            "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, -1), NOT a.attnotnull, \
                     EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY(i.indkey)) \
              FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname::text = $1 AND c.relname::text = $2 AND c.relkind IN ('r','p','v','m') AND a.attnum > 0 AND NOT a.attisdropped \
@@ -742,7 +965,7 @@ pub async fn columns(sessions: &Sessions, id: &str, schema: &str, table: &str) -
         )
         .await
         .map_err(|e| qerr(&e))?;
-    Ok(rows.iter().map(|r| PgColumn { name: r.get(0), type_name: r.get(1), nullable: r.get(2), is_pk: r.get(3) }).collect())
+    Ok(rows.iter().map(|r| PgColumn { name: r.get(0), type_name: r.get(1), cast_type: r.get(2), nullable: r.get(3), is_pk: r.get(4) }).collect())
 }
 
 #[cfg(test)]
@@ -844,6 +1067,61 @@ mod tests {
     }
 
     #[test]
+    fn plain_table_read_is_strict() {
+        let s = |x: &str| Some(x.to_string());
+        let plain_table_read = |q: &str| plain_table_read(q).map(|(a, b)| (a, Some(b)));
+        assert_eq!(plain_table_read(r#"SELECT * FROM "public"."users""#), Some((s("public"), s("users"))));
+        assert_eq!(plain_table_read(r#"SELECT * FROM "public"."users";"#), Some((s("public"), s("users"))));
+        assert_eq!(plain_table_read(r#"select * from "Ugly ""Name"""."Ta ""ble" where id > 3 order by id desc, "x" limit 10 offset 5"#), Some((s("Ugly \"Name\""), s("Ta \"ble"))));
+        // senza virgolette: minuscole come fa il server; senza schema: lo risolve il server col search_path
+        assert_eq!(plain_table_read("SELECT * FROM Public.Users WHERE a IN (SELECT b FROM c UNION SELECT d FROM e)"), Some((s("public"), s("users"))));
+        assert_eq!(plain_table_read("SELECT * FROM users WHERE a IS DISTINCT FROM b"), Some((None, s("users"))));
+        // tutto il resto: niente griglia modificabile
+        for q in [
+            r#"SELECT * FROM "public"."users" UNION ALL SELECT * FROM "public"."users_archive""#,
+            r#"SELECT * FROM "public"."users", "public"."orders""#,
+            r#"SELECT * FROM "public"."users"; SELECT * FROM "public"."other""#,
+            r#"SELECT * FROM "public"."users" u JOIN "public"."orders" o ON o.u = u.id"#,
+            r#"SELECT * FROM "public"."users" AS u"#,
+            r#"SELECT * FROM "public"."users" WHERE true INTERSECT SELECT * FROM x"#,
+            r#"SELECT * FROM "public"."users" WHERE true EXCEPT SELECT * FROM x"#,
+            r#"SELECT * FROM (SELECT * FROM "public"."users") s"#,
+            r#"SELECT * FROM ONLY "public"."users""#,
+            r#"SELECT * FROM "public"."users" GROUP BY id"#,
+            r#"SELECT * FROM "public"."users" FOR UPDATE"#,
+            r#"SELECT * FROM "public"."users" FETCH FIRST 3 ROWS ONLY"#,
+            r#"SELECT id, name FROM "public"."users""#,
+            r#"SELECT u.* FROM "public"."users" u"#,
+            r#"SELECT DISTINCT * FROM "public"."users""#,
+            r#"WITH x AS (SELECT 1) SELECT * FROM "public"."users""#,
+            r#"SELECT * FROM U&"d\0061t""#,
+            r#"SELECT * FROM "public"."users"#,
+            r#"SELECT * FROM """#,
+            "SELECT * FROM 'users'",
+            "SELECT *",
+            "TABLE users",
+        ] {
+            assert_eq!(plain_table_read(q), None, "{q}");
+        }
+        // il nome citato resta com'è: "Users" non è users
+        assert_eq!(plain_table_read(r#"select * from "public"."Users""#), Some((s("public"), s("Users"))));
+        assert_eq!(plain_table_read(r#"select * from public.Users"#), Some((s("public"), s("users"))));
+    }
+
+    #[test]
+    fn transaction_openers_are_detected() {
+        let o = |q: &str| opens_transaction(&lex(q));
+        assert!(o("BEGIN"));
+        assert!(o("begin; update t set a = 1 where id = 7"));
+        assert!(o("START TRANSACTION ISOLATION LEVEL SERIALIZABLE"));
+        assert!(o("SELECT 1; /* x */ begin isolation level read committed"));
+        assert!(!o("DO $$ BEGIN PERFORM 1; END $$"));
+        assert!(!o("SELECT 'BEGIN'"));
+        assert!(!o("COMMIT"));
+        assert!(!o("SELECT begin FROM t"));
+    }
+
+    #[test]
     fn truncation_respects_char_boundaries() {
         assert_eq!(truncate_cell("ciao"), ("ciao".to_string(), false));
         let exact = "a".repeat(MAX_CELL);
@@ -870,7 +1148,6 @@ mod tests {
     use super::super::pg::{PgParams, Sessions};
     use super::super::testutil::Cluster;
     use crate::ssh::conn::{Connections, SshPaths};
-    use std::time::{Duration, Instant};
 
     fn cell(s: &str) -> Option<String> {
         Some(s.to_string())
@@ -1041,6 +1318,108 @@ mod tests {
             assert_eq!(q.query(&sessions, "c1", "SELECT 1").await.unwrap().rows.len(), 1);
             sessions.disconnect("c1");
             assert!(cancel(&sessions, "c1").await.is_err());
+        });
+    }
+
+    #[test]
+    #[ignore = "avvia un cluster Postgres temporaneo (initdb e pg_ctl nel PATH)"]
+    fn live_cluster_user_transactions_idle_cursor_and_editable_table() {
+        use super::super::pg_edit::{self, RowEdit};
+        let Some(cluster) = Cluster::start() else {
+            eprintln!("initdb/pg_ctl non trovati: saltato");
+            return;
+        };
+        let p = PgParams { host: "127.0.0.1".into(), port: cluster.port, user: Some("codeart".into()), database: Some("postgres".into()), tls: DbTls::Disable, accept_invalid_certs: false };
+        tauri::async_runtime::block_on(async {
+            let conns = Arc::new(Connections::new(SshPaths::new(std::env::temp_dir()), Arc::new(|_| {})));
+            let sessions = Arc::new(Sessions::new(conns, Arc::new(|_| {})));
+            sessions.connect("c1", p.clone(), Some("test-pass".into()), None).await.unwrap();
+            let q = Arc::new(Queries::with_idle(Duration::from_millis(700)));
+            q.query(
+                &sessions,
+                "c1",
+                r#"CREATE TABLE acc (id int PRIMARY KEY, balance int);
+                   INSERT INTO acc VALUES (7, 100);
+                   INSERT INTO acc SELECT g, g FROM generate_series(100, 1300) g;
+                   CREATE TABLE "Users" (id int PRIMARY KEY);
+                   CREATE TABLE users (id int PRIMARY KEY);
+                   CREATE VIEW v AS SELECT 1 AS x"#,
+            )
+            .await
+            .unwrap();
+            let client = sessions.client("c1").unwrap();
+            assert!(!server_in_transaction(&client).await.unwrap());
+
+            // ---- I1: la transazione dell'utente non viene mai conclusa dal core ----
+            q.query(&sessions, "c1", "BEGIN; UPDATE acc SET balance = 0 WHERE id = 7").await.unwrap();
+            assert!(server_in_transaction(&client).await.unwrap());
+            // una SELECT grande dentro la transazione: niente cursore (che farebbe COMMIT), vede l'UPDATE non confermato
+            let r = q.query(&sessions, "c1", "SELECT * FROM acc ORDER BY id").await.unwrap();
+            assert!(!r.has_more && r.affected.is_some());
+            assert_eq!(r.rows.len(), 500);
+            assert_eq!(r.rows[0], [cell("7"), cell("0")]);
+            assert!(r.notices.iter().any(|n| n.contains("transazione aperta")), "{:?}", r.notices);
+            assert_eq!(r.editable_table, None);
+            // le modifiche dalla griglia sono rifiutate (prima della conferma e in esecuzione)
+            assert_eq!(q.check_no_user_tx(&sessions, "c1").await.unwrap_err(), USER_TX);
+            let stmts = pg_edit::plan(&sessions, "c1", "public", "acc", &[RowEdit::Update { pk: vec![("id".into(), cell("7"))], set: vec![("balance".into(), cell("5"))] }]).await.unwrap();
+            assert_eq!(pg_edit::execute(&q, &sessions, "c1", &stmts).await.unwrap_err(), USER_TX);
+            // ancora aperta: anche dopo un errore (transazione fallita, 25P02)
+            assert!(q.query(&sessions, "c1", "SELECT 1/0").await.is_err());
+            assert_eq!(q.check_no_user_tx(&sessions, "c1").await.unwrap_err(), USER_TX);
+            q.query(&sessions, "c1", "ROLLBACK").await.unwrap();
+            // l'UPDATE è sparito
+            assert_eq!(q.query(&sessions, "c1", "SELECT balance FROM acc WHERE id = 7").await.unwrap().rows, [vec![cell("100")]]);
+            q.check_no_user_tx(&sessions, "c1").await.unwrap();
+            // fuori dalla transazione: di nuovo cursore e modifiche
+            let r = q.query(&sessions, "c1", "SELECT * FROM acc").await.unwrap();
+            assert!(r.has_more);
+            assert_eq!(pg_edit::execute(&q, &sessions, "c1", &stmts).await.unwrap().affected, 1);
+            // BEGIN … COMMIT nello stesso testo; START TRANSACTION … COMMIT in due volte
+            q.query(&sessions, "c1", "BEGIN; UPDATE acc SET balance = 1 WHERE id = 7; COMMIT").await.unwrap();
+            q.check_no_user_tx(&sessions, "c1").await.unwrap();
+            q.query(&sessions, "c1", "START TRANSACTION; INSERT INTO users VALUES (1)").await.unwrap();
+            assert_eq!(q.check_no_user_tx(&sessions, "c1").await.unwrap_err(), USER_TX);
+            q.query(&sessions, "c1", "COMMIT").await.unwrap();
+            q.check_no_user_tx(&sessions, "c1").await.unwrap();
+            assert_eq!(q.query(&sessions, "c1", "SELECT count(*) FROM users").await.unwrap().rows, [vec![cell("1")]]);
+
+            // ---- I2: un cursore inattivo si chiude da solo ----
+            let r = q.query(&sessions, "c1", "SELECT g FROM generate_series(1, 3000) g").await.unwrap();
+            let rid = r.result_id.unwrap();
+            assert!(r.has_more && server_in_transaction(&client).await.unwrap());
+            // l'uso lo tiene aperto
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                assert!(q.more(&sessions, rid).await.unwrap().has_more);
+            }
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            assert_eq!(q.more(&sessions, rid).await.unwrap_err(), IDLE_CLOSED);
+            assert_eq!(q.drain(&sessions, rid).await.unwrap_err(), IDLE_CLOSED);
+            // transazione conclusa (COMMIT): la sessione è libera, le query successive vanno
+            assert!(!server_in_transaction(&client).await.unwrap());
+            assert_eq!(q.query(&sessions, "c1", "SELECT 3").await.unwrap().rows, [vec![cell("3")]]);
+            q.close(&sessions, rid).await.unwrap();
+            // un cursore chiuso prima del tempo non viene toccato dal controllo
+            let r = q.query(&sessions, "c1", "SELECT g FROM generate_series(1, 3000) g").await.unwrap();
+            q.close(&sessions, r.result_id.unwrap()).await.unwrap();
+            q.query(&sessions, "c1", "BEGIN").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert!(server_in_transaction(&client).await.unwrap(), "il controllo d'inattività non deve chiudere la transazione dell'utente");
+            q.query(&sessions, "c1", "ROLLBACK").await.unwrap();
+
+            // ---- I5: la tabella modificabile viene dal core, col nome esatto del catalogo ----
+            let et = |s: &str, t: &str| Some(EditableTable { schema: s.into(), table: t.into() });
+            assert_eq!(q.query(&sessions, "c1", r#"SELECT * FROM "public"."acc" WHERE id = 7"#).await.unwrap().editable_table, et("public", "acc"));
+            assert_eq!(q.query(&sessions, "c1", "select * from ACC order by id limit 600").await.unwrap().editable_table, et("public", "acc"));
+            assert_eq!(q.query(&sessions, "c1", r#"select * from "Users""#).await.unwrap().editable_table, et("public", "Users"));
+            assert_eq!(q.query(&sessions, "c1", "select * from Users").await.unwrap().editable_table, et("public", "users"));
+            assert_eq!(q.query(&sessions, "c1", "SELECT * FROM v").await.unwrap().editable_table, et("public", "v"));
+            assert_eq!(q.query(&sessions, "c1", "SELECT * FROM acc UNION ALL SELECT * FROM acc").await.unwrap().editable_table, None);
+            assert_eq!(q.query(&sessions, "c1", r#"SELECT * FROM "public"."users", "public"."acc""#).await.unwrap().editable_table, None);
+            assert_eq!(q.query(&sessions, "c1", r#"SELECT * FROM "public"."users"; SELECT * FROM "public"."acc""#).await.unwrap().editable_table, None);
+            assert!(q.query(&sessions, "c1", "SELECT * FROM non_esiste").await.is_err());
+            sessions.disconnect("c1");
         });
     }
 }

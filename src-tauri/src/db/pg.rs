@@ -22,6 +22,8 @@ pub const NO_TLS: &str = "Il server non accetta TLS";
 pub const UNREACHABLE: &str = "Server non raggiungibile";
 pub const TIMED_OUT: &str = "Server non raggiungibile (tempo scaduto)";
 pub const LOST: &str = "Connessione al database persa";
+/// Aggiunto agli errori di verifica del certificato (`prefer`/`require` verificano sempre).
+pub const CERT_HINT: &str = "Se il server usa un certificato autofirmato, abilita «Accetta certificati non validi» nella connessione (oppure usa TLS `disable`)";
 
 /// Dati per aprire una connessione (senza password e senza tunnel: quelli si passano a parte).
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +84,8 @@ pub fn build_config(p: &PgParams, password: Option<&str>, local_port: Option<u16
 pub fn sanitize(text: &str, password: Option<&str>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(i) = rest.to_lowercase().find("password=") {
+    // minuscole solo ASCII: gli indici restano quelli del testo originale (`to_lowercase` cambia la lunghezza di `İ`)
+    while let Some(i) = rest.to_ascii_lowercase().find("password=") {
         out.push_str(&rest[..i]);
         out.push_str("password=***");
         let tail = &rest[i + "password=".len()..];
@@ -114,7 +117,10 @@ pub fn classify(sqlstate: Option<&str>, text: &str, password: Option<&str>) -> S
     if sqlstate.is_some() {
         return format!("Errore del server: {clean}");
     }
-    if ["certificate", "handshake", "tls", "ssl"].iter().any(|k| low.contains(k)) {
+    if low.contains("certificate") {
+        return format!("Errore TLS: {clean}. {CERT_HINT}");
+    }
+    if ["handshake", "tls", "ssl"].iter().any(|k| low.contains(k)) {
         return format!("Errore TLS: {clean}");
     }
     if ["connection refused", "timed out", "timeout", "lookup", "dns", "no route", "unreachable", "failed to connect", "connection reset", "broken pipe", "os error"]
@@ -452,6 +458,9 @@ mod tests {
         assert_eq!(sanitize("Password=x", None), "password=***");
         assert_eq!(sanitize("boom hunter2 boom", Some("hunter2")), "boom *** boom");
         assert_eq!(sanitize("nulla", Some("")), "nulla");
+        // caratteri che cambiano lunghezza in minuscolo: niente panico, indici giusti
+        assert_eq!(sanitize("İİ password=x İ", None), "İİ password=*** İ");
+        assert_eq!(sanitize("\u{212A}elvin PASSWORD=y", None), "\u{212A}elvin password=***");
     }
 
     #[test]
@@ -460,7 +469,9 @@ mod tests {
         assert_eq!(classify(Some("28000"), "no pg_hba.conf entry", None), AUTH);
         assert_eq!(classify(None, "invalid configuration: password missing", None), AUTH);
         assert_eq!(classify(None, "error performing TLS handshake: server does not support TLS", None), NO_TLS);
-        assert!(classify(None, "error performing TLS handshake: certificate verify failed", None).starts_with("Errore TLS"));
+        let cert = classify(None, "error performing TLS handshake: certificate verify failed", None);
+        assert!(cert.starts_with("Errore TLS") && cert.contains("Accetta certificati non validi"), "{cert}");
+        assert!(!classify(None, "error performing TLS handshake: bad record", None).contains("Accetta"));
         assert!(classify(None, "error connecting to server: Connection refused (os error 61)", None).starts_with(UNREACHABLE));
         assert!(classify(None, "timed out", None).starts_with(UNREACHABLE));
         assert_eq!(classify(Some("3D000"), "database \"x\" does not exist", None), "Errore del server: database \"x\" does not exist");

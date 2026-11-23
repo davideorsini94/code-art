@@ -276,7 +276,15 @@ pub async fn db_connection_save(app: AppHandle, window: WebviewWindow, input: Db
 #[tauri::command]
 pub async fn db_connection_delete(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
     let store = ssh::trusted_store(&app, &window)?;
-    crate::projects::off_main(move || delete_connection(&store, &DbKeychain, &id)).await
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    crate::projects::off_main(move || {
+        // una sessione aperta (anche da un'altra finestra) e il suo tunnel si chiudono prima
+        sessions.disconnect(&id);
+        mongo_sessions.disconnect(&id);
+        delete_connection(&store, &DbKeychain, &id)
+    })
+    .await
 }
 
 /// Salva la password nel Portachiavi; non torna mai alla WebView.
@@ -385,6 +393,8 @@ pub async fn db_pg_preview_edits(app: AppHandle, window: WebviewWindow, id: Stri
 pub async fn db_pg_apply_edits(app: AppHandle, window: WebviewWindow, id: String, schema: String, table: String, edits: Vec<pg_edit::RowEdit>) -> Result<pg_edit::ApplyResult, String> {
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    // una transazione dell'utente aperta: rifiuto subito, prima del piano e della conferma (`execute` ricontrolla)
+    app.state::<Arc<pg_query::Queries>>().inner().check_no_user_tx(&sessions, &id).await?;
     let stmts = pg_edit::plan(&sessions, &id, &schema, &table, &edits).await?;
     let message = pg_edit::confirm_message(&stmts);
     let confirm = crate::git::write::NativeConfirm { app: app.clone(), window: window.clone() };
@@ -536,7 +546,7 @@ pub async fn db_mongo_replace(app: AppHandle, window: WebviewWindow, id: String,
     sessions.replace(&id, &db, &coll, &key, doc).await
 }
 
-/// Inserisce un documento; restituisce il suo `_id` (JSON esteso rilassato). Conferma nativa «Modifica documento».
+/// Inserisce un documento; restituisce il suo `_id` (JSON esteso canonico). Conferma nativa «Modifica documento».
 #[tauri::command]
 pub async fn db_mongo_insert(app: AppHandle, window: WebviewWindow, id: String, db: String, coll: String, doc_json: String) -> Result<String, String> {
     ssh::trusted_store(&app, &window)?;

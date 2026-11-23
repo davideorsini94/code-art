@@ -99,7 +99,7 @@ impl<'a> Builder<'a> {
         }
         self.params.push(v.clone());
         let n = self.params.len();
-        sql.push(format!("{} {op} ${n}::{}", quote_ident(&c.name), c.type_name));
+        sql.push(format!("{} {op} ${n}::{}", quote_ident(&c.name), c.cast_type));
         preview.push(format!("{} {op} {}", quote_ident(&c.name), literal(v)));
         Ok(())
     }
@@ -195,7 +195,7 @@ pub fn plan_edits(table: &TableRef, columns: &[PgColumn], edits: &[RowEdit]) -> 
                         let (mut p, mut s) = (Vec::new(), Vec::new());
                         b.assign(n, v, &mut p, &mut s, "=")?;
                         names.push(quote_ident(&c.name));
-                        casts.push(format!("${}::{}", b.params.len(), c.type_name));
+                        casts.push(format!("${}::{}", b.params.len(), c.cast_type));
                         lits.push(literal(v));
                     }
                     Statement {
@@ -247,7 +247,8 @@ fn db_error(e: &tokio_postgres::Error, stmt: &Statement) -> String {
 }
 
 /// `BEGIN` / istruzioni / `COMMIT`; ogni `UPDATE`/`DELETE`/`INSERT` deve toccare esattamente una riga, altrimenti
-/// `ROLLBACK`. Prende la connessione in esclusiva (chiude un eventuale risultato aperto, che tiene una transazione).
+/// `ROLLBACK`. Prende la connessione in esclusiva (chiude un eventuale risultato aperto, che tiene una transazione);
+/// con una transazione aperta dall'utente rifiuta (`USER_TX`): il suo `COMMIT`/`ROLLBACK` concluderebbe anche quella.
 pub async fn execute(queries: &Queries, sessions: &Sessions, id: &str, stmts: &[Statement]) -> Result<ApplyResult, String> {
     let (_guard, h) = queries.exclusive(sessions, id).await?;
     let c = &h.client;
@@ -285,7 +286,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str, ty: &str, pk: bool) -> PgColumn {
-        PgColumn { name: name.into(), type_name: ty.into(), nullable: !pk, is_pk: pk }
+        PgColumn { name: name.into(), type_name: ty.into(), cast_type: ty.into(), nullable: !pk, is_pk: pk }
     }
     fn cell(n: &str, v: Option<&str>) -> Cell {
         (n.into(), v.map(str::to_string))
@@ -316,6 +317,19 @@ mod tests {
         );
         assert_eq!(s[0].params, [Some("12.50".into()), None, Some("{1,2}".into()), Some("7".into())]);
         assert!(s[0].preview.contains("\"we\"\"ird\" = NULL") && s[0].preview.contains("\"order\" = '12.50'"), "{}", s[0].preview);
+    }
+
+    #[test]
+    fn parameters_cast_to_the_type_without_modifiers() {
+        // il tipo mostrato ha la lunghezza, il cast no: l'assegnazione alla colonna la fa rispettare (niente troncamenti)
+        let cols = [
+            col("id", "integer", true),
+            PgColumn { name: "v".into(), type_name: "character varying(10)".into(), cast_type: "character varying".into(), nullable: true, is_pk: false },
+        ];
+        let s = plan_edits(&tref("public", "t"), &cols, &[RowEdit::Update { pk: vec![cell("id", Some("1"))], set: vec![cell("v", Some("x"))] }]).unwrap();
+        assert_eq!(s[0].sql, "UPDATE \"public\".\"t\" SET \"v\" = $1::character varying WHERE \"id\" = $2::integer");
+        let s = plan_edits(&tref("public", "t"), &cols, &[RowEdit::Insert { values: vec![cell("v", Some("x"))] }]).unwrap();
+        assert_eq!(s[0].sql, "INSERT INTO \"public\".\"t\" (\"v\") VALUES ($1::character varying)");
     }
 
     #[test]
@@ -466,6 +480,29 @@ mod tests {
             assert!(big.result_id.is_some());
             let stmts = plan(&sessions, "c1", schema, table, &[RowEdit::Delete { pk: vec![cell("a", Some("10")), cell("b c", Some("O'Hara \"q\""))] }]).await.unwrap();
             assert_eq!(execute(&q, &sessions, "c1", &stmts).await.unwrap().affected, 1);
+
+            // lunghezza e precisione della colonna rispettate: un valore troppo lungo è un errore, non un troncamento
+            q.query(&sessions, "c1", "CREATE TABLE lim (id int PRIMARY KEY, v varchar(10), c char(3), n numeric(5,2), b bit(4)); INSERT INTO lim VALUES (1, 'corto', 'x', 1.00, B'0000')").await.unwrap();
+            let edits = vec![
+                RowEdit::Update { pk: vec![cell("id", Some("1"))], set: vec![cell("c", Some("ab"))] },
+                RowEdit::Update { pk: vec![cell("id", Some("1"))], set: vec![cell("v", Some("quindici_carat"))] },
+            ];
+            let stmts = plan(&sessions, "c1", "public", "lim", &edits).await.unwrap();
+            assert!(stmts[1].sql.contains("$1::character varying "), "{}", stmts[1].sql);
+            let e = execute(&q, &sessions, "c1", &stmts).await.unwrap_err();
+            assert!(e.contains("too long") || e.contains("troppo lungo"), "{e}");
+            const LIM: &str = "SELECT v, c, n::text, b::text FROM lim";
+            assert_eq!(q.query(&sessions, "c1", LIM).await.unwrap().rows, [vec![s("corto"), s("x  "), s("1.00"), s("0000")]]);
+            let bad = |col: &str, v: &str| vec![RowEdit::Update { pk: vec![cell("id", Some("1"))], set: vec![cell(col, Some(v))] }];
+            for (col, v) in [("c", "abcd"), ("n", "123456"), ("b", "10101")] {
+                let stmts = plan(&sessions, "c1", "public", "lim", &bad(col, v)).await.unwrap();
+                assert!(execute(&q, &sessions, "c1", &stmts).await.is_err(), "{col} = {v}");
+            }
+            // valori che entrano: char(3) non diventa char(1), bit(4) non diventa bit(1)
+            let ok = vec![RowEdit::Update { pk: vec![cell("id", Some("1"))], set: vec![cell("v", Some("dieci_cara")), cell("c", Some("ab")), cell("n", Some("123.45")), cell("b", Some("1011"))] }];
+            let stmts = plan(&sessions, "c1", "public", "lim", &ok).await.unwrap();
+            execute(&q, &sessions, "c1", &stmts).await.unwrap();
+            assert_eq!(q.query(&sessions, "c1", LIM).await.unwrap().rows, [vec![s("dieci_cara"), s("ab "), s("123.45"), s("1011")]]);
 
             // tabella senza chiave primaria, tabella inesistente, colonna sconosciuta
             let e = plan(&sessions, "c1", "public", "nopk", &[RowEdit::Insert { values: vec![cell("a", Some("1"))] }]).await.unwrap_err();

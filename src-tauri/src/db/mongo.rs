@@ -1,7 +1,8 @@
 //! Sessione, albero, ricerche e modifiche MongoDB (driver ufficiale, TLS `rustls`). Il `Client` si costruisce da
 //! `ClientOptions` programmatiche: mai una URI con la password. Filtri, ordinamenti, proiezioni e pipeline arrivano dalla
 //! WebView come testo JSON esteso (rilassato o canonico) e il core li trasforma in documenti BSON: niente è mai
-//! valutato come codice. I documenti tornano come JSON esteso rilassato (stringhe) più le colonne di primo livello.
+//! valutato come codice. Le celle sono JSON esteso rilassato (da leggere); il documento intero per l'editor e l'`_id`
+//! di ogni riga sono JSON esteso canonico, che conserva i tipi (`$numberLong`, `$numberDouble`…) all'andata e al ritorno.
 use super::pg::{sanitize, Emitter, CONNECT_TIMEOUT, TIMED_OUT, UNREACHABLE};
 use super::pg_query::{truncate_cell, QueryColumn, QueryPage, QueryResult, EXPIRED, MAX_TOTAL, PAGE};
 use super::tunnel::{self, Tunnel};
@@ -31,6 +32,8 @@ pub const BTN_SAVE: &str = "Salva";
 pub const BTN_INSERT: &str = "Inserisci";
 pub const BTN_DELETE: &str = "Elimina";
 pub const BTN_RUN: &str = "Esegui";
+/// Oltre questa dimensione (JSON canonico) il documento non va all'editor: la riga non è modificabile.
+pub const MAX_DOC: usize = 1024 * 1024;
 
 pub fn is_mongo_result(result_id: u64) -> bool {
     result_id >= ID_BASE
@@ -189,11 +192,12 @@ pub fn pipeline_writes(stages: &[Document]) -> bool {
 // BSON → JSON esteso rilassato, colonne e celle
 // ---------------------------------------------------------------------------------------------------------------
 
-fn leaf_json(b: &Bson) -> String {
-    serde_json::to_string(&b.clone().into_relaxed_extjson()).unwrap_or_else(|_| "null".into())
+fn leaf_json(b: &Bson, canonical: bool) -> String {
+    let v = if canonical { b.clone().into_canonical_extjson() } else { b.clone().into_relaxed_extjson() };
+    serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
 }
 
-fn write_json(b: &Bson, pretty: bool, level: usize, out: &mut String) {
+fn write_json(b: &Bson, pretty: bool, canonical: bool, level: usize, out: &mut String) {
     let nl = |out: &mut String, lv: usize| {
         if pretty {
             out.push('\n');
@@ -211,7 +215,7 @@ fn write_json(b: &Bson, pretty: bool, level: usize, out: &mut String) {
                 nl(out, level + 1);
                 out.push_str(&serde_json::to_string(k).unwrap_or_default());
                 out.push_str(if pretty { ": " } else { ":" });
-                write_json(v, pretty, level + 1, out);
+                write_json(v, pretty, canonical, level + 1, out);
             }
             nl(out, level);
             out.push('}');
@@ -224,19 +228,34 @@ fn write_json(b: &Bson, pretty: bool, level: usize, out: &mut String) {
                     out.push(',');
                 }
                 nl(out, level + 1);
-                write_json(v, pretty, level + 1, out);
+                write_json(v, pretty, canonical, level + 1, out);
             }
             nl(out, level);
             out.push(']');
         }
-        other => out.push_str(&leaf_json(other)),
+        other => out.push_str(&leaf_json(other, canonical)),
     }
 }
 
-/// JSON esteso rilassato del documento, con l'ordine dei campi originale (`pretty` = rientrato, per l'editor).
+/// JSON esteso rilassato del documento, con l'ordine dei campi originale (`pretty` = rientrato).
 pub fn doc_json(d: &Document, pretty: bool) -> String {
     let mut s = String::new();
-    write_json(&Bson::Document(d.clone()), pretty, 0, &mut s);
+    write_json(&Bson::Document(d.clone()), pretty, false, 0, &mut s);
+    s
+}
+
+/// JSON esteso canonico (rientrato) del documento, per l'editor: si rilegge negli stessi tipi (un `Int64` resta
+/// `Int64`, un `Double` intero resta `Double`).
+pub fn doc_canonical(d: &Document) -> String {
+    let mut s = String::new();
+    write_json(&Bson::Document(d.clone()), true, true, 0, &mut s);
+    s
+}
+
+/// JSON esteso canonico compatto di un valore (l'`_id` passato alla WebView e ridato così com'è).
+pub fn value_canonical(b: &Bson) -> String {
+    let mut s = String::new();
+    write_json(b, false, true, 0, &mut s);
     s
 }
 
@@ -246,7 +265,7 @@ pub fn cell_text(b: &Bson) -> String {
         Bson::String(s) => s.clone(),
         other => {
             let mut s = String::new();
-            write_json(other, false, 0, &mut s);
+            write_json(other, false, false, 0, &mut s);
             s
         }
     }
@@ -270,7 +289,8 @@ pub fn columns_of(docs: &[Document]) -> Vec<String> {
 }
 
 struct Built {
-    docs: Vec<String>,
+    docs: Vec<Option<String>>,
+    ids: Vec<Option<String>>,
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Option<String>>>,
     truncated: Vec<[usize; 2]>,
@@ -294,7 +314,14 @@ fn build(docs: &[Document]) -> Built {
         rows.push(row);
     }
     Built {
-        docs: docs.iter().map(|d| doc_json(d, true)).collect(),
+        docs: docs
+            .iter()
+            .map(|d| {
+                let j = doc_canonical(d);
+                (j.len() <= MAX_DOC).then_some(j)
+            })
+            .collect(),
+        ids: docs.iter().map(|d| d.get("_id").map(value_canonical)).collect(),
         columns: cols.into_iter().map(|name| QueryColumn { name }).collect(),
         rows,
         truncated,
@@ -397,7 +424,10 @@ pub fn classify(auth_kind: bool, selection: bool, code: Option<i32>, code_name: 
             _ => format!("Errore del server: {clean} (codice {})", code.unwrap_or_default()),
         };
     }
-    if ["certificate", "handshake", "tls", "ssl", "invalid peer"].iter().any(|k| low.contains(k)) {
+    if low.contains("certificate") {
+        return format!("Errore TLS: {clean}. {}", super::pg::CERT_HINT);
+    }
+    if ["handshake", "tls", "ssl", "invalid peer"].iter().any(|k| low.contains(k)) {
         return format!("Errore TLS: {clean}");
     }
     if selection || ["connection refused", "timed out", "timeout", "dns", "no route", "unreachable", "connection reset", "broken pipe", "os error"].iter().any(|k| low.contains(k)) {
@@ -723,7 +753,7 @@ impl MongoSessions {
         lock(&self.results).insert(rid, Arc::new(AsyncMutex::new(open)));
         lock(&self.by_conn).insert(id.to_string(), rid);
         let result_id = Some(rid);
-        Ok(QueryResult { result_id, columns: built.columns, rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, ..Default::default() })
+        Ok(QueryResult { result_id, columns: built.columns, rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, ids: built.ids, ..Default::default() })
     }
 
     pub async fn more(&self, result_id: u64) -> Result<QueryPage, String> {
@@ -748,7 +778,7 @@ impl MongoSessions {
         let has_more = more_left(&mut open, &mut notices);
         open.docs.extend(docs);
         drop(open);
-        Ok(QueryPage { rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, columns: built.columns })
+        Ok(QueryPage { rows: built.rows, has_more, truncated: built.truncated, notices, docs: built.docs, ids: built.ids, columns: built.columns })
     }
 
     /// Per l'esportazione: tutti i documenti del risultato (quelli già consegnati, tenuti in copia, più i restanti, fino
@@ -789,23 +819,23 @@ impl MongoSessions {
 
     pub async fn replace(&self, id: &str, db: &str, coll: &str, key: &Bson, doc: Document) -> Result<(), String> {
         let (_, c) = self.collection(id, db, coll)?;
-        let r = c.replace_one(doc! { "_id": key.clone() }, doc).await.map_err(|e| map_error(&e, None))?;
+        let r = c.replace_one(id_filter(key), doc).await.map_err(|e| map_error(&e, None))?;
         if r.matched_count != 1 {
             return Err("Nessun documento con questo _id: non modificato".into());
         }
         Ok(())
     }
 
-    /// Inserisce e restituisce l'`_id` (JSON esteso rilassato).
+    /// Inserisce e restituisce l'`_id` (JSON esteso canonico).
     pub async fn insert(&self, id: &str, db: &str, coll: &str, doc: Document) -> Result<String, String> {
         let (_, c) = self.collection(id, db, coll)?;
         let r = c.insert_one(doc).await.map_err(|e| map_error(&e, None))?;
-        Ok(cell_text(&r.inserted_id))
+        Ok(value_canonical(&r.inserted_id))
     }
 
     pub async fn delete(&self, id: &str, db: &str, coll: &str, key: &Bson) -> Result<(), String> {
         let (_, c) = self.collection(id, db, coll)?;
-        let r = c.delete_one(doc! { "_id": key.clone() }).await.map_err(|e| map_error(&e, None))?;
+        let r = c.delete_one(id_filter(key)).await.map_err(|e| map_error(&e, None))?;
         if r.deleted_count != 1 {
             return Err("Nessun documento con questo _id: non eliminato".into());
         }
@@ -851,6 +881,11 @@ fn more_left(o: &mut Open, notices: &mut Vec<String>) -> bool {
         return false;
     }
     true
+}
+
+/// Filtro per un solo `_id`: `$eq`, così un `_id` che sembra un operatore (`{"$gt": ""}`) resta un valore.
+pub fn id_filter(key: &Bson) -> Document {
+    doc! { "_id": { "$eq": key.clone() } }
 }
 
 /// Testo del dialogo di conferma per una modifica o un'eliminazione.
@@ -986,7 +1021,53 @@ mod tests {
         let cell = b.rows[0][1].as_ref().unwrap();
         assert!(cell.len() <= super::super::pg_query::MAX_CELL && cell.chars().all(|c| c == 'é'));
         // il documento intero resta disponibile per l'editor
-        assert!(b.docs[0].contains(&big));
+        assert!(b.docs[0].as_ref().unwrap().contains(&big));
+    }
+
+    #[test]
+    fn editor_round_trip_keeps_types() {
+        let mut d = Document::new();
+        d.insert("_id", Bson::Int64(1 << 60));
+        d.insert("small_long", Bson::Int64(5));
+        d.insert("int", Bson::Int32(3));
+        d.insert("whole_double", Bson::Double(1.0));
+        d.insert("nested", doc! { "l": Bson::Int64(7), "arr": [Bson::Int64(1), Bson::Double(2.0)] });
+        // il testo dell'editor (canonico) si rilegge nello stesso documento, tipo per tipo
+        let text = doc_canonical(&d);
+        assert!(text.contains(r#""small_long": {"$numberLong":"5"}"#), "{text}");
+        assert!(text.contains(r#""whole_double": {"$numberDouble":"1.0"}"#), "{text}");
+        assert_eq!(parse_document("Documento non valido", &text, false).unwrap(), d);
+        // col JSON rilassato l'Int64 piccolo diventerebbe Int32
+        assert_ne!(parse_document("F", &doc_json(&d, true), false).unwrap(), d);
+    }
+
+    #[test]
+    fn ids_are_opaque_canonical_text() {
+        for id in [Bson::Int64(1 << 60), Bson::Double(1.0), Bson::ObjectId(ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap()), Bson::String("x".into())] {
+            let t = value_canonical(&id);
+            assert_eq!(parse_value("_id non valido", &t).unwrap(), id, "{t}");
+        }
+        assert_eq!(value_canonical(&Bson::Int64(1 << 60)), r#"{"$numberLong":"1152921504606846976"}"#);
+        let b = build(&[doc! { "_id": Bson::Double(1.0), "a": 1 }, doc! { "a": 2 }]);
+        assert_eq!(b.ids, [Some(r#"{"$numberDouble":"1.0"}"#.to_string()), None]);
+    }
+
+    #[test]
+    fn id_filter_uses_eq() {
+        let op = parse_value("_id", r#"{"$gt": ""}"#).unwrap();
+        let f = id_filter(&op);
+        assert_eq!(f, doc! { "_id": { "$eq": { "$gt": "" } } });
+    }
+
+    #[test]
+    fn oversized_documents_are_not_sent_to_the_editor() {
+        let mut d = Document::new();
+        d.insert("_id", 1);
+        d.insert("big", "x".repeat(MAX_DOC + 1));
+        let b = build(&[d, doc! { "_id": 2 }]);
+        assert_eq!(b.docs[0], None);
+        assert!(b.docs[1].is_some());
+        assert_eq!(b.ids[0].as_deref(), Some(r#"{"$numberInt":"1"}"#));
     }
 
     #[test]
