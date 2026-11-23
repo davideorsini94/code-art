@@ -399,8 +399,8 @@ pub fn focus_conversation(app: &AppHandle, life: &Lifecycle, session_id: &str, p
 }
 
 /// Icona del Dock cliccata senza finestre visibili (`RunEvent::Reopen`): se una sola conversazione notificata
-/// aspetta, si va a lei (ripiego quando il click sulla notifica non arriva); altrimenti si riapre il progetto
-/// usato più di recente (o la finestra di benvenuto).
+/// aspetta, si va a lei (ripiego quando il click sulla notifica non arriva); altrimenti si riaprono i progetti
+/// dell'ultima sessione, poi il progetto usato più di recente (o la finestra di benvenuto).
 pub fn on_reopen(app: &AppHandle, has_visible_windows: bool) {
     // con una finestra già visibile l'app viene solo portata avanti dal sistema
     if has_visible_windows {
@@ -409,6 +409,10 @@ pub fn on_reopen(app: &AppHandle, has_visible_windows: bool) {
     let life = app.state::<Arc<Lifecycle>>();
     if let Some((session_id, project_id)) = life.single_pending() {
         return focus_conversation(app, &life, &session_id, &project_id);
+    }
+    if app.state::<Store>().open_projects().is_ok_and(|l| !l.is_empty()) {
+        let _ = projects::restore_windows(app);
+        return;
     }
     match app.state::<Store>().list_projects().ok().and_then(|l| l.into_iter().next()) {
         Some(p) => {
