@@ -96,6 +96,7 @@ pub fn run() {
                 let _ = handle.emit("db:state", e);
             });
             app.manage(Arc::new(db::mongo::MongoSessions::new(ssh_conns.clone(), db_emit.clone())));
+            app.manage(Arc::new(db::ora::OraSessions::new(ssh_conns.clone(), db_emit.clone())));
             app.manage(Arc::new(db::pg::Sessions::new(ssh_conns, db_emit)));
             app.manage(Arc::new(db::pg_query::Queries::new()));
             app.manage(Arc::new(ssh::transfer::Transfers::default()));
@@ -272,6 +273,9 @@ pub fn run() {
                     s.close_all();
                 }
                 if let Some(s) = app.try_state::<Arc<db::mongo::MongoSessions>>() {
+                    s.close_all();
+                }
+                if let Some(s) = app.try_state::<Arc<db::ora::OraSessions>>() {
                     s.close_all();
                 }
                 // connessioni SSH condivise: `ssh -O exit` prima di fermare i processi (servono `run_tool`)

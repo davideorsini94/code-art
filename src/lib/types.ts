@@ -138,7 +138,7 @@ export type LspExitEvent = { id: number; code: number }
 export type ProjectBranch = { repo: string; name: string }
 
 // ---- Database (specchio di src-tauri/src/db/mod.rs) ----
-export type DbKind = 'postgres' | 'mongo'
+export type DbKind = 'postgres' | 'mongo' | 'oracle'
 export type DbTls = 'prefer' | 'require' | 'disable'
 export type DbConnection = {
   id: string

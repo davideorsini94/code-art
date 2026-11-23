@@ -3,6 +3,7 @@
 //! stanno nei moduli dei driver.
 pub mod export;
 pub mod mongo;
+pub mod ora;
 pub mod oracle_client;
 pub mod pg;
 pub mod pg_edit;
@@ -27,6 +28,7 @@ pub const MAX_HISTORY_BYTES: usize = 100 * 1024;
 pub enum DbKind {
     Postgres,
     Mongo,
+    Oracle,
 }
 
 impl DbKind {
@@ -34,12 +36,14 @@ impl DbKind {
         match self {
             DbKind::Postgres => "postgres",
             DbKind::Mongo => "mongo",
+            DbKind::Oracle => "oracle",
         }
     }
     pub fn parse(s: &str) -> Option<DbKind> {
         match s {
             "postgres" => Some(DbKind::Postgres),
             "mongo" => Some(DbKind::Mongo),
+            "oracle" => Some(DbKind::Oracle),
             _ => None,
         }
     }
@@ -47,6 +51,7 @@ impl DbKind {
         match self {
             DbKind::Postgres => 5432,
             DbKind::Mongo => 27017,
+            DbKind::Oracle => 1521,
         }
     }
 }
@@ -165,6 +170,14 @@ pub fn validate_connection(c: &DbConnectionInput) -> Result<(), String> {
     if let Some(d) = &c.database {
         validate_text("Database", d)?;
     }
+    if c.kind == DbKind::Oracle {
+        // Oracle: il campo `database` è il nome del servizio (obbligatorio) e l'utente non può mancare
+        // (senza utente sarebbe l'autenticazione del sistema operativo, non supportata)
+        ora::validate_service(c.database.as_deref().unwrap_or(""))?;
+        if non_empty(&c.user).is_none() {
+            return Err("Utente: campo obbligatorio per Oracle".into());
+        }
+    }
     Ok(())
 }
 
@@ -279,10 +292,12 @@ pub async fn db_connection_delete(app: AppHandle, window: WebviewWindow, id: Str
     let store = ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
     crate::projects::off_main(move || {
         // una sessione aperta (anche da un'altra finestra) e il suo tunnel si chiudono prima
         sessions.disconnect(&id);
         mongo_sessions.disconnect(&id);
+        ora_sessions.disconnect(&id);
         delete_connection(&store, &DbKeychain, &id)
     })
     .await
@@ -324,7 +339,8 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
     let store = ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
-    let (conn, password, server) = crate::projects::off_main(move || {
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+    let (conn, password, server, client_dir) = crate::projects::off_main(move || {
         let conn = store.db_connections()?.into_iter().find(|c| c.id == id).ok_or_else(|| "Connessione non trovata".to_string())?;
         let server = match &conn.ssh_server_id {
             Some(s) => Some(ssh::find_server(&store, ssh::read_user_config().as_deref(), s)?),
@@ -332,12 +348,15 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
         };
         // senza password salvata si prova comunque (autenticazione `trust`); se serve, il server risponde `auth`
         let password = keychain::get(keychain::DB_SERVICE, &conn.id).unwrap_or(None);
-        Ok((conn, password, server))
+        // la cartella di Instant Client sta nelle impostazioni (scritta solo dal core); serve solo a Oracle
+        let client_dir = store.setting_get(oracle_client::CLIENT_DIR_KEY)?.filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+        Ok((conn, password, server, client_dir))
     })
     .await?;
     match conn.kind {
         DbKind::Postgres => sessions.connect(&conn.id, pg::PgParams::from_connection(&conn), password, server).await,
         DbKind::Mongo => mongo_sessions.connect(&conn.id, mongo::MongoParams::from_connection(&conn), password, server).await,
+        DbKind::Oracle => ora_sessions.connect(&conn.id, ora::OraParams::from_connection(&conn), password, server, client_dir).await,
     }
 }
 
@@ -346,9 +365,11 @@ pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) ->
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
     crate::projects::off_main(move || {
         sessions.disconnect(&id);
         mongo_sessions.disconnect(&id);
+        ora_sessions.disconnect(&id);
         Ok(())
     })
     .await
@@ -360,6 +381,7 @@ pub async fn db_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<ssh:
     ssh::trusted_store(&app, &window)?;
     let mut all = app.state::<Arc<pg::Sessions>>().states();
     all.extend(app.state::<Arc<mongo::MongoSessions>>().states());
+    all.extend(app.state::<Arc<ora::OraSessions>>().states());
     all.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(all)
 }
@@ -775,9 +797,25 @@ mod tests {
     #[test]
     fn kind_and_tls_wire_names() {
         assert_eq!(serde_json::to_string(&DbKind::Mongo).unwrap(), "\"mongo\"");
+        assert_eq!(serde_json::to_string(&DbKind::Oracle).unwrap(), "\"oracle\"");
+        assert_eq!(DbKind::parse("oracle"), Some(DbKind::Oracle));
+        assert_eq!(DbKind::Oracle.default_port(), 1521);
         assert_eq!(serde_json::to_string(&DbTls::Prefer).unwrap(), "\"prefer\"");
         let i: DbConnectionInput =
             serde_json::from_str(r#"{"kind":"postgres","name":"n","host":"h","tls":"disable","sshServerId":null}"#).unwrap();
         assert_eq!((i.kind, i.tls, i.accept_invalid_certs, i.port), (DbKind::Postgres, DbTls::Disable, false, None));
+    }
+
+    #[test]
+    fn oracle_needs_service_and_user() {
+        let mut i = input("o", "db.test");
+        i.kind = DbKind::Oracle;
+        assert!(validate_connection(&i).unwrap_err().starts_with("Servizio"));
+        i.database = Some("ORCL".into());
+        assert!(validate_connection(&i).unwrap_err().starts_with("Utente"));
+        i.user = Some("scott".into());
+        assert!(validate_connection(&i).is_ok());
+        i.database = Some("a b".into());
+        assert!(validate_connection(&i).is_err());
     }
 }

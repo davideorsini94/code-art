@@ -10,7 +10,7 @@
   let { connection: connProp = null, onclose }: { connection?: DbConnection | null; onclose: () => void } = $props()
   const connection = untrack(() => connProp)
 
-  const DEFAULT_PORT: Record<DbKind, string> = { postgres: '5432', mongo: '27017' }
+  const DEFAULT_PORT: Record<DbKind, string> = { postgres: '5432', mongo: '27017', oracle: '1521' }
 
   let kind = $state<DbKind>(connection?.kind ?? 'postgres')
   let name = $state(connection?.name ?? '')
