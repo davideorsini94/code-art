@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DbConnection, DbQueryPage, DbQueryResult, PgColumn, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
+import type { DbConnection, DbQueryPage, DbQueryResult, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -206,6 +206,12 @@ export const dbStates = () => invoke<DbStateEvent[]>('db_states')
 // ---- Database: Postgres (albero e query; `Err('annullato')` = conferma rifiutata, `Err('risultato scaduto…')` = riesegui) ----
 export const dbPgTree = (id: string) => invoke<PgTree>('db_pg_tree', { id })
 export const dbPgColumns = (id: string, schema: string, table: string) => invoke<PgColumn[]>('db_pg_columns', { id, schema, table })
+/** Anteprima SQL leggibile delle modifiche (mai eseguita). */
+export const dbPgPreviewEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
+  invoke<string[]>('db_pg_preview_edits', { id, schema, table, edits })
+/** Conferma nativa, poi una transazione; `Err('annullato')` = rifiutata. Ogni UPDATE/DELETE deve toccare una sola riga. */
+export const dbPgApplyEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
+  invoke<{ affected: number }>('db_pg_apply_edits', { id, schema, table, edits })
 /** Una sola SELECT/WITH/VALUES/TABLE: cursore e pagine da 500; altrimenti tutto in una volta (`affected` per istruzione). */
 export const dbQuery = (id: string, text: string) => invoke<DbQueryResult>('db_query', { id, text })
 export const dbQueryMore = (resultId: number) => invoke<DbQueryPage>('db_query_more', { resultId })

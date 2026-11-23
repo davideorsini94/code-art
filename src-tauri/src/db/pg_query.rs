@@ -354,7 +354,7 @@ pub fn truncate_cell(s: &str) -> (String, bool) {
     (s[..e].to_string(), true)
 }
 
-fn qerr(e: &tokio_postgres::Error) -> String {
+pub fn qerr(e: &tokio_postgres::Error) -> String {
     if let Some(d) = e.as_db_error() {
         if d.code().code() == "57014" {
             return CANCELLED.into();
@@ -466,6 +466,15 @@ impl Queries {
 
     fn conn_lock(&self, id: &str) -> Arc<AsyncMutex<Option<u64>>> {
         lock(&self.conns).entry(id.to_string()).or_default().clone()
+    }
+
+    /// Connessione in esclusiva (le altre query aspettano): chiude un eventuale risultato aperto, che tiene una
+    /// transazione, e dà la sessione. Il lucchetto resta preso finché vive la guardia.
+    pub async fn exclusive(&self, sessions: &Sessions, id: &str) -> Result<(tokio::sync::OwnedMutexGuard<Option<u64>>, Handle), String> {
+        let mut guard = self.conn_lock(id).lock_owned().await;
+        let h = sessions.handle(id)?;
+        self.close_locked(&mut guard, Some(&h)).await;
+        Ok((guard, h))
     }
 
     /// Chiude il risultato aperto della connessione (lucchetto già preso).

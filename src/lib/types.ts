@@ -211,6 +211,12 @@ export type PgTable = { name: string; kind: 'table' | 'view' }
 export type PgSchema = { name: string; tables: PgTable[] }
 export type PgTree = { schemas: PgSchema[] }
 export type PgColumn = { name: string; type: string; nullable: boolean; isPk: boolean }
+/** Colonna e valore testuale (`null` = NULL, distinto da ''); i tipi li decide il core dal catalogo, mai la WebView. */
+export type PgCell = [column: string, value: string | null]
+export type PgRowEdit =
+  | { kind: 'update'; pk: PgCell[]; set: PgCell[] }
+  | { kind: 'insert'; values: PgCell[] }
+  | { kind: 'delete'; pk: PgCell[] }
 /** Il protocollo semplice non dà il tipo delle colonne: solo il nome. */
 export type DbQueryColumn = { name: string }
 /**

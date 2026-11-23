@@ -328,7 +328,7 @@ const TRUST_GATED: &[&str] = &[
     "ssh_connect", "ssh_disconnect", "ssh_states", "ssh_home", "ssh_list", "ssh_read", "ssh_write", "ssh_mkdir", "ssh_rename",
     "ssh_delete", "ssh_upload", "ssh_download", "pty_spawn_ssh", "db_connections", "db_connection_save", "db_connection_delete",
     "db_password_set", "db_password_clear", "db_history", "db_history_add",
-    "db_connect", "db_disconnect", "db_states", "db_pg_tree", "db_pg_columns", "db_query", "db_query_more", "db_query_close", "db_query_cancel",
+    "db_connect", "db_disconnect", "db_states", "db_pg_tree", "db_pg_columns", "db_pg_preview_edits", "db_pg_apply_edits", "db_query", "db_query_more", "db_query_close", "db_query_cancel",
 ];
 /// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel`, `lsp_stop` e `ssh_transfer_cancel`
 /// fermano soltanto processi già avviati dalla finestra stessa.

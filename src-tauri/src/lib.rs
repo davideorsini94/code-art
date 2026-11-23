@@ -172,6 +172,8 @@ pub fn run() {
             db::db_states,
             db::db_pg_tree,
             db::db_pg_columns,
+            db::db_pg_preview_edits,
+            db::db_pg_apply_edits,
             db::db_query,
             db::db_query_more,
             db::db_query_close,

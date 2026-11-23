@@ -2,6 +2,7 @@
 //! password (solo nel Portachiavi, servizio `Code Art DB`) e la cronologia delle query. Niente rete qui: le sessioni
 //! stanno nei moduli dei driver.
 pub mod pg;
+pub mod pg_edit;
 pub mod pg_query;
 #[cfg(test)]
 pub mod testutil;
@@ -360,6 +361,35 @@ pub async fn db_pg_columns(app: AppHandle, window: WebviewWindow, id: String, sc
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     pg_query::columns(&sessions, &id, &schema, &table).await
+}
+
+/// Anteprima leggibile delle istruzioni che le modifiche produrrebbero (valori inseriti solo per la lettura, mai
+/// eseguiti). Le colonne vengono dal catalogo del server; nomi sconosciuti o tabella senza chiave primaria = errore.
+#[tauri::command]
+pub async fn db_pg_preview_edits(app: AppHandle, window: WebviewWindow, id: String, schema: String, table: String, edits: Vec<pg_edit::RowEdit>) -> Result<Vec<String>, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    Ok(pg_edit::previews(&pg_edit::plan(&sessions, &id, &schema, &table, &edits).await?))
+}
+
+/// Applica le modifiche: conferma nativa del core («Applica modifiche», «Annulla» predefinito) con il riepilogo, poi
+/// una sola transazione; ogni istruzione deve toccare esattamente una riga, altrimenti `ROLLBACK`.
+#[tauri::command]
+pub async fn db_pg_apply_edits(app: AppHandle, window: WebviewWindow, id: String, schema: String, table: String, edits: Vec<pg_edit::RowEdit>) -> Result<pg_edit::ApplyResult, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+    let stmts = pg_edit::plan(&sessions, &id, &schema, &table, &edits).await?;
+    let message = pg_edit::confirm_message(&stmts);
+    let confirm = crate::git::write::NativeConfirm { app: app.clone(), window: window.clone() };
+    let ok = crate::projects::off_main(move || {
+        use crate::git::write::Confirm;
+        Ok(confirm.confirm(pg_edit::APPLY_TITLE, &message, pg_edit::BTN_APPLY))
+    })
+    .await?;
+    if !ok {
+        return Err(pg_query::DECLINED.into());
+    }
+    pg_edit::execute(app.state::<Arc<pg_query::Queries>>().inner(), &sessions, &id, &stmts).await
 }
 
 /// Esegue un testo SQL. `UPDATE`/`DELETE` senza `WHERE`, `DROP` e `TRUNCATE` (controllo lessicale di aiuto) chiedono
