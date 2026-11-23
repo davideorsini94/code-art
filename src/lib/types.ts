@@ -228,12 +228,22 @@ export type DbQueryPage = {
   hasMore: boolean
   truncated?: [number, number][]
   notices?: string[]
-  /** Solo MongoDB: il documento intero (JSON esteso rilassato) di ogni riga, e le colonne di questa pagina. */
-  docs?: string[]
+  /**
+   * Solo MongoDB: il documento intero (JSON esteso canonico, `null` oltre 1 MB: non modificabile) e l'`_id` (JSON esteso
+   * canonico, testo opaco da ridare così com'è al core: mai `JSON.parse`) di ogni riga, e le colonne di questa pagina.
+   */
+  docs?: (string | null)[]
+  ids?: (string | null)[]
   columns?: DbQueryColumn[]
 }
-/** `resultId` c'è per ogni risultato con righe (tenuto dal core, anche finito: serve a `dbExport`) fino a `dbQueryClose` o a una nuova query della connessione; `affected` = conteggio di ogni istruzione (senza cursore). */
-export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[] }
+/** Tabella letta da una query modificabile in griglia (nomi esatti del catalogo), decisa dal core. */
+export type DbEditableTable = { schema: string; table: string }
+/**
+ * `resultId` c'è per ogni risultato con righe (tenuto dal core, anche finito: serve a `dbExport`) fino a `dbQueryClose` o a
+ * una nuova query della connessione (anche da un'altra scheda: un risultato per connessione); `affected` = conteggio di ogni
+ * istruzione (senza cursore); `editableTable` solo per una lettura semplice di una tabella (`SELECT * FROM t [WHERE …]`).
+ */
+export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[]; editableTable?: DbEditableTable | null }
 
 /** Esito di `dbExport`: percorso scelto nel selettore nativo e righe scritte (il risultato è poi chiuso). */
 export type DbExported = { path: string; rows: number }

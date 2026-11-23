@@ -9,9 +9,9 @@
   import * as ipc from '../../lib/ipc'
   import { db } from '../../lib/stores/db.svelte'
   import { editor, type Tab } from '../../lib/stores/editor.svelte'
-  import { appendPage, emptyGrid, fmtInt, quoteIdent, selectAllSql, type GridData } from '../../lib/db/grid'
+  import { appendPage, emptyGrid, fmtInt, selectAllSql, type GridData } from '../../lib/db/grid'
   import { editCount, emptyEdits, toRowEdits, type PendingEdits } from '../../lib/db/edits'
-  import type { DbHistoryEntry, DbQueryResult, PgColumn } from '../../lib/types'
+  import type { DbEditableTable, DbHistoryEntry, DbQueryResult, PgColumn } from '../../lib/types'
 
   type Monaco = typeof import('monaco-editor')
   type ICode = import('monaco-editor').editor.IStandaloneCodeEditor
@@ -116,14 +116,26 @@
   // ---- modifica in griglia (Postgres) ----
   let edits = $state.raw<PendingEdits>(emptyEdits())
   let pgCols = $state.raw<PgColumn[] | null>(null)
-  // il testo eseguito legge davvero la tabella della scheda (`SELECT * FROM "s"."t"` senza JOIN)
-  let ranTable = $state(false)
-  const editSchema = q.schema ?? 'public'
+  // la tabella letta dal testo eseguito, decisa dal core (una sola `SELECT * FROM t` con al più WHERE/ORDER BY/LIMIT/OFFSET)
+  let editTarget = $state.raw<DbEditableTable | null>(null)
+  let colsSeq = 0
+  function loadCols(t: DbEditableTable | null) {
+    const seq = ++colsSeq
+    pgCols = null
+    if (!t) return
+    void Promise.resolve()
+      .then(() => ipc.dbPgColumns(connId, t.schema, t.table))
+      .then((c) => {
+        if (seq === colsSeq) pgCols = c
+      })
+      .catch(() => {})
+  }
   const editInfo = $derived.by((): { pk?: number[]; note?: string } => {
     if (!isPg || !hasGrid) return {}
-    if (q.table === undefined || !ranTable) return { note: 'Sola lettura: risultato di una query' }
+    if (!editTarget) return { note: 'Sola lettura: risultato di una query' }
+    const et = editTarget
     const t = db.trees[connId]
-    const kind = t?.kind === 'postgres' ? t.tree.schemas.find((x) => x.name === editSchema)?.tables.find((x) => x.name === q.table)?.kind : undefined
+    const kind = t?.kind === 'postgres' ? t.tree.schemas.find((x) => x.name === et.schema)?.tables.find((x) => x.name === et.table)?.kind : undefined
     if (kind === 'view') return { note: 'Sola lettura: vista' }
     if (!pgCols) return {}
     const names = pgCols.filter((c) => c.isPk).map((c) => c.name)
@@ -134,24 +146,46 @@
   })
   const pendingCount = $derived(editCount(edits))
   const rowEdits = $derived(editInfo.pk ? toRowEdits(edits, grid.columns, editInfo.pk) : [])
-  onMount(() => {
-    if (!isPg || q.table === undefined) return
-    void Promise.resolve()
-      .then(() => ipc.dbPgColumns(connId, editSchema, q.table!))
-      .then((c) => (pgCols = c))
-      .catch(() => {})
+
+  // modifiche in sospeso = scheda "modificata": chiuderla chiede Applica / Scarta / Annulla
+  $effect(() => {
+    editor.setDirty(tab.id, pendingCount > 0)
   })
+  /** Applica le modifiche in sospeso (dalla barra di chiusura): `true` se applicate. */
+  async function applyPending(): Promise<boolean> {
+    if (!editTarget || rowEdits.length === 0) return pendingCount === 0
+    error = null
+    info = null
+    try {
+      await ipc.dbPgApplyEdits(connId, editTarget.schema, editTarget.table, rowEdits)
+      edits = emptyEdits()
+      return true
+    } catch (e) {
+      const msg = errorText(e)
+      if (/annullat/i.test(msg)) info = 'Applicazione annullata: le modifiche restano in sospeso'
+      else error = msg
+      return false
+    }
+  }
+  editor.setApplier(untrack(() => tab.key), applyPending)
+  onDestroy(() => editor.setApplier(untrack(() => tab.key), undefined))
 
   // ---- documenti MongoDB ----
-  let docs = $state.raw<string[]>([])
+  let docs = $state.raw<(string | null)[]>([])
+  let ids = $state.raw<(string | null)[]>([])
   let target = $state({ database: '', collection: '', find: false })
-  let docEdit = $state<{ doc: string | null; database: string; collection: string } | null>(null)
+  let docEdit = $state<{ doc: string | null; id: string | null; database: string; collection: string } | null>(null)
   const canOpenDoc = $derived(!isPg && target.find && hasGrid)
   function openDoc(r: number) {
-    if (docs[r] !== undefined) docEdit = { doc: docs[r], database: target.database, collection: target.collection }
+    if (docs[r] === undefined) return
+    if (docs[r] === null) {
+      info = 'Documento più grande di 1 MB: non si modifica da qui'
+      return
+    }
+    docEdit = { doc: docs[r], id: ids[r] ?? null, database: target.database, collection: target.collection }
   }
   function newDoc() {
-    if (mg.collection) docEdit = { doc: null, database: mg.database, collection: mg.collection }
+    if (mg.collection) docEdit = { doc: null, id: null, database: mg.database, collection: mg.collection }
   }
   function docDone() {
     docEdit = null
@@ -161,8 +195,6 @@
     edits = emptyEdits()
     await run()
   }
-  const normSql = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase()
-  const isTableRead = (t: string) => q.table !== undefined && normSql(t).startsWith(normSql(`select * from ${quoteIdent(editSchema)}.${quoteIdent(q.table)}`)) && !/\bjoin\b/.test(normSql(t))
 
   const offline = $derived(db.stateOf(connId) !== 'connected')
   const showClosed = $derived(attempted && offline)
@@ -181,6 +213,11 @@
     resultKey++
     edits = emptyEdits()
     docs = res.docs ?? []
+    ids = res.ids ?? []
+    if (isPg) {
+      editTarget = res.editableTable ?? null
+      loadCols(editTarget)
+    }
     resultId = res.resultId
     editor.setQueryResult(tab.key, res.resultId)
     hasMore = res.hasMore
@@ -218,7 +255,6 @@
           : await ipc.dbMongoAggregate(connId, mg.database, mg.collection, mg.pipeline)
       void Promise.resolve(ipc.dbHistoryAdd(connId, text)).catch(() => {})
       if (seq === runSeq) {
-        ranTable = isPg && isTableRead(text)
         target = { database: mg.database, collection: mg.collection, find: !isPg && mg.mode === 'find' }
         setResult(res)
       }
@@ -249,10 +285,15 @@
       if (id !== resultId) return
       grid = appendPage(grid, page, !isPg)
       if (page.docs) docs = docs.concat(page.docs)
+      if (page.ids) ids = ids.concat(page.ids)
       hasMore = page.hasMore
       if (page.notices?.length) notices = [...notices, ...page.notices]
     } catch (e) {
+      // un errore di un risultato ormai sostituito (riesecuzione durante la pagina) non riguarda quello mostrato
+      if (id !== resultId) return
       error = errorText(e)
+      // scaduto o chiuso per inattività: niente altre richieste, si riesegue
+      if (/riesegui/i.test(error)) hasMore = false
     } finally {
       paging = false
     }
@@ -419,8 +460,8 @@
     {#if info}<div class="msg" role="status">{info}</div>{/if}
     {#each notices as n}<div class="msg note" role="status">{n}</div>{/each}
     {#if hasGrid}
-      {#if isPg && editInfo.pk && pendingCount > 0}
-        <EditBar {connId} schema={editSchema} table={q.table!} edits={rowEdits} count={pendingCount} onapplied={() => void applied()} onclear={() => (edits = emptyEdits())} />
+      {#if isPg && editInfo.pk && editTarget && pendingCount > 0}
+        <EditBar {connId} schema={editTarget!.schema} table={editTarget!.table} edits={rowEdits} count={pendingCount} onapplied={() => void applied()} onclear={() => (edits = emptyEdits())} />
       {/if}
       {#key resultKey}
         <ResultGrid columns={grid.columns} rows={grid.rows} truncated={grid.truncated} {hasMore} loading={paging} onmore={() => void more()} pk={editInfo.pk} {edits} onedit={(e) => (edits = e)} note={editInfo.note} onopen={canOpenDoc ? openDoc : undefined} />
@@ -435,7 +476,7 @@
     {/if}
   </div>
   {#if docEdit}
-    <DocEditor {connId} database={docEdit.database} collection={docEdit.collection} doc={docEdit.doc} onclose={() => (docEdit = null)} ondone={docDone} />
+    <DocEditor {connId} database={docEdit.database} collection={docEdit.collection} doc={docEdit.doc} idJson={docEdit.id} onclose={() => (docEdit = null)} ondone={docDone} />
   {/if}
 </div>
 

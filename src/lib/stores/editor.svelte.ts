@@ -89,7 +89,7 @@ export type Tab = {
   /** `editable`: il lato modificato (cartella di lavoro) si può cambiare e salvare; il lato originale resta in sola lettura. */
   diff: { before: string; after: string; editable?: boolean } | null
   viewer: Viewer
-  /** Scheda query database (mai "modificata": il testo si salva da solo). */
+  /** Scheda query database: il testo si salva da solo; è "modificata" solo con modifiche della griglia non applicate. */
   query?: QueryInfo
 }
 
@@ -203,6 +203,13 @@ class EditorStore {
     const tab: Tab = { ...this.blank(key), key, name, query }
     this.tabs = [...this.tabs, tab]
     this.active = key
+  }
+
+  /** Schede query: chi applica le modifiche della griglia in sospeso (dalla barra di chiusura). `true` = applicate. */
+  private appliers = new Map<string, () => Promise<boolean>>()
+  setApplier(key: string, apply: (() => Promise<boolean>) | undefined) {
+    if (apply) this.appliers.set(key, apply)
+    else this.appliers.delete(key)
   }
 
   setQueryResult(key: string, resultId: number | undefined) {
@@ -346,6 +353,7 @@ class EditorStore {
     if (i < 0) return
     const t = this.tabs[i]
     this.tabs = this.tabs.filter((x) => x.key !== key)
+    this.appliers.delete(key)
     if (t.query?.resultId !== undefined) void Promise.resolve(dbQueryClose(t.query.resultId)).catch(() => {})
     if (this.closing === key) this.closing = null
     if (!t.diff) {
@@ -372,7 +380,11 @@ class EditorStore {
       this.closing = null
       return
     }
-    if (choice === 'save') {
+    if (choice === 'save' && t.query) {
+      // scheda query: "Applica" le modifiche della griglia (conferma nativa del core); rifiutata o fallita = la scheda resta
+      const apply = this.appliers.get(key)
+      if (!apply || !(await apply())) return
+    } else if (choice === 'save') {
       try {
         await this.save(t.path, t.key)
       } catch {

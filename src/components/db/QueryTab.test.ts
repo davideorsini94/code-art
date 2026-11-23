@@ -167,6 +167,30 @@ describe('QueryTab', () => {
     expect(screen.getByRole('button', { name: /JSON/ })).toBeTruthy()
   })
 
+  it('l\'errore di una pagina di un risultato già sostituito non si mostra; risultato chiuso per inattività: niente altre richieste', async () => {
+    let fail: (e: unknown) => void = () => {}
+    vi.mocked(ipc.dbQuery).mockResolvedValueOnce(ok([['1']], { hasMore: true, resultId: 7 }) as never)
+    vi.mocked(ipc.dbQueryMore).mockReturnValueOnce(new Promise((_, rej) => (fail = rej)) as never)
+    const tab = open({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 't' })
+    render(QueryTab, { tab })
+    await waitFor(() => expect(ipc.dbQueryMore).toHaveBeenCalledWith(7))
+    await waitFor(() => expect(cmds.list.length).toBe(1))
+    // riesecuzione mentre la pagina è in corso: nuovo risultato, poi la pagina vecchia fallisce
+    vi.mocked(ipc.dbQuery).mockResolvedValueOnce(ok([['9']], { hasMore: false, resultId: 8 }) as never)
+    cmds.list[0]()
+    await screen.findByText('9')
+    fail('risultato scaduto, riesegui la query')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(screen.queryByRole('alert')).toBeNull()
+    cleanup()
+    editor.tabs = []
+    vi.mocked(ipc.dbQuery).mockResolvedValueOnce(ok([['1']], { hasMore: true, resultId: 9 }) as never)
+    vi.mocked(ipc.dbQueryMore).mockRejectedValueOnce('risultato chiuso dopo 90 s di inattività: riesegui la query')
+    render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 't2' }) })
+    await screen.findByText(/90 s di inattività/)
+    expect(screen.queryByRole('button', { name: /Carica altre/ })).toBeNull()
+  })
+
   it('un risultato corto con altre righe carica da solo la pagina successiva e la accoda', async () => {
     vi.mocked(ipc.dbQuery).mockResolvedValue(ok([['1']], { hasMore: true }) as never)
     vi.mocked(ipc.dbQueryMore).mockResolvedValue({ rows: [['2']], hasMore: false })
@@ -215,7 +239,7 @@ describe('QueryTab', () => {
 
   describe('modifica in griglia', () => {
     const pkCols = [{ name: 'id', type: 'int4', nullable: false, isPk: true }, { name: 'name', type: 'text', nullable: true, isPk: false }]
-    const two = () => ({ resultId: 7, columns: [{ name: 'id' }, { name: 'name' }], rows: [['1', 'Ada'], ['2', 'Bea']], hasMore: false })
+    const two = (editableTable: { schema: string; table: string } | null = { schema: 'public', table: 'u' }) => ({ resultId: 7, columns: [{ name: 'id' }, { name: 'name' }], rows: [['1', 'Ada'], ['2', 'Bea']], hasMore: false, editableTable })
     async function openEditable() {
       vi.mocked(ipc.dbQuery).mockResolvedValue(two() as never)
       vi.mocked(ipc.dbPgColumns).mockResolvedValue(pkCols as never)
@@ -272,8 +296,74 @@ describe('QueryTab', () => {
       expect(screen.queryByLabelText('Valore della cella')).toBeNull()
     })
 
+    it('la modificabilità la decide solo il core (editableTable)', async () => {
+      // scheda aperta da una tabella, ma il core dice che il testo eseguito non è una lettura semplice
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two(null) as never)
+      vi.mocked(ipc.dbPgColumns).mockResolvedValue(pkCols as never)
+      render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 'u' }) })
+      await screen.findByText(/Sola lettura: risultato di una query/)
+      expect(ipc.dbPgColumns).not.toHaveBeenCalled()
+      await fireEvent.dblClick(cell('Ada'))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      cleanup()
+      editor.tabs = []
+      // scheda nuova (nessuna tabella), ma il core riconosce la tabella: colonne e modifiche su quella
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two({ schema: 'S', table: 'Users' }) as never)
+      render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres' }) })
+      await waitFor(() => expect(cmds.eds.length).toBeGreaterThan(0))
+      cmds.eds.at(-1)!.setValue('select * from "S"."Users"')
+      cmds.list.at(-1)!()
+      await screen.findByText('Ada')
+      await waitFor(() => expect(ipc.dbPgColumns).toHaveBeenCalledWith('c1', 'S', 'Users'))
+      await waitFor(async () => {
+        await fireEvent.dblClick(cell('Ada'))
+        expect(screen.getByLabelText('Valore della cella')).toBeTruthy()
+      })
+      await fireEvent.input(screen.getByLabelText('Valore della cella'), { target: { value: 'Zoe' } })
+      await fireEvent.keyDown(screen.getByLabelText('Valore della cella'), { key: 'Enter' })
+      vi.mocked(ipc.dbPgPreviewEdits).mockResolvedValue([])
+      await fireEvent.click(screen.getByRole('button', { name: 'Anteprima' }))
+      expect(ipc.dbPgPreviewEdits).toHaveBeenCalledWith('c1', 'S', 'Users', [{ kind: 'update', pk: [['id', '1']], set: [['name', 'Zoe']] }])
+    })
+
+    it('modifiche in sospeso: la scheda è modificata e chiuderla chiede Applica / Scarta / Annulla', async () => {
+      await openEditable()
+      const t = editor.tabs[0]
+      expect(t.dirty).toBe(false)
+      await fireEvent.dblClick(cell('Ada'))
+      await fireEvent.input(screen.getByLabelText('Valore della cella'), { target: { value: 'Zoe' } })
+      await fireEvent.keyDown(screen.getByLabelText('Valore della cella'), { key: 'Enter' })
+      await waitFor(() => expect(editor.tabs[0].dirty).toBe(true))
+      editor.requestClose(t.key)
+      expect(editor.closing).toBe(t.key)
+      await editor.resolveClose('cancel')
+      expect(editor.tabs).toHaveLength(1)
+      // Applica: conferma rifiutata = la scheda resta con le modifiche
+      vi.mocked(ipc.dbPgApplyEdits).mockRejectedValueOnce('annullato')
+      editor.requestClose(t.key)
+      await editor.resolveClose('save')
+      expect(editor.tabs).toHaveLength(1)
+      expect(screen.getByText('1 modifica')).toBeTruthy()
+      // Applica riuscito: applicate e scheda chiusa
+      vi.mocked(ipc.dbPgApplyEdits).mockResolvedValueOnce({ affected: 1 })
+      await editor.resolveClose('save')
+      expect(ipc.dbPgApplyEdits).toHaveBeenLastCalledWith('c1', 'public', 'u', [{ kind: 'update', pk: [['id', '1']], set: [['name', 'Zoe']] }])
+      expect(editor.tabs).toHaveLength(0)
+    })
+
+    it('Scarta chiude la scheda senza applicare', async () => {
+      await openEditable()
+      await fireEvent.click(screen.getByText('Bea').closest('[role=gridcell]')!)
+      await fireEvent.keyDown(screen.getByRole('grid'), { key: 'Delete' })
+      await waitFor(() => expect(editor.tabs[0].dirty).toBe(true))
+      editor.requestClose(editor.tabs[0].key)
+      await editor.resolveClose('discard')
+      expect(editor.tabs).toHaveLength(0)
+      expect(ipc.dbPgApplyEdits).not.toHaveBeenCalled()
+    })
+
     it('query libera: sola lettura', async () => {
-      vi.mocked(ipc.dbQuery).mockResolvedValue(two() as never)
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two(null) as never)
       render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres' }) })
       await waitFor(() => expect(cmds.eds.length).toBe(1))
       cmds.eds[0].setValue('select 1')
@@ -285,7 +375,7 @@ describe('QueryTab', () => {
   describe('documenti MongoDB', () => {
     const doc = '{\n  "_id": {"$oid": "65a"},\n  "n": 1\n}'
     async function openDocs() {
-      vi.mocked(ipc.dbMongoFind).mockResolvedValue({ resultId: 3, columns: [{ name: '_id' }, { name: 'n' }], rows: [['65a', '1']], docs: [doc], hasMore: false } as never)
+      vi.mocked(ipc.dbMongoFind).mockResolvedValue({ resultId: 3, columns: [{ name: '_id' }, { name: 'n' }], rows: [['65a', '1']], docs: [doc], ids: ['{"$oid":"65a"}'], hasMore: false } as never)
       render(QueryTab, { tab: open({ connectionId: 'm1', kind: 'mongo', database: 'app', collection: 'users' }) })
       await screen.findByText('65a')
     }
@@ -299,6 +389,20 @@ describe('QueryTab', () => {
       await waitFor(() => expect(ipc.dbMongoReplace).toHaveBeenCalledWith('m1', 'app', 'users', '{"$oid":"65a"}', doc))
       await waitFor(() => expect(ipc.dbMongoFind).toHaveBeenCalledTimes(1))
     })
+    it('l\'_id va al core così com\'è (mai riletto in JavaScript); documento oltre 1 MB non modificabile', async () => {
+      const big = '{"$numberLong":"1152921504606846977"}'
+      const d1 = '{\n  "_id": {"$numberLong":"1152921504606846977"},\n  "n": {"$numberLong":"5"}\n}'
+      vi.mocked(ipc.dbMongoFind).mockResolvedValue({ resultId: 3, columns: [{ name: '_id' }, { name: 'n' }], rows: [['1152921504606846977', '5'], ['2', 'grande']], docs: [d1, null], ids: [big, '{"$numberInt":"2"}'], hasMore: false } as never)
+      render(QueryTab, { tab: open({ connectionId: 'm1', kind: 'mongo', database: 'app', collection: 'users' }) })
+      await fireEvent.dblClick((await screen.findByText('grande')).closest('[role=gridcell]')!)
+      await screen.findByText(/più grande di 1 MB/)
+      expect(screen.queryByRole('dialog')).toBeNull()
+      await fireEvent.dblClick(screen.getByText('1152921504606846977').closest('[role=gridcell]')!)
+      await waitFor(() => expect(cmds.eds.at(-1)?.getValue()).toBe(d1))
+      await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+      await waitFor(() => expect(ipc.dbMongoReplace).toHaveBeenCalledWith('m1', 'app', 'users', big, d1))
+    })
+
     it('JSON non valido blocca il salvataggio', async () => {
       await openDocs()
       await fireEvent.dblClick(screen.getByText('65a').closest('[role=gridcell]')!)

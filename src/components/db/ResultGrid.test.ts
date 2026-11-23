@@ -128,6 +128,66 @@ describe('ResultGrid', () => {
       await fireEvent.click(screen.getByRole('button', { name: '＋ Riga' }))
       expect(onedit.mock.calls[0][0].inserts).toHaveLength(1)
     })
+    it('NULL non toccato resta NULL: Invio, Tab e clic altrove non registrano nulla', async () => {
+      const onedit = vi.fn()
+      const { container } = render(ResultGrid, { columns: ['id', 'a', 'b'], rows: [['1', null, null]], pk: [0], onedit })
+      const cells = () => [...container.querySelectorAll('[role=gridcell]')] as HTMLElement[]
+      await fireEvent.dblClick(cells()[1])
+      const ed = () => screen.getByLabelText('Valore della cella') as HTMLTextAreaElement
+      expect(ed().value).toBe('')
+      await fireEvent.keyDown(ed(), { key: 'Enter' })
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      await fireEvent.dblClick(cells()[1])
+      await fireEvent.keyDown(ed(), { key: 'Tab' }) // passa alla cella b, anch'essa NULL
+      expect(ed()).toBeTruthy()
+      await fireEvent.blur(ed())
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      expect(onedit).not.toHaveBeenCalled()
+      // scrivere e cancellare tutto è una scelta esplicita: stringa vuota
+      await fireEvent.dblClick(cells()[1])
+      await fireEvent.input(ed(), { target: { value: '' } })
+      await fireEvent.keyDown(ed(), { key: 'Enter' })
+      expect([...onedit.mock.calls[0][0].updates.values()][0].changes.get(1)).toBe('')
+    })
+    it('DEFAULT di una riga nuova non toccato resta DEFAULT', async () => {
+      const onedit = vi.fn()
+      const edits = { updates: new Map(), inserts: [[undefined, undefined]], deletes: new Map() }
+      render(ResultGrid, { columns: ['id', 'name'], rows: [], pk: [0], edits, onedit })
+      await fireEvent.dblClick(screen.getAllByText('DEFAULT')[1].closest('[role=gridcell]')!)
+      const ed = screen.getByLabelText('Valore della cella')
+      await fireEvent.keyDown(ed, { key: 'Tab' })
+      await fireEvent.blur(screen.queryByLabelText('Valore della cella') ?? ed)
+      expect(onedit).not.toHaveBeenCalled()
+      expect(screen.getAllByText('DEFAULT')).toHaveLength(2)
+    })
+    it('i valori su più righe restano interi: Maiusc+Invio va a capo, Invio conferma', async () => {
+      const onedit = vi.fn()
+      const { container } = render(ResultGrid, { columns: ['id', 't'], rows: [['1', 'riga uno\nriga due']], pk: [0], onedit })
+      await fireEvent.dblClick(container.querySelectorAll('[role=gridcell]')[1])
+      const ed = screen.getByLabelText('Valore della cella') as HTMLTextAreaElement
+      expect(ed.tagName).toBe('TEXTAREA')
+      expect(ed.value).toBe('riga uno\nriga due')
+      await fireEvent.keyDown(ed, { key: 'Enter', shiftKey: true })
+      expect(screen.getByLabelText('Valore della cella')).toBeTruthy() // non confermato
+      await fireEvent.input(ed, { target: { value: 'riga uno\nriga due\nriga tre' } })
+      await fireEvent.keyDown(ed, { key: 'Enter' })
+      expect([...onedit.mock.calls[0][0].updates.values()][0].changes.get(1)).toBe('riga uno\nriga due\nriga tre')
+    })
+    it('le celle troncate sono in sola lettura', async () => {
+      const onedit = vi.fn()
+      const { container } = render(ResultGrid, { columns: ['id', 't'], rows: [['1', 'aaa']], pk: [0], onedit, truncated: new Set(['0:1']) })
+      const cell = container.querySelectorAll('[role=gridcell]')[1]
+      await fireEvent.dblClick(cell)
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      await fireEvent.click(cell)
+      await fireEvent.keyDown(container.querySelector('.grid')!, { key: 'Backspace', metaKey: true })
+      expect(onedit).not.toHaveBeenCalled()
+      expect(cell.querySelector('.trunc')).not.toBeNull()
+      // le altre celle della riga restano modificabili
+      await fireEvent.dblClick(container.querySelectorAll('[role=gridcell]')[0])
+      expect(screen.getByLabelText('Valore della cella')).toBeTruthy()
+    })
+
     it('senza pk non si modifica e la nota è visibile', async () => {
       render(ResultGrid, { columns: ['a'], rows: [['1']], note: 'Sola lettura: vista' })
       await fireEvent.dblClick(screen.getByText('1', { selector: '.txt' }))

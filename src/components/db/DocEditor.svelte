@@ -11,14 +11,17 @@
     database,
     collection,
     doc,
+    idJson = null,
     onclose,
     ondone,
   }: {
     connId: string
     database: string
     collection: string
-    /** JSON esteso rilassato del documento; `null` = nuovo documento. */
+    /** JSON esteso canonico del documento (i tipi restano quelli: `$numberLong`, `$numberDouble`…); `null` = nuovo. */
     doc: string | null
+    /** `_id` del documento come l'ha dato il core (JSON esteso canonico): testo opaco, ridato così com'è. */
+    idJson?: string | null
     onclose: () => void
     ondone: () => void
   } = $props()
@@ -32,11 +35,10 @@
   let error = $state<string | null>(null)
   let info = $state<string | null>(null)
 
-  /** `_id` del documento originale, come testo JSON. */
+  /** `_id` del documento originale: mai riletto in JavaScript (perderebbe numeri oltre 2^53 e il tipo dei Double). */
   function originalId(): string {
-    const o = JSON.parse(doc!)
-    if (o === null || typeof o !== 'object' || !('_id' in o)) throw new Error('Il documento non ha il campo _id')
-    return JSON.stringify(o._id)
+    if (idJson === null) throw new Error('Il documento non ha il campo _id')
+    return idJson
   }
 
   function parsed(): string | null {

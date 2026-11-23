@@ -446,9 +446,15 @@
 
   {#if editor.closing && active && editor.closing === active.key}
     <div class="bar" role="alert">
-      <span>Modifiche non salvate in {active.name}</span>
-      <button use:tooltip={{ text: 'Salva il file e chiudi la scheda', shortcut: '⌘S' }} aria-disabled={readOnly} onclick={() => !readOnly && void editor.resolveClose('save')}>Salva</button>
-      <button use:tooltip={'Chiudi la scheda perdendo le modifiche'} onclick={() => void editor.resolveClose('discard')}>Scarta</button>
+      {#if active.query}
+        <span>Modifiche della griglia non applicate in {active.name}</span>
+        <button use:tooltip={'Applica le modifiche al database (chiede conferma) e chiudi la scheda'} aria-disabled={readOnly} onclick={() => !readOnly && void editor.resolveClose('save')}>Applica</button>
+        <button use:tooltip={'Chiudi la scheda perdendo le modifiche non applicate'} onclick={() => void editor.resolveClose('discard')}>Scarta</button>
+      {:else}
+        <span>Modifiche non salvate in {active.name}</span>
+        <button use:tooltip={{ text: 'Salva il file e chiudi la scheda', shortcut: '⌘S' }} aria-disabled={readOnly} onclick={() => !readOnly && void editor.resolveClose('save')}>Salva</button>
+        <button use:tooltip={'Chiudi la scheda perdendo le modifiche'} onclick={() => void editor.resolveClose('discard')}>Scarta</button>
+      {/if}
       <button use:tooltip={'Tieni la scheda aperta'} onclick={() => void editor.resolveClose('cancel')}>Annulla</button>
     </div>
   {/if}

@@ -38,7 +38,8 @@
   const canEdit = $derived(pk !== undefined && pk.length > 0 && !!onedit)
   const ni = $derived(canEdit ? edits.inserts.length : 0)
   const total = $derived(ni + rows.length)
-  let editing = $state<{ r: number; c: number; text: string } | null>(null)
+  /** Cella in modifica: `initial` è il valore di partenza (NULL, DEFAULT o testo), `touched` = l'utente ha scritto. */
+  let editing = $state<{ r: number; c: number; text: string; initial: Cell | undefined; touched: boolean } | null>(null)
   let menu = $state<{ x: number; y: number; r: number } | null>(null)
 
   /** Valore mostrato (`undefined` = valore predefinito di una riga nuova). */
@@ -50,16 +51,28 @@
   const rowState = (r: number) => (!canEdit ? '' : r < ni ? 'ins' : isDeleted(edits, rows[r - ni], pk!) ? 'del' : '')
   const changed = (r: number, c: number) => canEdit && r >= ni && isChanged(edits, rows[r - ni], pk!, c)
 
+  /** Cella troncata a 64 KB (righe lette): sola lettura, riscriverla salverebbe il valore accorciato. */
+  const isTrunc = (r: number, c: number) => r >= ni && truncated.has(cellKey(r - ni, c))
   function startEdit(r: number, c: number) {
-    if (!canEdit || rowState(r) === 'del') return
+    if (!canEdit || rowState(r) === 'del' || isTrunc(r, c)) return
     sel = { r, c }
-    editing = { r, c, text: val(r, c) ?? '' }
+    const initial = val(r, c)
+    editing = { r, c, text: initial ?? '', initial, touched: false }
   }
+  /** Imposta il valore (anche NULL, col pulsante ∅ o ⌘⌫). */
   function commit(value: string | null) {
     const ed = editing
     if (!ed || !canEdit) return
     editing = null
     onedit!(ed.r < ni ? setInsertCell(edits, ed.r, ed.c, value) : setCell(edits, rows[ed.r - ni], pk!, ed.c, value))
+  }
+  /** Invio, Tab, clic altrove: si registra solo un testo cambiato (NULL e DEFAULT non toccati restano tali). */
+  function commitTyped() {
+    const ed = editing
+    if (!ed) return
+    const unchanged = !ed.touched || (typeof ed.initial === 'string' && ed.text === ed.initial)
+    if (unchanged) editing = null
+    else commit(ed.text)
   }
   function delRow(r: number) {
     if (!canEdit) return
@@ -68,23 +81,30 @@
   function editKey(e: KeyboardEvent) {
     e.stopPropagation()
     if (!editing) return
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+      // Maiusc+Invio (o ⌥Invio) va a capo nel testo
       e.preventDefault()
-      commit(editing.text)
+      commitTyped()
+    } else if (e.key === 'Enter' && e.altKey) {
+      e.preventDefault()
+      const ta = e.currentTarget as HTMLTextAreaElement
+      const at = ta.selectionStart ?? editing.text.length
+      editing.text = editing.text.slice(0, at) + '\n' + editing.text.slice(ta.selectionEnd ?? at)
+      editing.touched = true
     } else if (e.key === 'Escape') {
       e.preventDefault()
       editing = null
     } else if (e.key === 'Tab') {
       e.preventDefault()
       const { r, c } = editing
-      commit(editing.text)
+      commitTyped()
       if (c + 1 < columns.length) startEdit(r, c + 1)
     } else if ((e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
       e.preventDefault()
       commit(null)
     }
   }
-  const focusInput = (n: HTMLInputElement) => {
+  const focusInput = (n: HTMLTextAreaElement) => {
     n.focus()
     n.select()
   }
@@ -245,13 +265,13 @@
               {@const v = val(r, c)}
               {@const isEd = editing?.r === r && editing?.c === c}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <div class="cell" data-no-tooltip="cella selezionabile" class:sel={sel?.r === r && sel?.c === c} class:chg={changed(r, c)} role="gridcell" tabindex="-1" aria-selected={sel?.r === r && sel?.c === c} style="left: {ROWNUM_W + cols.offsets[c]}px; width: {widths[c]}px" onclick={() => (sel = { r, c })} ondblclick={() => (canEdit ? startEdit(r, c) : onopen && r >= ni ? onopen(r - ni) : undefined)}>
+              <div class="cell" data-no-tooltip="cella selezionabile" class:sel={sel?.r === r && sel?.c === c} class:chg={changed(r, c)} class:editing={isEd} role="gridcell" tabindex="-1" aria-selected={sel?.r === r && sel?.c === c} style="left: {ROWNUM_W + cols.offsets[c]}px; width: {widths[c]}px" onclick={() => (sel = { r, c })} ondblclick={() => (canEdit ? startEdit(r, c) : onopen && r >= ni ? onopen(r - ni) : undefined)}>
                 {#if isEd}
-                  <input class="inp" aria-label="Valore della cella" bind:value={editing!.text} use:focusInput onkeydown={editKey} onblur={() => commit(editing?.text ?? null)} />
+                  <textarea class="inp" aria-label="Valore della cella" rows={Math.min(8, editing!.text.split('\n').length)} bind:value={editing!.text} use:focusInput oninput={() => (editing!.touched = true)} onkeydown={editKey} onblur={commitTyped} use:tooltip={'Invio conferma, Maiusc+Invio va a capo, Esc annulla'}></textarea>
                   <button class="nullbtn" aria-label="Imposta NULL" use:tooltip={{ text: 'Imposta NULL', shortcut: '⌘⌫' }} onmousedown={(e) => e.preventDefault()} onclick={() => commit(null)}>∅</button>
                 {:else if v === undefined}<span class="null">DEFAULT</span>
                 {:else if v === null}<span class="null">NULL</span>{:else}<span class="txt">{v}</span>{/if}
-                {#if r >= ni && truncated.has(cellKey(r - ni, c))}<span class="trunc" role="img" aria-label="Valore troncato a 64 KB" use:tooltip={'Valore troncato a 64 KB'}>…</span>{/if}
+                {#if isTrunc(r, c)}<span class="trunc" role="img" aria-label="Valore troncato a 64 KB" use:tooltip={canEdit ? 'Valore troncato a 64 KB: sola lettura (modificarlo salverebbe il valore accorciato)' : 'Valore troncato a 64 KB'}>…</span>{/if}
               </div>
             {/each}
           </div>
@@ -299,7 +319,9 @@
   .row.ins { background: color-mix(in srgb, #4ade80 14%, transparent); }
   .row.del { background: color-mix(in srgb, #f87171 16%, transparent); text-decoration: line-through; color: var(--dim); }
   .cell.chg { background: color-mix(in srgb, #fbbf24 22%, transparent); }
-  .inp { flex: 1; min-width: 0; height: 20px; box-sizing: border-box; font: inherit; color: inherit; background: var(--panel, #1e1e22); border: 1px solid var(--accent, #6aa9ff); border-radius: 4px; padding: 0 4px; }
+  .inp { position: absolute; z-index: 6; left: 4px; right: 30px; top: 2px; min-height: 20px; box-sizing: border-box; font: inherit; line-height: 17px; color: inherit; background: var(--panel, #1e1e22); border: 1px solid var(--accent, #6aa9ff); border-radius: 4px; padding: 1px 4px; resize: none; white-space: pre; overflow: auto; }
+  .cell.editing { overflow: visible; z-index: 5; }
+  .cell.editing .nullbtn { position: absolute; right: 4px; top: 3px; }
   .nullbtn { flex: none; font-size: 11px; line-height: 16px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--edge-soft); background: transparent; color: inherit; cursor: pointer; }
   .menu { position: fixed; z-index: 50; min-width: 150px; background: var(--panel, #1e1e22); border: 1px solid var(--edge-soft); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); padding: 4px; }
   .menu button { display: block; width: 100%; text-align: left; font-size: 12px; padding: 5px 10px; background: transparent; border: 0; border-radius: 5px; color: inherit; cursor: pointer; }

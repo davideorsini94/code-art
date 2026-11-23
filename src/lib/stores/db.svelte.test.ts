@@ -33,6 +33,21 @@ beforeEach(() => {
 })
 
 describe('DbStore', () => {
+  it('eliminando una connessione toglie i testi delle sue schede query da localStorage', async () => {
+    localStorage.clear()
+    localStorage.setItem('codeart.dbquery.a.t:public.t', 'select 1')
+    localStorage.setItem('codeart.dbquery.a.new1', 'select 2')
+    localStorage.setItem('codeart.dbquery.ab.new1', 'altra connessione')
+    localStorage.setItem('altro', 'x')
+    await s.init()
+    await s.remove('a')
+    expect(ipc.dbConnectionDelete).toHaveBeenCalledWith('a')
+    expect(localStorage.getItem('codeart.dbquery.a.t:public.t')).toBeNull()
+    expect(localStorage.getItem('codeart.dbquery.a.new1')).toBeNull()
+    expect(localStorage.getItem('codeart.dbquery.ab.new1')).toBe('altra connessione')
+    expect(localStorage.getItem('altro')).toBe('x')
+  })
+
   it('loads connections and states, then applies db:state events', async () => {
     await s.init()
     expect(s.connections).toHaveLength(1)

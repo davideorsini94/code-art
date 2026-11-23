@@ -179,6 +179,7 @@ export class DbStore {
       }
     }
     await ipc.dbConnectionDelete(id)
+    forgetQueryTexts(id)
     delete this.trees[id]
     delete this.states[id]
     await this.refresh()
@@ -187,6 +188,21 @@ export class DbStore {
   /** Chiede di aprire una scheda query; la consuma la scheda query (Task 8) leggendo `pendingQuery`. */
   openQuery(req: DbQueryRequest) {
     this.pendingQuery = req
+  }
+}
+
+/** Toglie i testi delle schede query salvati per la connessione (`codeart.dbquery.<id>.*` in `localStorage`). */
+export function forgetQueryTexts(id: string) {
+  try {
+    const prefix = `codeart.dbquery.${id}.`
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k?.startsWith(prefix)) keys.push(k)
+    }
+    for (const k of keys) localStorage.removeItem(k)
+  } catch {
+    /* localStorage non disponibile: niente da togliere */
   }
 }
 
