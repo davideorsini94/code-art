@@ -1,10 +1,10 @@
-export type SidebarViewId = 'files' | 'search' | 'git' | 'convs' | 'ssh'
+export type SidebarViewId = 'files' | 'search' | 'git' | 'convs' | 'ssh' | 'db'
 
-export const SIDEBAR_VIEWS: readonly SidebarViewId[] = ['files', 'search', 'git', 'convs', 'ssh']
+export const SIDEBAR_VIEWS: readonly SidebarViewId[] = ['files', 'search', 'git', 'convs', 'ssh', 'db']
 const key = (projectId: string) => `codeart.sidebar.${projectId}`
 
 function isView(v: unknown): v is SidebarViewId {
-  return v === 'files' || v === 'search' || v === 'git' || v === 'convs' || v === 'ssh'
+  return v === 'files' || v === 'search' || v === 'git' || v === 'convs' || v === 'ssh' || v === 'db'
 }
 
 /** Vista corrente del pannello laterale, ricordata per progetto. */

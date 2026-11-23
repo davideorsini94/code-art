@@ -9,6 +9,7 @@ mod lsp;
 mod projects;
 mod pty;
 pub mod search;
+pub mod db;
 pub mod ssh;
 pub mod store;
 mod tools;
@@ -86,7 +87,17 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = handle.emit("ssh:state", e);
             });
-            app.manage(Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit)));
+            let ssh_conns = Arc::new(ssh::conn::Connections::new(ssh::conn::SshPaths::new(dir.clone()), emit));
+            app.manage(ssh_conns.clone());
+            // sessioni dei database: come `ssh:state`, `db:state` va a tutte le finestre (id, stato, messaggio senza segreti)
+            let handle = app.handle().clone();
+            let db_emit: db::pg::Emitter = Arc::new(move |e: ssh::conn::StateEvent| {
+                use tauri::Emitter;
+                let _ = handle.emit("db:state", e);
+            });
+            app.manage(Arc::new(db::mongo::MongoSessions::new(ssh_conns.clone(), db_emit.clone())));
+            app.manage(Arc::new(db::pg::Sessions::new(ssh_conns, db_emit)));
+            app.manage(Arc::new(db::pg_query::Queries::new()));
             app.manage(Arc::new(ssh::transfer::Transfers::default()));
             lifecycle::register_notification_clicks(app.handle(), life.clone());
             lifecycle::update_badge(app.handle(), &life, &store);
@@ -150,6 +161,31 @@ pub fn run() {
             claude::commands::conv_pending,
             claude::titles::conv_rename,
             claude::titles::conv_unlock_title,
+            db::db_connections,
+            db::db_connection_save,
+            db::db_connection_delete,
+            db::db_password_set,
+            db::db_password_clear,
+            db::db_history,
+            db::db_history_add,
+            db::db_connect,
+            db::db_disconnect,
+            db::db_states,
+            db::db_pg_tree,
+            db::db_pg_columns,
+            db::db_pg_preview_edits,
+            db::db_pg_apply_edits,
+            db::db_mongo_tree,
+            db::db_mongo_find,
+            db::db_mongo_aggregate,
+            db::db_mongo_replace,
+            db::db_mongo_insert,
+            db::db_mongo_delete,
+            db::db_query,
+            db::db_query_more,
+            db::db_query_close,
+            db::db_export,
+            db::db_query_cancel,
             ssh::ssh_servers,
             ssh::ssh_server_save,
             ssh::ssh_server_delete,
@@ -228,6 +264,13 @@ pub fn run() {
                 app.state::<Arc<lsp::Lsp>>().stop_all();
                 // git e `gh` in corso: SIGTERM e attesa, altrimenti morirebbero di SIGPIPE lasciando `index.lock`
                 app.state::<Arc<git::remote::RemoteOps>>().stop_all();
+                // sessioni dei database e relativi inoltri SSH, prima di chiudere le connessioni SSH
+                if let Some(s) = app.try_state::<Arc<db::pg::Sessions>>() {
+                    s.close_all();
+                }
+                if let Some(s) = app.try_state::<Arc<db::mongo::MongoSessions>>() {
+                    s.close_all();
+                }
                 // connessioni SSH condivise: `ssh -O exit` prima di fermare i processi (servono `run_tool`)
                 if let Some(c) = app.try_state::<Arc<ssh::conn::Connections>>() {
                     c.close_all();

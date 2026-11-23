@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Project, ProjectBranch } from './types'
+import type { DbConnection, DbExported, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -186,3 +186,48 @@ export const sshUpload = (id: string, localPaths: string[], remoteDir: string) =
 export const sshDownload = (id: string, remotePaths: string[], localDir: string) =>
   invoke<string>('ssh_download', { id, remotePaths, localDir })
 export const sshTransferCancel = (transferId: string) => invoke<void>('ssh_transfer_cancel', { transferId })
+
+// ---- Database: connessioni salvate (le password stanno solo nel Portachiavi e non tornano mai qui) ----
+export const dbConnections = () => invoke<DbConnection[]>('db_connections')
+export const dbConnectionSave = (input: DbConnectionInput) => invoke<DbConnection>('db_connection_save', { input })
+export const dbConnectionDelete = (id: string) => invoke<void>('db_connection_delete', { id })
+export const dbPasswordSet = (id: string, password: string) => invoke<void>('db_password_set', { id, password })
+export const dbPasswordClear = (id: string) => invoke<void>('db_password_clear', { id })
+/** Dalla più recente; al massimo 200 voci. */
+export const dbHistory = (id: string) => invoke<DbHistoryEntry[]>('db_history', { id })
+/** Testo ≤ 100 KB; uguale alla voce più recente = non ripetuto. */
+export const dbHistoryAdd = (id: string, text: string) => invoke<void>('db_history_add', { id, text })
+
+// ---- Database: sessioni (evento `db:state` a tutte le finestre; `Err('auth')` = serve la password) ----
+export const dbConnect = (id: string) => invoke<void>('db_connect', { id })
+export const dbDisconnect = (id: string) => invoke<void>('db_disconnect', { id })
+export const dbStates = () => invoke<DbStateEvent[]>('db_states')
+
+// ---- Database: Postgres (albero e query; `Err('annullato')` = conferma rifiutata, `Err('risultato scaduto…')` = riesegui) ----
+export const dbPgTree = (id: string) => invoke<PgTree>('db_pg_tree', { id })
+export const dbPgColumns = (id: string, schema: string, table: string) => invoke<PgColumn[]>('db_pg_columns', { id, schema, table })
+/** Anteprima SQL leggibile delle modifiche (mai eseguita). */
+export const dbPgPreviewEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
+  invoke<string[]>('db_pg_preview_edits', { id, schema, table, edits })
+/** Conferma nativa, poi una transazione; `Err('annullato')` = rifiutata. Ogni UPDATE/DELETE deve toccare una sola riga. */
+export const dbPgApplyEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
+  invoke<{ affected: number }>('db_pg_apply_edits', { id, schema, table, edits })
+/** MongoDB: filtro, ordinamento, proiezione e pipeline sono testo JSON esteso, analizzato nel core. */
+export const dbMongoTree = (id: string) => invoke<MongoDb[]>('db_mongo_tree', { id })
+export const dbMongoFind = (id: string, db: string, coll: string, filter: string, sort: string, projection: string) =>
+  invoke<DbQueryResult>('db_mongo_find', { id, db, coll, filter, sort, projection })
+export const dbMongoAggregate = (id: string, db: string, coll: string, pipeline: string) =>
+  invoke<DbQueryResult>('db_mongo_aggregate', { id, db, coll, pipeline })
+/** Conferma nativa del core; `idJson`/`docJson` sono JSON esteso. */
+export const dbMongoReplace = (id: string, db: string, coll: string, idJson: string, docJson: string) =>
+  invoke<void>('db_mongo_replace', { id, db, coll, idJson, docJson })
+export const dbMongoInsert = (id: string, db: string, coll: string, docJson: string) =>
+  invoke<string>('db_mongo_insert', { id, db, coll, docJson })
+export const dbMongoDelete = (id: string, db: string, coll: string, idJson: string) =>
+  invoke<void>('db_mongo_delete', { id, db, coll, idJson })
+/** Una sola SELECT/WITH/VALUES/TABLE: cursore e pagine da 500; altrimenti tutto in una volta (`affected` per istruzione). */
+export const dbQuery = (id: string, text: string) => invoke<DbQueryResult>('db_query', { id, text })
+export const dbQueryMore = (resultId: number) => invoke<DbQueryPage>('db_query_more', { resultId })
+export const dbQueryClose = (resultId: number) => invoke<void>('db_query_close', { resultId })
+export const dbExport = (resultId: number, format: 'csv' | 'json') => invoke<DbExported | null>('db_export', { resultId, format })
+export const dbQueryCancel = (id: string) => invoke<void>('db_query_cancel', { id })

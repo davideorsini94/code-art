@@ -14,6 +14,12 @@
   <SshPanel />
 {:else if sidebar.view === 'convs'}
   <ConvList />
+{:else if sidebar.view === 'db'}
+  {#await import('./db/DbPanel.svelte') then m}
+    <m.default />
+  {:catch}
+    <p class="empty">Vista Database non caricata</p>
+  {/await}
 {:else}
   {#await import('./git/GitPanel.svelte') then m}
     <m.default />

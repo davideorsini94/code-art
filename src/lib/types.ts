@@ -137,6 +137,29 @@ export type LspExitEvent = { id: number; code: number }
 /** Branch mostrato nella barra del titolo e repository a cui appartiene. */
 export type ProjectBranch = { repo: string; name: string }
 
+// ---- Database (specchio di src-tauri/src/db/mod.rs) ----
+export type DbKind = 'postgres' | 'mongo'
+export type DbTls = 'prefer' | 'require' | 'disable'
+export type DbConnection = {
+  id: string
+  kind: DbKind
+  name: string
+  host: string
+  port: number
+  user: string | null
+  database: string | null
+  tls: DbTls
+  acceptInvalidCerts: boolean
+  /** Server SSH (salvato o alias di `~/.ssh/config`) da cui passa il tunnel. */
+  sshServerId: string | null
+  hasPassword: boolean
+}
+/** `id` assente = nuova connessione; `port` assente = quella predefinita del tipo (5432 / 27017). */
+export type DbConnectionInput = Omit<DbConnection, 'id' | 'port' | 'hasPassword'> & { id?: string; port?: number | null }
+export type DbHistoryEntry = { id: number; text: string; atMs: number }
+/** Evento `db:state` e voce di `db_states` (come `SshStateEvent`). */
+export type DbStateEvent = { id: string; state: 'connecting' | 'connected' | 'disconnected' | 'error'; message?: string }
+
 // ---- SSH (specchio di src-tauri/src/ssh/mod.rs) ----
 export type ServerSource = 'saved' | 'config'
 export type Server = {
@@ -182,3 +205,48 @@ export type ServerInput = {
   identityFile?: string | null
   startDir?: string | null
 }
+
+// ---- Postgres: albero e risultati ----
+export type PgTable = { name: string; kind: 'table' | 'view' }
+export type PgSchema = { name: string; tables: PgTable[] }
+export type PgTree = { schemas: PgSchema[] }
+export type PgColumn = { name: string; type: string; nullable: boolean; isPk: boolean }
+/** Colonna e valore testuale (`null` = NULL, distinto da ''); i tipi li decide il core dal catalogo, mai la WebView. */
+export type PgCell = [column: string, value: string | null]
+export type PgRowEdit =
+  | { kind: 'update'; pk: PgCell[]; set: PgCell[] }
+  | { kind: 'insert'; values: PgCell[] }
+  | { kind: 'delete'; pk: PgCell[] }
+/** Il protocollo semplice non dà il tipo delle colonne: solo il nome. */
+export type DbQueryColumn = { name: string }
+/**
+ * Una pagina di righe: valori già testo, `null` = NULL (distinto da ''). Le celle oltre 64 KB arrivano troncate e
+ * sono elencate in `truncated` come coppie `[riga della pagina, colonna]`.
+ */
+export type DbQueryPage = {
+  rows: (string | null)[][]
+  hasMore: boolean
+  truncated?: [number, number][]
+  notices?: string[]
+  /**
+   * Solo MongoDB: il documento intero (JSON esteso canonico, `null` oltre 1 MB: non modificabile) e l'`_id` (JSON esteso
+   * canonico, testo opaco da ridare così com'è al core: mai `JSON.parse`) di ogni riga, e le colonne di questa pagina.
+   */
+  docs?: (string | null)[]
+  ids?: (string | null)[]
+  columns?: DbQueryColumn[]
+}
+/** Tabella letta da una query modificabile in griglia (nomi esatti del catalogo), decisa dal core. */
+export type DbEditableTable = { schema: string; table: string }
+/**
+ * `resultId` c'è per ogni risultato con righe (tenuto dal core, anche finito: serve a `dbExport`) fino a `dbQueryClose` o a
+ * una nuova query della connessione (anche da un'altra scheda: un risultato per connessione); `affected` = conteggio di ogni
+ * istruzione (senza cursore); `editableTable` solo per una lettura semplice di una tabella (`SELECT * FROM t [WHERE …]`).
+ */
+export type DbQueryResult = DbQueryPage & { resultId?: number; columns: DbQueryColumn[]; affected?: number[]; editableTable?: DbEditableTable | null }
+
+/** Esito di `dbExport`: percorso scelto nel selettore nativo e righe scritte (il risultato è poi chiuso). */
+export type DbExported = { path: string; rows: number }
+
+/** Un database MongoDB con le sue collezioni (in ordine alfabetico). */
+export type MongoDb = { database: string; collections: string[] }

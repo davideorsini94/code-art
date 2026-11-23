@@ -326,7 +326,9 @@ const TRUST_GATED: &[&str] = &[
     "gh_remote", "gh_repo_create", "gh_pr_list", "gh_pr_checks", "gh_pr_create", "gh_pr_merge", "lsp_start", "lsp_send",
     "search_replace", "ssh_servers", "ssh_server_save", "ssh_server_delete", "ssh_password_set", "ssh_password_clear",
     "ssh_connect", "ssh_disconnect", "ssh_states", "ssh_home", "ssh_list", "ssh_read", "ssh_write", "ssh_mkdir", "ssh_rename",
-    "ssh_delete", "ssh_upload", "ssh_download", "pty_spawn_ssh",
+    "ssh_delete", "ssh_upload", "ssh_download", "pty_spawn_ssh", "db_connections", "db_connection_save", "db_connection_delete",
+    "db_password_set", "db_password_clear", "db_history", "db_history_add",
+    "db_connect", "db_disconnect", "db_states", "db_pg_tree", "db_pg_columns", "db_pg_preview_edits", "db_pg_apply_edits", "db_mongo_tree", "db_mongo_find", "db_mongo_aggregate", "db_mongo_replace", "db_mongo_insert", "db_mongo_delete", "db_query", "db_query_more", "db_query_close", "db_query_cancel", "db_export",
 ];
 /// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel`, `lsp_stop` e `ssh_transfer_cancel`
 /// fermano soltanto processi già avviati dalla finestra stessa.
@@ -335,7 +337,7 @@ const NO_TRUST_NEEDED: &[&str] = &["gh_accounts", "gh_repo_list", "gh_clone", "g
 #[test]
 fn new_process_commands_are_all_classified() {
     let declared = declared_commands();
-    for c in declared.iter().filter(|c| ["git_", "gh_", "lsp_", "ssh_"].iter().any(|p| c.starts_with(p)) || *c == "search_replace" || *c == "pty_spawn_ssh") {
+    for c in declared.iter().filter(|c| ["git_", "gh_", "lsp_", "ssh_", "db_"].iter().any(|p| c.starts_with(p)) || *c == "search_replace" || *c == "pty_spawn_ssh") {
         assert!(TRUST_GATED.contains(&c.as_str()) || NO_TRUST_NEEDED.contains(&c.as_str()), "{c}: classificalo in security.rs");
     }
     for c in TRUST_GATED.iter().chain(NO_TRUST_NEEDED) {

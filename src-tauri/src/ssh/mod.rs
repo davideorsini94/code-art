@@ -31,13 +31,13 @@ pub struct Keychain;
 
 impl Secrets for Keychain {
     fn has(&self, id: &str) -> Result<bool, String> {
-        keychain::exists(id)
+        keychain::exists(keychain::SERVICE, id)
     }
     fn set(&self, id: &str, secret: &str) -> Result<(), String> {
-        keychain::set(id, secret)
+        keychain::set(keychain::SERVICE, id, secret)
     }
     fn clear(&self, id: &str) -> Result<(), String> {
-        keychain::delete(id)
+        keychain::delete(keychain::SERVICE, id)
     }
 }
 
@@ -278,7 +278,7 @@ fn read_config_file(path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn trusted_store(app: &AppHandle, window: &WebviewWindow) -> Result<Store, String> {
+pub(crate) fn trusted_store(app: &AppHandle, window: &WebviewWindow) -> Result<Store, String> {
     let project_id = crate::projects::window_project_id(window)?;
     let store = app.state::<Store>().inner().clone();
     crate::trust::ensure_project_trusted(&store, &project_id)?;

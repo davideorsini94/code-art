@@ -37,6 +37,7 @@ vi.mock('../lib/monaco', () => {
     }
   }
   const ed = () => ({
+    onDidChangeModelContent: () => ({ dispose() {} }), getValue: () => '',
     addCommand() {}, updateOptions() {}, setModel() {}, getModel: () => null, dispose() {}, setValue() {},
     createDecorationsCollection: () => ({ set() {}, clear() {} }),
     changeViewZones: (cb: (a: { addZone: (z: { afterLineNumber: number; domNode: HTMLElement }) => string; removeZone: (id: string) => void }) => void) =>
@@ -45,7 +46,7 @@ vi.mock('../lib/monaco', () => {
   })
   return {
     monaco: {
-      KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1 }, Uri: { file: (p: string) => p, parse: (p: string) => p },
+      KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1, Enter: 3 }, Uri: { file: (p: string) => p, parse: (p: string) => p },
       editor: {
         create: ed, createDiffEditor: () => ({ ...ed(), updateOptions: diffOptions, setModel() {}, getModifiedEditor: () => ed() }),
         createModel: (text: string) => { const m = model(); m.init(text); return m },
@@ -58,6 +59,7 @@ import EditorPane from './EditorPane.svelte'
 import { editor } from '../lib/stores/editor.svelte'
 import { fsRead, fsWrite } from '../lib/ipc'
 import { projectStore } from '../lib/stores/project.svelte'
+import { db } from '../lib/stores/db.svelte'
 
 beforeAll(() => {
   window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -272,5 +274,17 @@ describe('EditorPane merge conflicts', () => {
     await editor.open('/Users/dev/app/clean.ts')
     flushSync()
     expect(screen.queryByText(/conflitt/)).toBeNull()
+  })
+})
+
+describe('schede query', () => {
+  it('consuma db.pendingQuery: apre la scheda con icona database e la azzera', async () => {
+    render(EditorPane)
+    db.openQuery({ connectionId: 'c1', kind: 'postgres' })
+    await waitFor(() => expect(editor.tabs.map((t) => t.key)).toEqual(['db:c1:1']))
+    expect(db.pendingQuery).toBeNull()
+    expect(screen.getByText('Query 1')).toBeTruthy()
+    expect(document.querySelector('.tab .ticon svg')).toBeTruthy()
+    expect(editor.dirtyCount).toBe(0)
   })
 })

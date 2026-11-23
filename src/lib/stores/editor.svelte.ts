@@ -1,7 +1,7 @@
 import { listenProject } from '../events'
-import { asFsError, fsRead, fsWrite, sshRead, sshWrite } from '../ipc'
+import { asFsError, dbQueryClose, fsRead, fsWrite, sshRead, sshWrite } from '../ipc'
 import { projectStore } from './project.svelte'
-import type { FileContent, FsChanged } from '../types'
+import type { DbKind, FileContent, FsChanged } from '../types'
 import { previewPolicy } from '../md-policy'
 import { isBinaryViewer, viewerFor, type MarkdownMode, type Viewer } from '../viewers'
 
@@ -50,6 +50,25 @@ export function repathRemote<T extends { path: string; name: string; key: string
 /** Collegamento al modello Monaco: il testo si legge solo quando serve (salvataggio). */
 export type Binding = { snapshot: () => { text: string; commit: () => void } }
 
+/** Chiave di una scheda query: `db:<connessione>:<n>`; non collide con percorsi locali né `ssh:`. */
+export const queryKey = (connectionId: string, n: number) => `db:${connectionId}:${n}`
+
+/** Scheda query: a cosa è collegata. `persistKey` identifica il testo salvato (tabella/collezione o query nuova). */
+export type QueryInfo = {
+  connectionId: string
+  kind: DbKind
+  schema?: string
+  table?: string
+  database?: string
+  collection?: string
+  n: number
+  persistKey: string
+  /** Esegui subito all'apertura (apertura da una tabella/collezione); la scheda lo azzera dopo il primo avvio. */
+  autoRun: boolean
+  /** Risultato aperto nel core: lo si chiude alla chiusura della scheda. */
+  resultId?: number
+}
+
 export type Tab = {
   id: number // stabile anche dopo rinomina
   key: string // identità della scheda (`tabKey`): file e diff dello stesso file sono schede diverse
@@ -70,6 +89,8 @@ export type Tab = {
   /** `editable`: il lato modificato (cartella di lavoro) si può cambiare e salvare; il lato originale resta in sola lettura. */
   diff: { before: string; after: string; editable?: boolean } | null
   viewer: Viewer
+  /** Scheda query database: il testo si salva da solo; è "modificata" solo con modifiche della griglia non applicate. */
+  query?: QueryInfo
 }
 
 function baseName(p: string) {
@@ -161,7 +182,42 @@ class EditorStore {
     this.active = tab.key
   }
 
-  /** Apre un file del server in una scheda (solo testo: anteprime e binari non sono disponibili da remoto). */
+  private queryCount = new Map<string, number>()
+
+  /** Apre una scheda query (da una tabella/collezione o vuota). La stessa tabella/collezione riporta in primo piano
+   *  la scheda già aperta. */
+  openQuery(req: { connectionId: string; kind: DbKind; schema?: string; table?: string; database?: string; collection?: string }) {
+    const persistKey = req.table !== undefined ? `t:${req.schema ?? ''}.${req.table}` : req.collection !== undefined ? `c:${req.database ?? ''}.${req.collection}` : ''
+    if (persistKey) {
+      const existing = this.tabs.find((t) => t.query && t.query.connectionId === req.connectionId && t.query.persistKey === persistKey)
+      if (existing) {
+        this.active = existing.key
+        return
+      }
+    }
+    const n = (this.queryCount.get(req.connectionId) ?? 0) + 1
+    this.queryCount.set(req.connectionId, n)
+    const key = queryKey(req.connectionId, n)
+    const name = req.table ?? req.collection ?? `Query ${n}`
+    const query: QueryInfo = { ...req, n, persistKey: persistKey || `new${n}`, autoRun: !!persistKey }
+    const tab: Tab = { ...this.blank(key), key, name, query }
+    this.tabs = [...this.tabs, tab]
+    this.active = key
+  }
+
+  /** Schede query: chi applica le modifiche della griglia in sospeso (dalla barra di chiusura). `true` = applicate. */
+  private appliers = new Map<string, () => Promise<boolean>>()
+  setApplier(key: string, apply: (() => Promise<boolean>) | undefined) {
+    if (apply) this.appliers.set(key, apply)
+    else this.appliers.delete(key)
+  }
+
+  setQueryResult(key: string, resultId: number | undefined) {
+    const t = this.tabs.find((x) => x.key === key)
+    if (t?.query) t.query.resultId = resultId
+  }
+
+  /** Apre un file del server (solo testo: anteprime e binari non sono disponibili da remoto). */
   async openRemote(serverId: string, path: string) {
     const key = remoteKey(serverId, path)
     const existing = this.tabs.find((t) => t.key === key)
@@ -276,7 +332,7 @@ class EditorStore {
 
   private async saveNow(id: number) {
     const t = this.tabs.find((x) => x.id === id)
-    if (!t || (t.diff && !t.diff.editable) || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
+    if (!t || t.query || (t.diff && !t.diff.editable) || t.error || isBinaryViewer(t.viewer) || projectStore.untrusted.length > 0) return // sola lettura
     const snap = this.bindings.get(t.id)?.snapshot()
     if (!snap) return
     if (t.remote) return this.saveRemote(t, snap.text, snap.commit)
@@ -297,6 +353,8 @@ class EditorStore {
     if (i < 0) return
     const t = this.tabs[i]
     this.tabs = this.tabs.filter((x) => x.key !== key)
+    this.appliers.delete(key)
+    if (t.query?.resultId !== undefined) void Promise.resolve(dbQueryClose(t.query.resultId)).catch(() => {})
     if (this.closing === key) this.closing = null
     if (!t.diff) {
       clearTimeout(this.reloadTimers.get(t.path))
@@ -322,7 +380,11 @@ class EditorStore {
       this.closing = null
       return
     }
-    if (choice === 'save') {
+    if (choice === 'save' && t.query) {
+      // scheda query: "Applica" le modifiche della griglia (conferma nativa del core); rifiutata o fallita = la scheda resta
+      const apply = this.appliers.get(key)
+      if (!apply || !(await apply())) return
+    } else if (choice === 'save') {
       try {
         await this.save(t.path, t.key)
       } catch {
@@ -433,7 +495,7 @@ class EditorStore {
   async applyChanged(paths: string[]) {
     const set = new Set(paths)
     for (const t of this.tabs) {
-      if (t.remote || (t.diff && !t.diff.editable) || !set.has(t.path)) continue
+      if (t.remote || t.query || (t.diff && !t.diff.editable) || !set.has(t.path)) continue
       if (isBinaryViewer(t.viewer)) {
         this.scheduleViewerReload(t.path)
         continue
