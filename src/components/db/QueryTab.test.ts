@@ -19,6 +19,9 @@ vi.mock('../../lib/ipc', () => ({
   dbPgColumns: vi.fn(),
   dbPgPreviewEdits: vi.fn(),
   dbPgApplyEdits: vi.fn(),
+  dbOraColumns: vi.fn(),
+  dbOraPreviewEdits: vi.fn(),
+  dbOraApplyEdits: vi.fn(),
   dbMongoReplace: vi.fn(async () => {}),
   dbMongoInsert: vi.fn(async () => 'x'),
   dbMongoDelete: vi.fn(async () => {}),
@@ -61,8 +64,8 @@ function open(req: Parameters<typeof editor.openQuery>[0]) {
 
 beforeEach(() => {
   localStorage.clear()
-  db.connections = [{ id: 'c1', name: 'Locale', kind: 'postgres' } as never, { id: 'm1', name: 'Mongo', kind: 'mongo' } as never]
-  db.states = { c1: { state: 'connected' }, m1: { state: 'connected' } }
+  db.connections = [{ id: 'c1', name: 'Locale', kind: 'postgres' } as never, { id: 'm1', name: 'Mongo', kind: 'mongo' } as never, { id: 'o1', name: 'Ora', kind: 'oracle' } as never]
+  db.states = { c1: { state: 'connected' }, m1: { state: 'connected' }, o1: { state: 'connected' } }
   vi.mocked(ipc.dbQuery).mockResolvedValue(ok() as never)
 })
 afterEach(() => {
@@ -369,6 +372,57 @@ describe('QueryTab', () => {
       cmds.eds[0].setValue('select 1')
       cmds.list[0]()
       await screen.findByText(/Sola lettura: risultato di una query/)
+    })
+  })
+
+  describe('Oracle', () => {
+    const cols = [
+      { name: 'ID', type: 'NUMBER', nullable: false, isPk: true },
+      { name: 'NOME', type: 'VARCHAR2', nullable: true, isPk: false },
+      { name: 'NOTE', type: 'CLOB', nullable: true, isPk: false },
+      { name: 'QUANDO', type: 'TIMESTAMP(6) WITH LOCAL TIME ZONE', nullable: true, isPk: false },
+    ]
+    const res = { resultId: 9, columns: [{ name: 'ID' }, { name: 'NOME' }, { name: 'NOTE' }, { name: 'QUANDO' }], rows: [['1', 'Ada', 'lungo', '2020-01-01 10:00:00.0']], hasMore: false, editableTable: { schema: 'HR', table: 'EMP"X' } }
+    async function openOra() {
+      vi.mocked(ipc.dbQuery).mockResolvedValue(res as never)
+      vi.mocked(ipc.dbOraColumns).mockResolvedValue(cols as never)
+      render(QueryTab, { tab: open({ connectionId: 'o1', kind: 'oracle', schema: 'HR', table: 'EMP"X' }) })
+      await screen.findByText('Ada')
+      await waitFor(() => expect(ipc.dbOraColumns).toHaveBeenCalledWith('o1', 'HR', 'EMP"X'))
+    }
+    const cell = (t: string) => screen.getByText(t).closest('[role=gridcell]') as HTMLElement
+
+    it('aprendo una tabella esegue SELECT citata, senza punto e virgola', async () => {
+      await openOra()
+      expect(ipc.dbQuery).toHaveBeenCalledWith('o1', 'SELECT * FROM "HR"."EMP""X"')
+      expect(ipc.dbPgColumns).not.toHaveBeenCalled()
+    })
+
+    it('le modifiche passano da dbOraPreviewEdits e dbOraApplyEdits, con la nota sulla stringa vuota', async () => {
+      await openOra()
+      await fireEvent.dblClick(cell('Ada'))
+      const inp = screen.getByLabelText('Valore della cella') as HTMLInputElement
+      await fireEvent.input(inp, { target: { value: 'Zoe' } })
+      await fireEvent.keyDown(inp, { key: 'Enter' })
+      expect(screen.getByText('In Oracle una stringa vuota è NULL')).toBeTruthy()
+      const edit = [{ kind: 'update', pk: [['ID', '1']], set: [['NOME', 'Zoe']] }]
+      vi.mocked(ipc.dbOraPreviewEdits).mockResolvedValue(['UPDATE ...'])
+      await fireEvent.click(screen.getByRole('button', { name: 'Anteprima' }))
+      expect(ipc.dbOraPreviewEdits).toHaveBeenCalledWith('o1', 'HR', 'EMP"X', edit)
+      vi.mocked(ipc.dbOraApplyEdits).mockResolvedValue({ affected: 1 })
+      await fireEvent.click(screen.getByRole('button', { name: 'Applica' }))
+      await waitFor(() => expect(ipc.dbOraApplyEdits).toHaveBeenCalledWith('o1', 'HR', 'EMP"X', edit))
+      expect(ipc.dbPgApplyEdits).not.toHaveBeenCalled()
+    })
+
+    it('colonne LOB e TIMESTAMP LOCAL TIME ZONE sono in sola lettura', async () => {
+      await openOra()
+      await fireEvent.dblClick(cell('lungo'))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      await fireEvent.dblClick(cell('2020-01-01 10:00:00.0'))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      await fireEvent.dblClick(cell('Ada'))
+      expect(screen.getByLabelText('Valore della cella')).toBeTruthy()
     })
   })
 

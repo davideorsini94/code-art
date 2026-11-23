@@ -10,7 +10,7 @@
   let { connection: connProp = null, onclose }: { connection?: DbConnection | null; onclose: () => void } = $props()
   const connection = untrack(() => connProp)
 
-  const DEFAULT_PORT: Record<DbKind, string> = { postgres: '5432', mongo: '27017' }
+  const DEFAULT_PORT: Record<DbKind, string> = { postgres: '5432', mongo: '27017', oracle: '1521' }
 
   let kind = $state<DbKind>(connection?.kind ?? 'postgres')
   let name = $state(connection?.name ?? '')
@@ -48,6 +48,7 @@
     error = null
     busy = true
     try {
+      if (kind === 'oracle' && !database.trim()) throw 'Indica il servizio (es. ORCLPDB1 o XEPDB1)'
       const portNum = port.trim() ? Number(port.trim()) : null
       if (portNum !== null && (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535)) throw 'Porta non valida (1–65535)'
       const saved = await db.save({
@@ -58,8 +59,8 @@
         port: portNum,
         user: user.trim() || null,
         database: database.trim() || null,
-        tls,
-        acceptInvalidCerts,
+        tls: kind === 'oracle' ? 'disable' : tls,
+        acceptInvalidCerts: kind === 'oracle' ? false : acceptInvalidCerts,
         sshServerId: sshServerId || null,
       })
       if (password) {
@@ -90,15 +91,24 @@
 <form class="form" onsubmit={submit}>
   <label>
     Tipo
-    <select value={kind} onchange={(e) => setKind(e.currentTarget.value as DbKind)} use:tooltip={'Postgres o MongoDB'}>
+    <select value={kind} onchange={(e) => setKind(e.currentTarget.value as DbKind)} use:tooltip={'Postgres, MongoDB o Oracle'}>
       <option value="postgres">Postgres</option>
       <option value="mongo">MongoDB</option>
+      <option value="oracle">Oracle</option>
     </select>
   </label>
   <label>Nome<input bind:value={name} placeholder="Database di prova" autocomplete="off" /></label>
   <label>Host<input bind:value={host} placeholder="db.example.test" autocomplete="off" /></label>
   <label>Porta<input bind:value={port} inputmode="numeric" placeholder={DEFAULT_PORT[kind]} autocomplete="off" /></label>
   <label>Utente<input bind:value={user} autocomplete="off" /></label>
+  {#if kind === 'oracle'}
+    <label>
+      Servizio
+      <input bind:value={database} aria-required="true" autocomplete="off" placeholder="ORCLPDB1" />
+      <span class="hint">nome del servizio, es. ORCLPDB1 o XEPDB1</span>
+    </label>
+    <p class="hint">Solo TCP: per cifrare la connessione usa un tunnel SSH</p>
+  {:else}
   <label>Database<input bind:value={database} autocomplete="off" /></label>
   <label>
     TLS
@@ -113,6 +123,7 @@
     <input type="checkbox" bind:checked={acceptInvalidCerts} />
     Accetta certificati non validi
   </label>
+  {/if}
   <label>
     Tunnel SSH
     <select bind:value={sshServerId} use:tooltip={'Server SSH da cui far passare la connessione'}>

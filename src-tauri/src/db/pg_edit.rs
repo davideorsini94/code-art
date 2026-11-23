@@ -13,7 +13,7 @@ pub const BTN_APPLY: &str = "Applica";
 pub const PREVIEW_VALUE_MAX: usize = 200;
 /// Quante anteprime elenca la conferma nativa.
 pub const CONFIRM_LISTED: usize = 10;
-const MAX_EDITS: usize = 10_000;
+pub(super) const MAX_EDITS: usize = 10_000;
 
 /// Una coppia (nome di colonna, valore testuale); `None` = NULL (distinto da la stringa vuota).
 pub type Cell = (String, Option<String>);
@@ -57,7 +57,7 @@ pub fn quote_ident(s: &str) -> String {
 }
 
 /// Letterale tra apici per l'anteprima (apici raddoppiati); valori lunghi accorciati.
-fn literal(v: &Option<String>) -> String {
+pub(super) fn literal(v: &Option<String>) -> String {
     match v {
         None => "NULL".into(),
         Some(s) => {
@@ -67,7 +67,7 @@ fn literal(v: &Option<String>) -> String {
     }
 }
 
-fn clip(s: &str, max: usize) -> (&str, bool) {
+pub(super) fn clip(s: &str, max: usize) -> (&str, bool) {
     if s.chars().count() <= max {
         return (s, false);
     }
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
     }
 }
 
-fn check_no_dups(cells: &[Cell], what: &str) -> Result<(), String> {
+pub(super) fn check_no_dups(cells: &[Cell], what: &str) -> Result<(), String> {
     for (i, (n, _)) in cells.iter().enumerate() {
         if cells[..i].iter().any(|(m, _)| m == n) {
             return Err(format!("{what}: colonna ripetuta ({})", clip(n, 60).0));

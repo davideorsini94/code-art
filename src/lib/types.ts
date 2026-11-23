@@ -138,7 +138,7 @@ export type LspExitEvent = { id: number; code: number }
 export type ProjectBranch = { repo: string; name: string }
 
 // ---- Database (specchio di src-tauri/src/db/mod.rs) ----
-export type DbKind = 'postgres' | 'mongo'
+export type DbKind = 'postgres' | 'mongo' | 'oracle'
 export type DbTls = 'prefer' | 'require' | 'disable'
 export type DbConnection = {
   id: string
@@ -156,6 +156,7 @@ export type DbConnection = {
 }
 /** `id` assente = nuova connessione; `port` assente = quella predefinita del tipo (5432 / 27017). */
 export type DbConnectionInput = Omit<DbConnection, 'id' | 'port' | 'hasPassword'> & { id?: string; port?: number | null }
+export type OracleClientStatus = { dir: string | null; loaded: boolean; detected: string[]; error: string | null }
 export type DbHistoryEntry = { id: number; text: string; atMs: number }
 /** Evento `db:state` e voce di `db_states` (come `SshStateEvent`). */
 export type DbStateEvent = { id: string; state: 'connecting' | 'connected' | 'disconnected' | 'error'; message?: string }
@@ -206,7 +207,7 @@ export type ServerInput = {
   startDir?: string | null
 }
 
-// ---- Postgres: albero e risultati ----
+// ---- Postgres e Oracle: albero e risultati (Oracle riusa queste forme: `schemas` = proprietari, `editableTable.schema` = proprietario) ----
 export type PgTable = { name: string; kind: 'table' | 'view' }
 export type PgSchema = { name: string; tables: PgTable[] }
 export type PgTree = { schemas: PgSchema[] }

@@ -9,7 +9,7 @@
   import * as ipc from '../../lib/ipc'
   import { db } from '../../lib/stores/db.svelte'
   import { editor, type Tab } from '../../lib/stores/editor.svelte'
-  import { appendPage, emptyGrid, fmtInt, selectAllSql, type GridData } from '../../lib/db/grid'
+  import { appendPage, emptyGrid, fmtInt, oracleReadOnlyType, selectAllOracle, selectAllSql, type GridData } from '../../lib/db/grid'
   import { editCount, emptyEdits, toRowEdits, type PendingEdits } from '../../lib/db/edits'
   import type { DbEditableTable, DbHistoryEntry, DbQueryResult, PgColumn } from '../../lib/types'
 
@@ -20,13 +20,14 @@
   // la scheda non cambia identità per tutta la vita del componente (la chiave è l'`id`)
   const q = untrack(() => tab.query!)
   const connId = q.connectionId
-  const isPg = q.kind === 'postgres'
+  const isOra = q.kind === 'oracle'
+  const isSql = q.kind === 'postgres' || isOra
   const storeKey = `codeart.dbquery.${connId}.${q.persistKey}`
   const conn = $derived(db.connections.find((c) => c.id === connId))
 
   // ---- testo (salvato a ogni modifica) ----
   type MongoText = { database: string; collection: string; mode: 'find' | 'aggregate'; filter: string; sort: string; projection: string; pipeline: string }
-  const defaultSql = q.table !== undefined ? selectAllSql(q.schema ?? 'public', q.table) : ''
+  const defaultSql = q.table !== undefined ? (isOra ? selectAllOracle(q.schema ?? '', q.table) : selectAllSql(q.schema ?? 'public', q.table)) : ''
   const defaultMongo = (): MongoText => ({ database: q.database ?? '', collection: q.collection ?? '', mode: 'find', filter: '', sort: '', projection: '', pipeline: '[\n  \n]' })
 
   function stored(): string | null {
@@ -46,13 +47,13 @@
     return null
   }
   const saved = stored()
-  let sql = $state(isPg ? (saved ?? defaultSql) : '')
-  let mg = $state<MongoText>(!isPg && saved ? (parseMongo(saved) ?? defaultMongo()) : defaultMongo())
+  let sql = $state(isSql ? (saved ?? defaultSql) : '')
+  let mg = $state<MongoText>(!isSql && saved ? (parseMongo(saved) ?? defaultMongo()) : defaultMongo())
   // il testo salvato diverso da quello predefinito non si riesegue da solo (potrebbe scrivere dati)
-  const restoredCustom = isPg ? saved !== null && saved !== defaultSql : saved !== null
+  const restoredCustom = isSql ? saved !== null && saved !== defaultSql : saved !== null
 
   $effect(() => {
-    const v = isPg ? sql : JSON.stringify(mg)
+    const v = isSql ? sql : JSON.stringify(mg)
     try {
       localStorage.setItem(storeKey, v)
     } catch {
@@ -124,25 +125,28 @@
     pgCols = null
     if (!t) return
     void Promise.resolve()
-      .then(() => ipc.dbPgColumns(connId, t.schema, t.table))
+      .then(() => (isOra ? ipc.dbOraColumns(connId, t.schema, t.table) : ipc.dbPgColumns(connId, t.schema, t.table)))
       .then((c) => {
         if (seq === colsSeq) pgCols = c
       })
       .catch(() => {})
   }
-  const editInfo = $derived.by((): { pk?: number[]; note?: string } => {
-    if (!isPg || !hasGrid) return {}
+  const editInfo = $derived.by((): { pk?: number[]; note?: string; ro?: Set<number> } => {
+    if (!isSql || !hasGrid) return {}
     if (!editTarget) return { note: 'Sola lettura: risultato di una query' }
     const et = editTarget
     const t = db.trees[connId]
-    const kind = t?.kind === 'postgres' ? t.tree.schemas.find((x) => x.name === et.schema)?.tables.find((x) => x.name === et.table)?.kind : undefined
+    const kind = t && t.kind !== 'mongo' ? t.tree.schemas.find((x) => x.name === et.schema)?.tables.find((x) => x.name === et.table)?.kind : undefined
     if (kind === 'view') return { note: 'Sola lettura: vista' }
     if (!pgCols) return {}
     const names = pgCols.filter((c) => c.isPk).map((c) => c.name)
     if (names.length === 0) return { note: 'Sola lettura: tabella senza chiave primaria' }
     const idx = names.map((n) => grid.columns.indexOf(n))
     if (idx.includes(-1)) return { note: 'Sola lettura: il risultato non contiene la chiave primaria' }
-    return { pk: idx }
+    // Oracle: LOB, RAW/LONG e TIMESTAMP WITH LOCAL TIME ZONE restano in sola lettura
+    const ro = new Set<number>()
+    if (isOra) for (const c of pgCols) if (oracleReadOnlyType(c.type)) ro.add(grid.columns.indexOf(c.name))
+    return { pk: idx, ro }
   })
   const pendingCount = $derived(editCount(edits))
   const rowEdits = $derived(editInfo.pk ? toRowEdits(edits, grid.columns, editInfo.pk) : [])
@@ -157,7 +161,7 @@
     error = null
     info = null
     try {
-      await ipc.dbPgApplyEdits(connId, editTarget.schema, editTarget.table, rowEdits)
+      await (isOra ? ipc.dbOraApplyEdits : ipc.dbPgApplyEdits)(connId, editTarget.schema, editTarget.table, rowEdits)
       edits = emptyEdits()
       return true
     } catch (e) {
@@ -175,7 +179,7 @@
   let ids = $state.raw<(string | null)[]>([])
   let target = $state({ database: '', collection: '', find: false })
   let docEdit = $state<{ doc: string | null; id: string | null; database: string; collection: string } | null>(null)
-  const canOpenDoc = $derived(!isPg && target.find && hasGrid)
+  const canOpenDoc = $derived(!isSql && target.find && hasGrid)
   function openDoc(r: number) {
     if (docs[r] === undefined) return
     if (docs[r] === null) {
@@ -209,12 +213,12 @@
   function setResult(res: DbQueryResult) {
     const hasRows = res.resultId !== undefined || res.columns.length > 0
     hasGrid = hasRows
-    grid = hasRows ? appendPage(emptyGrid(), res, !isPg) : emptyGrid()
+    grid = hasRows ? appendPage(emptyGrid(), res, !isSql) : emptyGrid()
     resultKey++
     edits = emptyEdits()
     docs = res.docs ?? []
     ids = res.ids ?? []
-    if (isPg) {
+    if (isSql) {
       editTarget = res.editableTable ?? null
       loadCols(editTarget)
     }
@@ -233,7 +237,7 @@
       return
     }
     let text: string
-    if (isPg) {
+    if (isSql) {
       text = sql
       if (!text.trim()) return
     } else {
@@ -248,14 +252,14 @@
     error = null
     const seq = ++runSeq
     try {
-      const res = isPg
+      const res = isSql
         ? await ipc.dbQuery(connId, text)
         : mg.mode === 'find'
           ? await ipc.dbMongoFind(connId, mg.database, mg.collection, mg.filter, mg.sort, mg.projection)
           : await ipc.dbMongoAggregate(connId, mg.database, mg.collection, mg.pipeline)
       void Promise.resolve(ipc.dbHistoryAdd(connId, text)).catch(() => {})
       if (seq === runSeq) {
-        target = { database: mg.database, collection: mg.collection, find: !isPg && mg.mode === 'find' }
+        target = { database: mg.database, collection: mg.collection, find: !isSql && mg.mode === 'find' }
         setResult(res)
       }
     } catch (e) {
@@ -283,7 +287,7 @@
     try {
       const page = await ipc.dbQueryMore(id)
       if (id !== resultId) return
-      grid = appendPage(grid, page, !isPg)
+      grid = appendPage(grid, page, !isSql)
       if (page.docs) docs = docs.concat(page.docs)
       if (page.ids) ids = ids.concat(page.ids)
       hasMore = page.hasMore
@@ -333,7 +337,7 @@
     }
   }
   function historyLabel(text: string) {
-    if (!isPg) {
+    if (!isSql) {
       const m = parseMongo(text)
       if (m) return `${m.collection} · ${m.mode === 'find' ? (m.filter.trim() || '{}') : m.pipeline.replace(/\s+/g, ' ').trim()}`
     }
@@ -341,7 +345,7 @@
   }
   function pick(h: DbHistoryEntry) {
     histOpen = false
-    if (isPg) {
+    if (isSql) {
       sql = h.text
       setField('sql', h.text)
       return
@@ -400,7 +404,7 @@
     {/if}
     <span class="grow"></span>
     <span class="dim cn">{conn?.name ?? 'Connessione'}</span>
-    {#if !isPg}<button disabled={!mg.collection || mg.mode !== 'find'} use:tooltip={'Inserisce un nuovo documento nella collezione scelta'} onclick={newDoc}>Nuovo documento</button>{/if}
+    {#if !isSql}<button disabled={!mg.collection || mg.mode !== 'find'} use:tooltip={'Inserisce un nuovo documento nella collezione scelta'} onclick={newDoc}>Nuovo documento</button>{/if}
     <button class:on={histOpen} aria-expanded={histOpen} use:tooltip={'Ultime 200 query eseguite su questa connessione'} onclick={() => void toggleHistory()}><Icon name="history" size={13} /> Cronologia</button>
     <button disabled={resultId === undefined} use:tooltip={'Esporta il risultato in CSV (tutte le righe, anche non caricate)'} onclick={() => void doExport('csv')}><Icon name="download" size={13} /> CSV</button>
     <button disabled={resultId === undefined} use:tooltip={'Esporta il risultato in JSON (tutte le righe, anche non caricate)'} onclick={() => void doExport('json')}><Icon name="download" size={13} /> JSON</button>
@@ -417,7 +421,7 @@
   {/if}
 
   <div class="top" style="height: {topH}px">
-    {#if isPg}
+    {#if isSql}
       {#if monaco}<div class="ed" use:mount={{ field: 'sql', language: 'sql', value: sql, set: (v) => (sql = v) }}></div>{:else}<p class="dim pad">Caricamento editor…</p>{/if}
     {:else}
       <div class="mform">
@@ -460,11 +464,11 @@
     {#if info}<div class="msg" role="status">{info}</div>{/if}
     {#each notices as n}<div class="msg note" role="status">{n}</div>{/each}
     {#if hasGrid}
-      {#if isPg && editInfo.pk && editTarget && pendingCount > 0}
-        <EditBar {connId} schema={editTarget!.schema} table={editTarget!.table} edits={rowEdits} count={pendingCount} onapplied={() => void applied()} onclear={() => (edits = emptyEdits())} />
+      {#if isSql && editInfo.pk && editTarget && pendingCount > 0}
+        <EditBar {connId} oracle={isOra} schema={editTarget!.schema} table={editTarget!.table} edits={rowEdits} count={pendingCount} onapplied={() => void applied()} onclear={() => (edits = emptyEdits())} />
       {/if}
       {#key resultKey}
-        <ResultGrid columns={grid.columns} rows={grid.rows} truncated={grid.truncated} {hasMore} loading={paging} onmore={() => void more()} pk={editInfo.pk} {edits} onedit={(e) => (edits = e)} note={editInfo.note} onopen={canOpenDoc ? openDoc : undefined} />
+        <ResultGrid columns={grid.columns} rows={grid.rows} truncated={grid.truncated} {hasMore} loading={paging} onmore={() => void more()} pk={editInfo.pk} readOnlyCols={editInfo.ro} {edits} onedit={(e) => (edits = e)} note={editInfo.note} onopen={canOpenDoc ? openDoc : undefined} />
       {/key}
     {:else if affected}
       <ul class="aff">

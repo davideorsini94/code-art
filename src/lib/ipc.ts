@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DbConnection, DbExported, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, DbStateEvent, Project, ProjectBranch } from './types'
+import type { DbConnection, DbExported, DbQueryPage, DbQueryResult, MongoDb, PgColumn, PgRowEdit, PgTree, DbConnectionInput, DbHistoryEntry, OracleClientStatus, DbStateEvent, Project, ProjectBranch } from './types'
 
 export const projectCurrent = () => invoke<Project>('project_current')
 // Le cartelle entrano in un progetto solo dal selettore nativo aperto dal core: nessun percorso parte da qui.
@@ -198,6 +198,11 @@ export const dbHistory = (id: string) => invoke<DbHistoryEntry[]>('db_history', 
 /** Testo ≤ 100 KB; uguale alla voce più recente = non ripetuto. */
 export const dbHistoryAdd = (id: string, text: string) => invoke<void>('db_history_add', { id, text })
 
+/** Oracle Instant Client: stato (prova a caricare la cartella impostata), selettore nativo (`null` = annullato), uso di una cartella rilevata. */
+export const dbOracleClientStatus = () => invoke<OracleClientStatus>('db_oracle_client_status')
+export const dbOracleClientPick = () => invoke<OracleClientStatus | null>('db_oracle_client_pick')
+export const dbOracleClientUse = (dir: string) => invoke<OracleClientStatus>('db_oracle_client_use', { dir })
+
 // ---- Database: sessioni (evento `db:state` a tutte le finestre; `Err('auth')` = serve la password) ----
 export const dbConnect = (id: string) => invoke<void>('db_connect', { id })
 export const dbDisconnect = (id: string) => invoke<void>('db_disconnect', { id })
@@ -213,6 +218,14 @@ export const dbPgPreviewEdits = (id: string, schema: string, table: string, edit
 export const dbPgApplyEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
   invoke<{ affected: number }>('db_pg_apply_edits', { id, schema, table, edits })
 /** MongoDB: filtro, ordinamento, proiezione e pipeline sono testo JSON esteso, analizzato nel core. */
+// Oracle: stesse forme di Postgres (`schemas` = proprietari); `owner`/`table` come nel catalogo (maiuscole comprese)
+export const dbOraTree = (id: string) => invoke<PgTree>('db_ora_tree', { id })
+export const dbOraColumns = (id: string, owner: string, table: string) => invoke<PgColumn[]>('db_ora_columns', { id, owner, table })
+export const dbOraPreviewEdits = (id: string, owner: string, table: string, edits: PgRowEdit[]) =>
+  invoke<string[]>('db_ora_preview_edits', { id, owner, table, edits })
+export const dbOraApplyEdits = (id: string, owner: string, table: string, edits: PgRowEdit[]) =>
+  invoke<{ affected: number }>('db_ora_apply_edits', { id, owner, table, edits })
+
 export const dbMongoTree = (id: string) => invoke<MongoDb[]>('db_mongo_tree', { id })
 export const dbMongoFind = (id: string, db: string, coll: string, filter: string, sort: string, projection: string) =>
   invoke<DbQueryResult>('db_mongo_find', { id, db, coll, filter, sort, projection })

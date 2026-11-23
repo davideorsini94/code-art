@@ -3,6 +3,10 @@
 //! stanno nei moduli dei driver.
 pub mod export;
 pub mod mongo;
+pub mod ora;
+pub mod ora_edit;
+pub mod ora_query;
+pub mod oracle_client;
 pub mod pg;
 pub mod pg_edit;
 pub mod pg_query;
@@ -26,6 +30,7 @@ pub const MAX_HISTORY_BYTES: usize = 100 * 1024;
 pub enum DbKind {
     Postgres,
     Mongo,
+    Oracle,
 }
 
 impl DbKind {
@@ -33,12 +38,14 @@ impl DbKind {
         match self {
             DbKind::Postgres => "postgres",
             DbKind::Mongo => "mongo",
+            DbKind::Oracle => "oracle",
         }
     }
     pub fn parse(s: &str) -> Option<DbKind> {
         match s {
             "postgres" => Some(DbKind::Postgres),
             "mongo" => Some(DbKind::Mongo),
+            "oracle" => Some(DbKind::Oracle),
             _ => None,
         }
     }
@@ -46,6 +53,7 @@ impl DbKind {
         match self {
             DbKind::Postgres => 5432,
             DbKind::Mongo => 27017,
+            DbKind::Oracle => 1521,
         }
     }
 }
@@ -164,6 +172,14 @@ pub fn validate_connection(c: &DbConnectionInput) -> Result<(), String> {
     if let Some(d) = &c.database {
         validate_text("Database", d)?;
     }
+    if c.kind == DbKind::Oracle {
+        // Oracle: il campo `database` è il nome del servizio (obbligatorio) e l'utente non può mancare
+        // (senza utente sarebbe l'autenticazione del sistema operativo, non supportata)
+        ora::validate_service(c.database.as_deref().unwrap_or(""))?;
+        if non_empty(&c.user).is_none() {
+            return Err("Utente: campo obbligatorio per Oracle".into());
+        }
+    }
     Ok(())
 }
 
@@ -278,10 +294,12 @@ pub async fn db_connection_delete(app: AppHandle, window: WebviewWindow, id: Str
     let store = ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
     crate::projects::off_main(move || {
         // una sessione aperta (anche da un'altra finestra) e il suo tunnel si chiudono prima
         sessions.disconnect(&id);
         mongo_sessions.disconnect(&id);
+        ora_sessions.disconnect(&id);
         delete_connection(&store, &DbKeychain, &id)
     })
     .await
@@ -323,7 +341,8 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
     let store = ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
-    let (conn, password, server) = crate::projects::off_main(move || {
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+    let (conn, password, server, client_dir) = crate::projects::off_main(move || {
         let conn = store.db_connections()?.into_iter().find(|c| c.id == id).ok_or_else(|| "Connessione non trovata".to_string())?;
         let server = match &conn.ssh_server_id {
             Some(s) => Some(ssh::find_server(&store, ssh::read_user_config().as_deref(), s)?),
@@ -331,12 +350,15 @@ pub async fn db_connect(app: AppHandle, window: WebviewWindow, id: String) -> Re
         };
         // senza password salvata si prova comunque (autenticazione `trust`); se serve, il server risponde `auth`
         let password = keychain::get(keychain::DB_SERVICE, &conn.id).unwrap_or(None);
-        Ok((conn, password, server))
+        // la cartella di Instant Client sta nelle impostazioni (scritta solo dal core); serve solo a Oracle
+        let client_dir = store.setting_get(oracle_client::CLIENT_DIR_KEY)?.filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+        Ok((conn, password, server, client_dir))
     })
     .await?;
     match conn.kind {
         DbKind::Postgres => sessions.connect(&conn.id, pg::PgParams::from_connection(&conn), password, server).await,
         DbKind::Mongo => mongo_sessions.connect(&conn.id, mongo::MongoParams::from_connection(&conn), password, server).await,
+        DbKind::Oracle => ora_sessions.connect(&conn.id, ora::OraParams::from_connection(&conn), password, server, client_dir).await,
     }
 }
 
@@ -345,9 +367,11 @@ pub async fn db_disconnect(app: AppHandle, window: WebviewWindow, id: String) ->
     ssh::trusted_store(&app, &window)?;
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+    let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
     crate::projects::off_main(move || {
         sessions.disconnect(&id);
         mongo_sessions.disconnect(&id);
+        ora_sessions.disconnect(&id);
         Ok(())
     })
     .await
@@ -359,6 +383,7 @@ pub async fn db_states(app: AppHandle, window: WebviewWindow) -> Result<Vec<ssh:
     ssh::trusted_store(&app, &window)?;
     let mut all = app.state::<Arc<pg::Sessions>>().states();
     all.extend(app.state::<Arc<mongo::MongoSessions>>().states());
+    all.extend(app.state::<Arc<ora::OraSessions>>().states());
     all.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(all)
 }
@@ -409,12 +434,45 @@ pub async fn db_pg_apply_edits(app: AppHandle, window: WebviewWindow, id: String
     pg_edit::execute(app.state::<Arc<pg_query::Queries>>().inner(), &sessions, &id, &stmts).await
 }
 
+/// Proprietari con tabelle e viste visibili alla connessione Oracle (esclusi gli schemi di sistema); stessa forma di `PgTree`.
+#[tauri::command]
+pub async fn db_ora_tree(app: AppHandle, window: WebviewWindow, id: String) -> Result<pg_query::PgTree, String> {
+    ssh::trusted_store(&app, &window)?;
+    ora_query::tree(app.state::<Arc<ora::OraSessions>>().inner(), &id).await
+}
+
+#[tauri::command]
+pub async fn db_ora_columns(app: AppHandle, window: WebviewWindow, id: String, owner: String, table: String) -> Result<Vec<ora_query::OraColumn>, String> {
+    ssh::trusted_store(&app, &window)?;
+    ora_query::columns(app.state::<Arc<ora::OraSessions>>().inner(), &id, &owner, &table).await
+}
+
+/// Come `db_pg_preview_edits`, per Oracle: colonne e tipi dal catalogo, valori inseriti solo per la lettura.
+#[tauri::command]
+pub async fn db_ora_preview_edits(app: AppHandle, window: WebviewWindow, id: String, owner: String, table: String, edits: Vec<pg_edit::RowEdit>) -> Result<Vec<String>, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+    Ok(pg_edit::previews(&ora_edit::plan(&sessions, &id, &owner, &table, &edits).await?))
+}
+
+/// Come `db_pg_apply_edits`, per Oracle: conferma nativa del core, poi una transazione esplicita nel thread della
+/// sessione; ogni istruzione deve toccare esattamente una riga, altrimenti `ROLLBACK`.
+#[tauri::command]
+pub async fn db_ora_apply_edits(app: AppHandle, window: WebviewWindow, id: String, owner: String, table: String, edits: Vec<pg_edit::RowEdit>) -> Result<pg_edit::ApplyResult, String> {
+    ssh::trusted_store(&app, &window)?;
+    let sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+    let stmts = ora_edit::plan(&sessions, &id, &owner, &table, &edits).await?;
+    confirm_native(&app, &window, pg_edit::APPLY_TITLE, pg_edit::confirm_message(&stmts), pg_edit::BTN_APPLY).await?;
+    ora_edit::execute(&sessions, &id, &stmts).await
+}
+
 /// Esegue un testo SQL. `UPDATE`/`DELETE` senza `WHERE`, `DROP` e `TRUNCATE` (controllo lessicale di aiuto) chiedono
 /// prima una conferma nativa del core (titolo fisso, «Annulla» predefinito): rifiutata = `Err("annullato")`, nulla eseguito.
 #[tauri::command]
 pub async fn db_query(app: AppHandle, window: WebviewWindow, id: String, text: String) -> Result<pg_query::QueryResult, String> {
-    ssh::trusted_store(&app, &window)?;
-    let flags = pg_query::destructive(&text);
+    let store = ssh::trusted_store(&app, &window)?;
+    let oracle = is_oracle(store, &id).await?;
+    let flags = if oracle { ora_query::destructive(&text) } else { pg_query::destructive(&text) };
     if !flags.is_empty() {
         let message = pg_query::confirm_message(&flags);
         let confirm = crate::git::write::NativeConfirm { app: app.clone(), window: window.clone() };
@@ -427,8 +485,22 @@ pub async fn db_query(app: AppHandle, window: WebviewWindow, id: String, text: S
             return Err(pg_query::DECLINED.into());
         }
     }
+    if oracle {
+        let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+        return ora_query::query(&ora_sessions, &id, &text).await;
+    }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().query(&sessions, &id, &text).await
+}
+
+/// La connessione salvata è Oracle? (le altre vanno ai percorsi di Postgres) Id sconosciuto = errore.
+async fn is_oracle(store: Store, id: &str) -> Result<bool, String> {
+    let id = id.to_string();
+    crate::projects::off_main(move || {
+        let conn = store.db_connections()?.into_iter().find(|c| c.id == id).ok_or_else(|| "Connessione non trovata".to_string())?;
+        Ok(conn.kind == DbKind::Oracle)
+    })
+    .await
 }
 
 /// Pagina successiva di un risultato con cursore aperto.
@@ -437,6 +509,9 @@ pub async fn db_query_more(app: AppHandle, window: WebviewWindow, result_id: u64
     ssh::trusted_store(&app, &window)?;
     if mongo::is_mongo_result(result_id) {
         return app.state::<Arc<mongo::MongoSessions>>().more(result_id).await;
+    }
+    if ora_query::is_ora_result(result_id) {
+        return ora_query::more(app.state::<Arc<ora::OraSessions>>().inner(), result_id).await;
     }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().more(&sessions, result_id).await
@@ -448,6 +523,9 @@ pub async fn db_query_close(app: AppHandle, window: WebviewWindow, result_id: u6
     if mongo::is_mongo_result(result_id) {
         app.state::<Arc<mongo::MongoSessions>>().close(result_id);
         return Ok(());
+    }
+    if ora_query::is_ora_result(result_id) {
+        return ora_query::close(app.state::<Arc<ora::OraSessions>>().inner(), result_id).await;
     }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     app.state::<Arc<pg_query::Queries>>().inner().clone().close(&sessions, result_id).await
@@ -464,17 +542,26 @@ pub async fn db_export(app: AppHandle, window: WebviewWindow, result_id: u64, fo
     let dialog = app.dialog().file().set_title("Esporta il risultato").set_parent(&window).set_file_name(format.file_name()).add_filter(label, exts);
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file()).await.map_err(|e| e.to_string())?;
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
-    let queries = app.state::<Arc<pg_query::Queries>>().inner().clone();
-    let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
-    let rows = export::export_to(&queries, &sessions, &mongo_sessions, result_id, format, &path).await?;
+    let rows = if ora_query::is_ora_result(result_id) {
+        export::export_ora(app.state::<Arc<ora::OraSessions>>().inner(), result_id, format, &path).await?
+    } else {
+        let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
+        let queries = app.state::<Arc<pg_query::Queries>>().inner().clone();
+        let mongo_sessions = app.state::<Arc<mongo::MongoSessions>>().inner().clone();
+        export::export_to(&queries, &sessions, &mongo_sessions, result_id, format, &path).await?
+    };
     Ok(Some(export::Exported { path: path.to_string_lossy().into_owned(), rows }))
 }
 
-/// Annulla la query in corso sulla connessione (`CancelToken`, stesso TLS).
+/// Annulla la query in corso sulla connessione (Postgres: `CancelToken`, stesso TLS; Oracle: `break_execution`).
 #[tauri::command]
 pub async fn db_query_cancel(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
-    ssh::trusted_store(&app, &window)?;
+    let store = ssh::trusted_store(&app, &window)?;
+    if is_oracle(store, &id).await? {
+        let ora_sessions = app.state::<Arc<ora::OraSessions>>().inner().clone();
+        // `break_execution` è una chiamata del driver: fuori dal runtime
+        return crate::projects::off_main(move || ora_sessions.cancel(&id)).await;
+    }
     let sessions = app.state::<Arc<pg::Sessions>>().inner().clone();
     pg_query::cancel(&sessions, &id).await
 }
@@ -774,9 +861,25 @@ mod tests {
     #[test]
     fn kind_and_tls_wire_names() {
         assert_eq!(serde_json::to_string(&DbKind::Mongo).unwrap(), "\"mongo\"");
+        assert_eq!(serde_json::to_string(&DbKind::Oracle).unwrap(), "\"oracle\"");
+        assert_eq!(DbKind::parse("oracle"), Some(DbKind::Oracle));
+        assert_eq!(DbKind::Oracle.default_port(), 1521);
         assert_eq!(serde_json::to_string(&DbTls::Prefer).unwrap(), "\"prefer\"");
         let i: DbConnectionInput =
             serde_json::from_str(r#"{"kind":"postgres","name":"n","host":"h","tls":"disable","sshServerId":null}"#).unwrap();
         assert_eq!((i.kind, i.tls, i.accept_invalid_certs, i.port), (DbKind::Postgres, DbTls::Disable, false, None));
+    }
+
+    #[test]
+    fn oracle_needs_service_and_user() {
+        let mut i = input("o", "db.test");
+        i.kind = DbKind::Oracle;
+        assert!(validate_connection(&i).unwrap_err().starts_with("Servizio"));
+        i.database = Some("ORCL".into());
+        assert!(validate_connection(&i).unwrap_err().starts_with("Utente"));
+        i.user = Some("scott".into());
+        assert!(validate_connection(&i).is_ok());
+        i.database = Some("a b".into());
+        assert!(validate_connection(&i).is_err());
     }
 }

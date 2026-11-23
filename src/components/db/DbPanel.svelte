@@ -8,6 +8,7 @@
   import { ssh } from '../../lib/stores/ssh.svelte'
   import DbForm from './DbForm.svelte'
   import DbTree from './DbTree.svelte'
+  import OracleClientGuide from './OracleClientGuide.svelte'
   import type { DbConnection } from '../../lib/types'
 
   let form = $state<{ connection: DbConnection | null } | null>(null)
@@ -17,6 +18,15 @@
   onMount(() => {
     void db.init()
     void ssh.init() // elenco dei server per il tunnel
+  })
+
+  const hasOracle = $derived(db.connections.some((c) => c.kind === 'oracle'))
+  let probed = false
+  $effect(() => {
+    if (hasOracle && !probed) {
+      probed = true
+      void db.refreshClient()
+    }
   })
 
   const STATE_LABEL = { connecting: 'Connessione…', connected: 'Connesso', disconnected: 'Non connesso', error: 'Errore' } as const
@@ -55,6 +65,13 @@
     {/key}
   {/if}
 
+  {#if hasOracle && db.oracleClient && !db.oracleClient.loaded}
+    <OracleClientGuide />
+  {/if}
+  {#if db.guideFor}
+    <OracleClientGuide modal onclose={() => (db.guideFor = null)} />
+  {/if}
+
   {#if db.passwordFor}
     {@const target = db.connections.find((c) => c.id === db.passwordFor)}
     <form class="pw" onsubmit={sendPassword}>
@@ -77,7 +94,7 @@
       {@const msg = db.errors[c.id] ?? db.states[c.id]?.message}
       <li>
         <div class="srv">
-          <button class="name" aria-expanded={!!openIds[c.id]} use:tooltip={`${c.kind === 'postgres' ? 'Postgres' : 'MongoDB'} · ${c.user ? c.user + '@' : ''}${c.host}:${c.port}`} onclick={() => (openIds[c.id] = !openIds[c.id])}>
+          <button class="name" aria-expanded={!!openIds[c.id]} use:tooltip={`${c.kind === 'postgres' ? 'Postgres' : c.kind === 'oracle' ? 'Oracle' : 'MongoDB'} · ${c.user ? c.user + '@' : ''}${c.host}:${c.port}`} onclick={() => (openIds[c.id] = !openIds[c.id])}>
             <span class="dot {st}" use:tooltip={msg ? `${STATE_LABEL[st]}: ${msg}` : STATE_LABEL[st]} role="img" aria-label={STATE_LABEL[st]}></span>
             <span class="label">{c.name}</span>
             {#if c.acceptInvalidCerts}<span class="tag warn" use:tooltip={'Accetta certificati non validi'}>cert.</span>{/if}

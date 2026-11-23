@@ -14,6 +14,8 @@ vi.mock('../../lib/ipc', () => ({
   dbConnectionSave: vi.fn(async (i: { id?: string }) => ({ id: i.id ?? 'n1', hasPassword: false })),
   dbConnectionDelete: vi.fn(),
   dbPgTree: vi.fn(async () => ({ schemas: [{ name: 's"; DROP', tables: [{ name: HOSTILE, kind: 'table' }, { name: 'v1', kind: 'view' }] }] })),
+  dbOraTree: vi.fn(async () => ({ schemas: [{ name: 'HR', tables: [{ name: 'EMP', kind: 'table' }] }] })),
+  dbOracleClientStatus: vi.fn(),
   dbMongoTree: vi.fn(async () => [{ database: HOSTILE, collections: ['<b>c</b>'] }]),
   sshServers: vi.fn(async () => [{ id: 'srv1', name: 'Bastione', host: 'h', user: null, port: null, identityFile: null, startDir: null, source: 'saved', hasPassword: false }]),
   sshStates: vi.fn(async () => []),
@@ -32,6 +34,8 @@ afterEach(() => {
   db.pendingQuery = null
   db.trees = {}
   db.connections = []
+  db.guideFor = null
+  db.oracleClient = null
 })
 
 describe('DbForm', () => {
@@ -74,7 +78,53 @@ describe('DbForm', () => {
   })
 })
 
+describe('DbForm Oracle', () => {
+  it('Oracle: porta 1521, Servizio obbligatorio, niente TLS e nota sul tunnel', async () => {
+    const { container } = render(DbForm, { onclose: () => {} })
+    await fireEvent.change(container.querySelector('select') as HTMLSelectElement, { target: { value: 'oracle' } })
+    expect((screen.getByLabelText('Porta') as HTMLInputElement).value).toBe('1521')
+    expect(screen.getByLabelText(/Servizio/)).toBeTruthy()
+    expect(screen.queryByLabelText('Database')).toBeNull()
+    expect(screen.queryByLabelText(/^TLS/)).toBeNull()
+    expect(screen.queryByText(/certificati non validi/i)).toBeNull()
+    expect(screen.getByText('Solo TCP: per cifrare la connessione usa un tunnel SSH')).toBeTruthy()
+    await fireEvent.input(screen.getByLabelText('Nome'), { target: { value: 'O' } })
+    await fireEvent.input(screen.getByLabelText('Host'), { target: { value: 'h' } })
+    await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+    await screen.findByText(/Indica il servizio/)
+    expect(ipc.dbConnectionSave).not.toHaveBeenCalled()
+    await fireEvent.input(screen.getByLabelText(/Servizio/), { target: { value: 'XEPDB1' } })
+    await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+    await waitFor(() => expect(ipc.dbConnectionSave).toHaveBeenCalled())
+    expect(vi.mocked(ipc.dbConnectionSave).mock.calls[0][0]).toMatchObject({ kind: 'oracle', port: 1521, database: 'XEPDB1', tls: 'disable' })
+  })
+})
+
 describe('DbTree', () => {
+  it('Oracle: albero da dbOraTree e apertura della tabella con nomi esatti', async () => {
+    db.connections = [{ id: 'o1', kind: 'oracle', name: 'x', host: 'h', port: 1521, user: null, database: 'S', tls: 'disable', acceptInvalidCerts: false, sshServerId: null, hasPassword: false }]
+    await db.loadTree('o1')
+    expect(ipc.dbOraTree).toHaveBeenCalledWith('o1')
+    render(DbTree, { connectionId: 'o1', kind: 'oracle' })
+    await fireEvent.click(screen.getByText('HR'))
+    await fireEvent.click(screen.getByText('EMP'))
+    expect(db.pendingQuery).toEqual({ connectionId: 'o1', kind: 'oracle', schema: 'HR', table: 'EMP' })
+  })
+
+  it('un errore oracle_client alla connessione apre la guida', async () => {
+    db.connections = [{ id: 'o1', kind: 'oracle', name: 'x', host: 'h', port: 1521, user: null, database: 'S', tls: 'disable', acceptInvalidCerts: false, sshServerId: null, hasPassword: false }]
+    vi.mocked(ipc.dbConnect).mockRejectedValueOnce('oracle_client')
+    vi.mocked(ipc.dbOracleClientStatus).mockResolvedValue({ dir: null, loaded: false, detected: [], error: null })
+    await db.connect('o1')
+    expect(db.guideFor).toBe('o1')
+    db.guideFor = null
+    // errore di rete con client caricato: niente guida
+    vi.mocked(ipc.dbConnect).mockRejectedValueOnce('rifiutata')
+    vi.mocked(ipc.dbOracleClientStatus).mockResolvedValue({ dir: '/x', loaded: true, detected: [], error: null })
+    await db.connect('o1')
+    expect(db.guideFor).toBeNull()
+  })
+
   it('renders Postgres schemas and tables as text and opens a table on click', async () => {
     db.connections = [{ id: 'c1', kind: 'postgres', name: 'x', host: 'h', port: 5432, user: null, database: null, tls: 'prefer', acceptInvalidCerts: false, sshServerId: null, hasPassword: false }]
     await db.loadTree('c1')

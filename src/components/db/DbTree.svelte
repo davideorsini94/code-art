@@ -43,7 +43,7 @@
 {/snippet}
 
 <div class="tree" class:off={disabled} role="tree" aria-label="Struttura del database">
-  {#if data?.kind === 'postgres'}
+  {#if data?.kind === 'postgres' || data?.kind === 'oracle'}
     {#each data.tree.schemas as s, i (`${i}:${s.name}`)}
       {@const k = `s:${s.name}`}
       <div class="row" role="treeitem" aria-selected="false" aria-expanded={!!expanded[k]} tabindex="0" use:tooltip={'Mostra o nasconde le tabelle'}

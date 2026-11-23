@@ -213,6 +213,18 @@ pub async fn export_to(
     Ok(rows as u64)
 }
 
+/// Come `export_to`, per un risultato Oracle: raccoglie le righe dal thread della sessione e le scrive in `path`.
+pub async fn export_ora(sessions: &super::ora::OraSessions, result_id: u64, format: Format, path: &Path) -> Result<u64, String> {
+    let (cols, rows) = super::ora_query::drain(sessions, result_id).await?;
+    let names: Vec<String> = cols.into_iter().map(|c| c.name).collect();
+    let text = match format {
+        Format::Csv => csv_table(&names, &rows),
+        Format::Json => pg_json(&names, &rows),
+    };
+    write_atomic(path, text.as_bytes())?;
+    Ok(rows.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

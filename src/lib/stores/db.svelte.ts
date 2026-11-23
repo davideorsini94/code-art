@@ -1,12 +1,12 @@
 import * as ipc from '../ipc'
 import { listenDbState } from '../events'
 import { errorText } from '../errors'
-import type { DbConnection, DbConnectionInput, DbKind, DbStateEvent, MongoDb, PgTree } from '../types'
+import type { DbConnection, DbConnectionInput, DbKind, DbStateEvent, MongoDb, OracleClientStatus, PgTree } from '../types'
 
 export type DbConnState = DbStateEvent['state']
 
 /** Albero di una connessione: schemi/tabelle (Postgres) o database/collezioni (MongoDB). */
-export type DbTreeData = { kind: 'postgres'; tree: PgTree } | { kind: 'mongo'; dbs: MongoDb[] }
+export type DbTreeData = { kind: 'postgres'; tree: PgTree } | { kind: 'oracle'; tree: PgTree } | { kind: 'mongo'; dbs: MongoDb[] }
 
 /** Richiesta di aprire una scheda query. Senza `table`/`collection` = query vuota. */
 export type DbQueryRequest = {
@@ -31,6 +31,10 @@ export class DbStore {
   trees = $state<Record<string, DbTreeData>>({})
   treeErrors = $state<Record<string, string>>({})
   notice = $state<string | null>(null)
+  /** Stato di Oracle Instant Client (`null` = non ancora letto). */
+  oracleClient = $state<OracleClientStatus | null>(null)
+  /** Connessione Oracle fallita per il client mancante: la vista mostra la guida e, a client caricato, la riprova. */
+  guideFor = $state<string | null>(null)
   loaded = $state(false)
   /** Ultima richiesta di apertura query; la consuma la scheda query (Task 8) e poi la azzera. */
   pendingQuery = $state<DbQueryRequest | null>(null)
@@ -95,7 +99,12 @@ export class DbStore {
         // il tipo può non essere ancora noto (evento prima dell'elenco): lo si ricava dopo il refresh
         const k = kind ?? (await this.kindOf(id))
         if (!k) return
-        this.trees[id] = k === 'postgres' ? { kind: 'postgres', tree: await ipc.dbPgTree(id) } : { kind: 'mongo', dbs: await ipc.dbMongoTree(id) }
+        this.trees[id] =
+          k === 'postgres'
+            ? { kind: 'postgres', tree: await ipc.dbPgTree(id) }
+            : k === 'oracle'
+              ? { kind: 'oracle', tree: await ipc.dbOraTree(id) }
+              : { kind: 'mongo', dbs: await ipc.dbMongoTree(id) }
         delete this.treeErrors[id]
       } catch (e) {
         this.treeErrors[id] = errorText(e)
@@ -126,8 +135,39 @@ export class DbStore {
         this.passwordFor = id
         return
       }
-      this.errors[id] = errorText(e)
+      const raw = String(e)
+      this.errors[id] = raw === 'oracle_client' ? 'Oracle Instant Client non configurato' : errorText(e)
       this.states[id] = { state: 'error', message: this.errors[id] }
+      if (this.connections.find((c) => c.id === id)?.kind === 'oracle') await this.checkClient(id, raw === 'oracle_client')
+    }
+  }
+
+  /** Dopo un errore Oracle: se il client non è caricato (o il core ha detto `oracle_client`) si apre la guida. */
+  private async checkClient(id: string, certain: boolean) {
+    try {
+      this.oracleClient = await ipc.dbOracleClientStatus()
+      if (!this.oracleClient.loaded) this.guideFor = id
+    } catch {
+      if (certain) this.guideFor = id
+    }
+  }
+
+  /** Legge lo stato di Instant Client (anche per la scheda del pannello). */
+  async refreshClient() {
+    try {
+      this.oracleClient = await ipc.dbOracleClientStatus()
+    } catch {
+      /* resta lo stato precedente */
+    }
+  }
+
+  /** Registra il nuovo stato del client; se si è caricato e una connessione aspettava, la riprova. */
+  async applyClientStatus(st: OracleClientStatus) {
+    this.oracleClient = st
+    const id = this.guideFor
+    if (st.loaded && id) {
+      this.guideFor = null
+      await this.connect(id)
     }
   }
 
