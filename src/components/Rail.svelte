@@ -3,6 +3,7 @@
   import Icon, { type IconName } from './Icon.svelte'
   import { tooltip } from '../lib/tooltip'
   import { sidebar, type SidebarViewId } from '../lib/stores/sidebar.svelte'
+  import { terminals } from '../lib/stores/terminals.svelte'
 
   let { collapsed, ontoggle }: { collapsed: Set<string>; ontoggle: (col: ResizableCol) => void } = $props()
 
@@ -42,6 +43,15 @@
       <Icon name={v.icon} size={18} />
     </button>
   {/each}
+  <button
+    class:on={terminals.visible}
+    aria-pressed={terminals.visible}
+    use:tooltip={{ text: `${terminals.visible ? 'Nascondi' : 'Mostra'} i terminali`, shortcut: '⌃`' }}
+    aria-label="Terminale"
+    onclick={() => terminals.toggle()}
+  >
+    <Icon name="terminal" size={18} />
+  </button>
   {#each items as it (it.col)}
     <button class:on={!collapsed.has(it.col)} use:tooltip={`${collapsed.has(it.col) ? 'Mostra' : 'Nascondi'} ${it.what}`} aria-label={it.label} onclick={() => ontoggle(it.col)}>
       <Icon name={it.icon} size={18} />

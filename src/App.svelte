@@ -27,7 +27,7 @@
   import { onMount, untrack } from 'svelte'
   import { terminals } from './lib/stores/terminals.svelte'
   import { tooltip } from './lib/tooltip'
-  import { clampWidths, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
+  import { clampWidths, editorColumnShown, gridTemplate, loadLayout, saveLayout, MIN_WIDTH, type ResizableCol } from './lib/layout'
 
   let claudeFound = $state(false)
 
@@ -78,13 +78,20 @@
     { col: 'conv', label: 'Conversazione' },
   ]
 
-  // colonna chiusa: 0px; altrimenti larghezza salvata. Dopo ogni colonna c'è una maniglia da 6px.
-  const template = $derived(
-    ['46px', ...cols.flatMap(({ col }) => (collapsed.has(col) ? ['0px', '0px'] : [`${widths[col]}px`, '6px'])), 'minmax(240px, 1fr)'].join(' '),
-  )
+  // area dei file: chiusa senza file aperti né terminali (lo spazio va alla colonna accanto)
+  const hasFiles = $derived(editor.tabs.length > 0)
+  const editorCol = $derived(editorColumnShown([...collapsed] as ResizableCol[], hasFiles || terminals.visible))
+  const template = $derived(gridTemplate(widths, [...collapsed] as ResizableCol[], editorCol))
 
-  let termHeight = $state(240)
+  // con file aperti il terminale prende la metà inferiore dell'area (a ogni apertura); senza file, tutta l'area
+  let termFrac = $state(0.5)
+  let editorSection = $state<HTMLElement>()
   const MIN_TERM = 100
+  let termWasVisible = false
+  $effect(() => {
+    if (terminals.visible && !termWasVisible) termFrac = 0.5
+    termWasVisible = terminals.visible
+  })
 
   // ⌃` mostra/nasconde il terminale (in fase di cattura: vale anche con il focus dentro xterm)
   onMount(() => {
@@ -150,11 +157,12 @@
   })
 
   function startTermResize(e: PointerEvent) {
+    const total = editorSection?.clientHeight ?? 0
+    if (total <= 2 * MIN_TERM) return
     const startY = e.clientY
-    const startH = termHeight
-    const max = () => Math.max(MIN_TERM, window.innerHeight - 200)
+    const startH = termFrac * total
     const move = (ev: PointerEvent) => {
-      termHeight = Math.min(max(), Math.max(MIN_TERM, startH - (ev.clientY - startY)))
+      termFrac = Math.min(total - MIN_TERM, Math.max(MIN_TERM, startH - (ev.clientY - startY))) / total
     }
     const up = () => {
       window.removeEventListener('pointermove', move)
@@ -209,11 +217,13 @@
         <span></span><span></span>
       {/if}
     {/each}
-    <section class="surface-opaque col editor" data-slot="editor" aria-label="Editor">
-      <div class="editor-area"><EditorPane /></div>
+    <section class="surface-opaque col editor" class:hidden={!editorCol} data-slot="editor" aria-label="Editor" bind:this={editorSection}>
+      <div class="editor-area" class:hidden={!hasFiles && terminals.visible}><EditorPane /></div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="vhandle" class:hidden={!terminals.visible} use:tooltip={'Trascina per ridimensionare il terminale'} onpointerdown={startTermResize}></div>
-      <div class="term-area" class:hidden={!terminals.visible} style:height="{termHeight}px"><TerminalPane visible={terminals.visible} /></div>
+      <div class="vhandle" class:hidden={!terminals.visible || !hasFiles} use:tooltip={'Trascina per ridimensionare il terminale'} onpointerdown={startTermResize}></div>
+      <div class="term-area" class:hidden={!terminals.visible} class:full={!hasFiles} style:height={hasFiles ? `${termFrac * 100}%` : null}>
+        <TerminalPane visible={terminals.visible} />
+      </div>
     </section>
   </main>
   {/if}
@@ -229,9 +239,10 @@
   .col.editor { padding: 0; display: flex; flex-direction: column; }
   .editor-area { flex: 1; min-height: 0; }
   .term-area { flex: none; min-height: 0; }
+  .term-area.full { flex: 1; }
   .vhandle { flex: none; height: 5px; margin-top: -2px; cursor: row-resize; position: relative; z-index: 1; }
   .vhandle:hover { background: var(--edge-soft); }
-  .hidden { display: none; }
+  .hidden, .col.editor.hidden { display: none; }
   .slot.rail { display: contents; }
   .welcome { flex: 1; display: grid; place-items: center; }
   .welcome-box { padding: 32px 48px; display: flex; flex-direction: column; align-items: center; gap: 16px; }

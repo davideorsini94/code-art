@@ -263,8 +263,11 @@
     live.delete(key)
     const i = tabs.findIndex((t) => t.key === key)
     tabs.splice(i, 1)
-    if (tabs.length === 0) active = null
-    else if (active === key) select(tabs[Math.min(i, tabs.length - 1)].key)
+    if (tabs.length === 0) {
+      // chiuso l'ultimo terminale si chiude il pannello (non se ne apre uno nuovo)
+      active = null
+      terminals.visible = false
+    } else if (active === key) select(tabs[Math.min(i, tabs.length - 1)].key)
   }
 
   // ogni richiesta dello store apre una scheda nella sua cartella (prima della scheda di default)

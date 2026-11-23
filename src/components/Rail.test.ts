@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Rail from './Rail.svelte'
 import { sidebar } from '../lib/stores/sidebar.svelte'
+import { terminals } from '../lib/stores/terminals.svelte'
 import { resetTooltipForTests } from '../lib/tooltip'
 
 beforeEach(() => {
@@ -90,5 +91,17 @@ describe('Rail views', () => {
     await fireEvent.click(btn)
     expect(sidebar.view).toBe('settings')
     expect(ontoggle).toHaveBeenCalledWith('sidebar')
+  })
+
+  it('Terminale mostra e nasconde i terminali', async () => {
+    terminals.visible = false
+    render(Rail, { collapsed: new Set<string>(), ontoggle: () => {} })
+    const btn = screen.getByRole('button', { name: 'Terminale' })
+    expect(btn.getAttribute('aria-pressed')).toBe('false')
+    await fireEvent.click(btn)
+    expect(terminals.visible).toBe(true)
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+    await fireEvent.click(btn)
+    expect(terminals.visible).toBe(false)
   })
 })

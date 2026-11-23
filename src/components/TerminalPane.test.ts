@@ -192,4 +192,25 @@ describe('TerminalPane', () => {
     await waitFor(() => expect(ipc.ptyKill).toHaveBeenCalledWith(42))
     expect(ctl.writes).toEqual([])
   })
+
+  it('closing the last terminal hides the panel instead of opening a new one', async () => {
+    terminals.visible = true
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    await waitFor(() => expect(ipc.ptySpawn).toHaveBeenCalledTimes(1))
+    await fireEvent.click(screen.getByLabelText(/^Chiudi/))
+    await waitFor(() => expect(tabs()).toHaveLength(0))
+    expect(terminals.visible).toBe(false)
+    expect(ipc.ptySpawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('closing one of two terminals keeps the panel open on the other', async () => {
+    terminals.open('/Users/dev/app/api')
+    terminals.open('/Users/dev/app/web')
+    render(TerminalPane, { visible: true })
+    await waitFor(() => expect(tabs()).toHaveLength(2))
+    await fireEvent.click(screen.getAllByLabelText(/^Chiudi/)[0])
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    expect(terminals.visible).toBe(true)
+  })
 })

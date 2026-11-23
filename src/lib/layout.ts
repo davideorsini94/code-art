@@ -29,6 +29,24 @@ export function clampWidths(widths: Record<ResizableCol, number>, collapsed: Res
   return out
 }
 
+const COLS: ResizableCol[] = ['sidebar', 'conv']
+const FLEX = 'minmax(240px, 1fr)'
+
+/** L'area dei file (editor e terminali) è chiusa quando non c'è niente da mostrare, purché resti aperta un'altra
+ *  colonna: la finestra non resta mai vuota. */
+export function editorColumnShown(collapsed: ResizableCol[], hasContent: boolean): boolean {
+  return hasContent || COLS.every((c) => collapsed.includes(c))
+}
+
+/** Colonne della griglia di App: barra icone, poi ogni colonna (0px se chiusa) con la sua maniglia da 6px, poi
+ *  l'area dei file che prende lo spazio libero. Ad area chiusa lo spazio libero va all'ultima colonna aperta, la
+ *  cui maniglia sparisce (non c'è niente da ridimensionare alla sua destra). */
+export function gridTemplate(widths: Record<ResizableCol, number>, collapsed: ResizableCol[], editorCol: boolean): string {
+  const last = editorCol ? null : [...COLS].reverse().find((c) => !collapsed.includes(c))
+  const parts = COLS.flatMap((c) => (collapsed.includes(c) ? ['0px', '0px'] : c === last ? [FLEX, '0px'] : [`${widths[c]}px`, '6px']))
+  return ['46px', ...parts, ...(editorCol ? [FLEX] : [])].join(' ')
+}
+
 export function loadLayout(storage: Pick<Storage, 'getItem'> = localStorage): LayoutState {
   try {
     const raw = storage.getItem(STORAGE_KEY)
