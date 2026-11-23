@@ -202,6 +202,11 @@ impl Store {
         Ok(())
     }
 
+    /// Nuova sessione: solo `keep` resta fra i progetti da riaprire all'avvio.
+    pub fn clear_open_flags_except(&self, keep: &str) -> Result<()> {
+        self.conn().execute("UPDATE projects SET was_open = 0 WHERE id <> ?1", [keep]).map(|_| ()).map_err(err)
+    }
+
     pub fn open_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn();
         let mut stmt = conn

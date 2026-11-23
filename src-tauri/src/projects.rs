@@ -167,12 +167,26 @@ fn build_window(app: &AppHandle, label: &str, title: &str) -> tauri::Result<Webv
 
 /// Apre (o porta in primo piano) la finestra del progetto e ne ricorda lo stato "aperto".
 pub fn show_project_window(app: &AppHandle, project: &Project) -> Result<()> {
+    open_project_window(app, project, true)
+}
+
+/// Finestre di progetto aperte, esclusa `except`.
+fn other_project_windows(app: &AppHandle, except: &str) -> bool {
+    app.webview_windows().keys().any(|l| l.starts_with(PROJECT_PREFIX) && l != except)
+}
+
+/// `new_session`: aprire un progetto senza altre finestre di progetto aperte fa ripartire la sessione (i progetti
+/// tenuti da una sessione precedente non si riaprono più all'avvio). Falso quando si ripristina la sessione.
+fn open_project_window(app: &AppHandle, project: &Project, new_session: bool) -> Result<()> {
     let store = app.state::<Store>();
     let label = window_label(&project.id);
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();
         w.set_focus().map_err(|e| e.to_string())?;
     } else {
+        if new_session && !other_project_windows(app, &label) {
+            store.clear_open_flags_except(&project.id)?;
+        }
         build_window(app, &label, &project.name).map_err(|e| e.to_string())?;
     }
     store.set_open_flag(&project.id, true)?;
@@ -219,21 +233,22 @@ pub fn restore_windows(app: &AppHandle) -> Result<()> {
         return show_welcome_window(app);
     }
     for p in &open {
-        if let Err(e) = show_project_window(app, p) {
+        if let Err(e) = open_project_window(app, p, false) {
             eprintln!("impossibile riaprire il progetto {}: {e}", p.name);
         }
     }
     Ok(())
 }
 
-/// La chiusura di una finestra azzera `was_open` solo se non stiamo uscendo dall'app.
-pub fn should_clear_open_flag(quitting: bool) -> bool {
-    !quitting
+/// La chiusura di una finestra azzera `was_open` solo se non stiamo uscendo dall'app e restano altre finestre di
+/// progetto: chiudere l'ultima (l'app su macOS resta viva) la lascia nella sessione da riaprire, come VS Code.
+pub fn should_clear_open_flag(quitting: bool, others_open: bool) -> bool {
+    !quitting && others_open
 }
 
 /// Dimentica lo stato "aperto" di un progetto dopo la chiusura della sua finestra.
-pub fn handle_window_closed(store: &Store, label: &str, quitting: bool) -> Result<()> {
-    if !should_clear_open_flag(quitting) {
+pub fn handle_window_closed(store: &Store, label: &str, quitting: bool, others_open: bool) -> Result<()> {
+    if !should_clear_open_flag(quitting, others_open) {
         return Ok(());
     }
     match label.strip_prefix(PROJECT_PREFIX) {
@@ -257,7 +272,8 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     app.state::<crate::pty::Ptys>().kill_owner(label);
     app.state::<std::sync::Arc<crate::lifecycle::Lifecycle>>().window_gone(label);
     let quitting = app.state::<Quitting>().0.load(Ordering::SeqCst);
-    let _ = handle_window_closed(&app.state::<Store>(), label, quitting);
+    let others_open = other_project_windows(app, label);
+    let _ = handle_window_closed(&app.state::<Store>(), label, quitting, others_open);
 }
 
 /// Selettore nativo "Apri cartella": unica via (con menu e recenti) per aprire una cartella come progetto.
@@ -670,20 +686,37 @@ mod tests {
     }
 
     #[test]
-    fn closing_window_clears_flag_only_when_not_quitting() {
-        assert!(should_clear_open_flag(false));
-        assert!(!should_clear_open_flag(true));
+    fn closing_window_clears_flag_only_when_not_quitting_and_others_stay() {
+        assert!(should_clear_open_flag(false, true));
+        assert!(!should_clear_open_flag(true, true));
+        assert!(!should_clear_open_flag(false, false));
         let (_d, s) = store();
         let p = open_folder(&s, "/tmp/x/a").unwrap();
         let label = window_label(&p.id);
         s.set_open_flag(&p.id, true).unwrap();
-        handle_window_closed(&s, &label, true).unwrap();
+        handle_window_closed(&s, &label, true, true).unwrap();
         assert_eq!(s.open_projects().unwrap().len(), 1);
-        handle_window_closed(&s, "welcome", false).unwrap();
+        handle_window_closed(&s, "welcome", false, true).unwrap();
         assert_eq!(s.open_projects().unwrap().len(), 1);
-        handle_window_closed(&s, &label, false).unwrap();
+        // l'ultima finestra chiusa resta nella sessione da riaprire
+        handle_window_closed(&s, &label, false, false).unwrap();
+        assert_eq!(s.open_projects().unwrap().len(), 1);
+        handle_window_closed(&s, &label, false, true).unwrap();
         assert!(s.open_projects().unwrap().is_empty());
     }
+
+    #[test]
+    fn a_new_session_keeps_only_the_project_just_opened() {
+        let (_d, s) = store();
+        let a = open_folder(&s, "/tmp/x/a").unwrap();
+        let b = open_folder(&s, "/tmp/x/b").unwrap();
+        s.set_open_flag(&a.id, true).unwrap();
+        s.set_open_flag(&b.id, true).unwrap();
+        s.clear_open_flags_except(&b.id).unwrap();
+        let open = s.open_projects().unwrap();
+        assert_eq!(open.iter().map(|p| p.id.clone()).collect::<Vec<_>>(), vec![b.id]);
+    }
+
 
     #[test]
     fn add_folder_and_relocate() {
