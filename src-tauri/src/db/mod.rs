@@ -3,6 +3,7 @@
 //! stanno nei moduli dei driver.
 pub mod export;
 pub mod mongo;
+pub mod oracle_client;
 pub mod pg;
 pub mod pg_edit;
 pub mod pg_query;
