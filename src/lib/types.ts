@@ -207,7 +207,7 @@ export type ServerInput = {
   startDir?: string | null
 }
 
-// ---- Postgres: albero e risultati ----
+// ---- Postgres e Oracle: albero e risultati (Oracle riusa queste forme: `schemas` = proprietari, `editableTable.schema` = proprietario) ----
 export type PgTable = { name: string; kind: 'table' | 'view' }
 export type PgSchema = { name: string; tables: PgTable[] }
 export type PgTree = { schemas: PgSchema[] }

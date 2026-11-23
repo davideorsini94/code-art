@@ -14,6 +14,10 @@
 use super::mongo::NOT_CONNECTED;
 use super::pg::{sanitize, CONNECT_TIMEOUT, LOST, TIMED_OUT, UNREACHABLE};
 use super::tunnel::{self, Tunnel};
+use super::ora_edit;
+use super::ora_query::{col_kind, Drained, display_type, tree_sql, Executed, OpErr, OraColumn, OraCursor, Results, COLUMNS_SQL, RESOLVE_SQL};
+use super::pg_edit::Statement;
+use super::pg_query::{EditableTable, PgTree, QueryColumn, QueryPage, QueryResult, IDLE_TIMEOUT, PAGE};
 use super::DbConnection;
 use crate::lock;
 use crate::ssh::conn::{ConnState, Connections, StateEvent, AUTH};
@@ -174,6 +178,20 @@ pub enum Request {
     Ping(Reply<()>),
     /// Chiude la sessione: il thread esce.
     Close,
+    /// Esegue le istruzioni in ordine; l'ultimo insieme di righe resta aperto come risultato `rid`.
+    Query { rid: u64, stmts: Vec<String>, reply: Reply<QueryResult> },
+    /// Pagina successiva del risultato `rid`.
+    More { rid: u64, reply: Reply<QueryPage> },
+    /// Tutte le righe del risultato `rid` (esportazione).
+    Drain { rid: u64, reply: Reply<Drained> },
+    /// Chiude il risultato `rid`.
+    CloseResult { rid: u64, reply: Reply<()> },
+    /// La tabella (dal catalogo) di una lettura semplice; `owner` assente = lo schema corrente.
+    Resolve { owner: Option<String>, table: String, reply: Reply<Option<EditableTable>> },
+    Tree(Reply<PgTree>),
+    Columns { owner: String, table: String, reply: Reply<Vec<OraColumn>> },
+    /// Le modifiche della griglia in una sola transazione.
+    Apply { stmts: Vec<Statement>, reply: Reply<u64> },
 }
 
 /// Annulla la query in corso (`break_execution`): callable da qualunque thread.
@@ -184,17 +202,47 @@ pub trait Backend: Send + 'static {
     fn ping(&mut self) -> Result<(), OraErr>;
     /// Handle di annullamento, preso una volta dopo la connessione.
     fn breaker(&self) -> Breaker;
+    /// Esegue una sola istruzione. Se non legge righe la conclude con `COMMIT` (autocommit).
+    fn run(&mut self, _sql: &str) -> Result<Executed, OraErr> {
+        Err(unsupported())
+    }
+    /// Tabelle e viste visibili, senza gli schemi di sistema: (proprietario, nome, è una vista).
+    fn objects(&mut self) -> Result<Vec<(String, String, bool)>, OraErr> {
+        Err(unsupported())
+    }
+    fn columns(&mut self, _owner: &str, _table: &str) -> Result<Vec<OraColumn>, OraErr> {
+        Err(unsupported())
+    }
+    fn resolve(&mut self, _owner: Option<&str>, _table: &str) -> Result<Option<EditableTable>, OraErr> {
+        Err(unsupported())
+    }
+    /// Una modifica con i suoi parametri testuali, senza `COMMIT`: restituisce le righe toccate.
+    fn exec(&mut self, _sql: &str, _params: &[Option<String>]) -> Result<u64, OraErr> {
+        Err(unsupported())
+    }
+    fn commit(&mut self) -> Result<(), OraErr> {
+        Err(unsupported())
+    }
+    fn rollback(&mut self) -> Result<(), OraErr> {
+        Err(unsupported())
+    }
+}
+
+fn unsupported() -> OraErr {
+    OraErr::new("operazione non supportata")
 }
 
 /// Tempi dell'attore (iniettabili nei test).
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
     pub ping_every: Duration,
+    /// Un risultato con righe ancora da leggere si chiude dopo tanto tempo senza pagine.
+    pub idle: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Timing {
-        Timing { ping_every: PING_EVERY }
+        Timing { ping_every: PING_EVERY, idle: IDLE_TIMEOUT }
     }
 }
 
@@ -204,9 +252,19 @@ enum Flow {
     Lost(String),
 }
 
+/// Risponde a una richiesta con un esito di `OpErr`: la connessione caduta ferma il thread.
+fn reply_with<T>(reply: Reply<T>, r: Result<T, OpErr>) -> Flow {
+    let flow = match &r {
+        Err(OpErr::Db(e)) if e.is_connection_lost() => Flow::Lost(e.message.clone()),
+        _ => Flow::Continue,
+    };
+    let _ = reply.send(r.map_err(|e| e.text()));
+    flow
+}
+
 /// Smista una richiesta. Un errore di connessione caduta (`is_connection_lost`) in una qualunque richiesta
 /// restituisce `Lost`: il thread esce e la sessione diventa `disconnected`.
-fn serve(backend: &mut dyn Backend, req: Request) -> Flow {
+fn serve(backend: &mut dyn Backend, results: &mut Results, req: Request) -> Flow {
     match req {
         Request::Ping(reply) => {
             let r = backend.ping();
@@ -218,30 +276,62 @@ fn serve(backend: &mut dyn Backend, req: Request) -> Flow {
             flow
         }
         Request::Close => Flow::Stop,
+        Request::Query { rid, stmts, reply } => reply_with(reply, results.query(backend, rid, &stmts)),
+        Request::More { rid, reply } => reply_with(reply, results.more(rid)),
+        Request::Drain { rid, reply } => reply_with(reply, results.drain(rid)),
+        Request::CloseResult { rid, reply } => {
+            results.close(rid);
+            reply_with(reply, Ok(()))
+        }
+        Request::Resolve { owner, table, reply } => reply_with(reply, backend.resolve(owner.as_deref(), &table).map_err(OpErr::from)),
+        Request::Tree(reply) => reply_with(reply, backend.objects().map(super::ora_query::build_tree).map_err(OpErr::from)),
+        Request::Columns { owner, table, reply } => reply_with(reply, backend.columns(&owner, &table).map_err(OpErr::from)),
+        Request::Apply { stmts, reply } => reply_with(reply, ora_edit::run_apply(backend, &stmts)),
     }
 }
 
 /// Il ciclo del thread: richieste in ordine; a riposo un `ping` ogni `ping_every`, `PING_FAILURES` falliti di fila
-/// (o uno solo con connessione persa) = caduta. Restituisce il motivo se la connessione è caduta.
+/// (o uno solo con connessione persa) = caduta; i risultati con un cursore aperto si chiudono dopo `idle` senza pagine.
+/// Restituisce il motivo se la connessione è caduta.
 fn run_loop(backend: &mut dyn Backend, rx: &mpsc::Receiver<Request>, timing: Timing) -> Option<String> {
     let mut failures = 0;
+    let mut results = Results::default();
+    let mut last = Instant::now();
     loop {
-        match rx.recv_timeout(timing.ping_every) {
-            Ok(req) => match serve(backend, req) {
-                Flow::Continue => failures = 0,
-                Flow::Stop => return None,
-                Flow::Lost(m) => return Some(m),
-            },
-            Err(RecvTimeoutError::Timeout) => match backend.ping() {
-                Ok(()) => failures = 0,
-                Err(e) if e.is_connection_lost() => return Some(e.message),
-                Err(e) => {
-                    failures += 1;
-                    if failures >= PING_FAILURES {
-                        return Some(e.message);
+        let now = Instant::now();
+        results.expire(now, timing.idle);
+        let until_ping = timing.ping_every.saturating_sub(now.saturating_duration_since(last));
+        let wait = match results.next_deadline(timing.idle) {
+            Some(d) => until_ping.min(d.saturating_duration_since(now)),
+            None => until_ping,
+        };
+        match rx.recv_timeout(wait) {
+            Ok(req) => {
+                // un cursore scaduto nel frattempo non si serve più
+                results.expire(Instant::now(), timing.idle);
+                match serve(backend, &mut results, req) {
+                    Flow::Continue => failures = 0,
+                    Flow::Stop => return None,
+                    Flow::Lost(m) => return Some(m),
+                }
+                last = Instant::now();
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if last.elapsed() < timing.ping_every {
+                    continue;
+                }
+                last = Instant::now();
+                match backend.ping() {
+                    Ok(()) => failures = 0,
+                    Err(e) if e.is_connection_lost() => return Some(e.message),
+                    Err(e) => {
+                        failures += 1;
+                        if failures >= PING_FAILURES {
+                            return Some(e.message);
+                        }
                     }
                 }
-            },
+            }
             // tutti i mittenti sono stati lasciati: chiusura
             Err(RecvTimeoutError::Disconnected) => return None,
         }
@@ -380,8 +470,11 @@ pub struct OracleBackend {
 impl OracleBackend {
     /// Connessione e impostazioni di sessione (NLS, autocommit attivo). La password va solo al `Connector`.
     pub fn open(connect_string: &str, user: &str, password: &str) -> Result<OracleBackend, OraErr> {
-        let mut conn = oracle::Connector::new(user, password, connect_string).connect().map_err(|e| OraErr::from(&e))?;
-        conn.set_autocommit(true);
+        let conn = oracle::Connector::new(user, password, connect_string).connect().map_err(|e| OraErr::from(&e))?;
+        // autocommit del driver spento (l'impostazione iniziale): `Backend::run` conclude con `COMMIT` ogni istruzione
+        // che non legge righe, così le istruzioni ad hoc hanno l'effetto dell'autocommit e le modifiche della griglia
+        // (`exec` + `commit`/`rollback`) restano una transazione esplicita. `set_autocommit` vorrebbe `&mut Connection`,
+        // ma la connessione è condivisa con il `Breaker`.
         conn.execute(&nls_statement(), &[]).map_err(|e| OraErr::from(&e))?;
         Ok(OracleBackend { conn: Arc::new(conn) })
     }
@@ -391,6 +484,11 @@ impl OracleBackend {
     }
 }
 
+/// Il `Statement` pronto: righe da leggere a 500 per volta, LOB come localizzatori (si leggono solo i primi byte).
+fn prepare(conn: &oracle::Connection, sql: &str) -> Result<oracle::Statement, OraErr> {
+    conn.statement(sql).fetch_array_size(PAGE as u32).lob_locator().build().map_err(|e| OraErr::from(&e))
+}
+
 impl Backend for OracleBackend {
     fn ping(&mut self) -> Result<(), OraErr> {
         self.conn.ping().map_err(|e| OraErr::from(&e))
@@ -398,6 +496,85 @@ impl Backend for OracleBackend {
     fn breaker(&self) -> Breaker {
         let conn = self.conn.clone();
         Arc::new(move || conn.break_execution().map_err(|e| e.to_string()))
+    }
+
+    /// `Statement::into_result_set` dà un `ResultSet<'static>` che possiede lo statement (e il driver lo dichiara
+    /// `Send`): il cursore sta nel thread della sessione fra una pagina e l'altra, senza prestiti da tenere. Un'istruzione
+    /// che non legge righe è conclusa da `COMMIT` (autocommit emulato: la connessione ha l'autocommit del driver spento).
+    fn run(&mut self, sql: &str) -> Result<Executed, OraErr> {
+        let mut stmt = prepare(&self.conn, sql)?;
+        if stmt.is_query() {
+            let rs = stmt.into_result_set::<oracle::Row>(&[]).map_err(|e| OraErr::from(&e))?;
+            let info = rs.column_info();
+            let columns = info.iter().map(|c| QueryColumn { name: c.name().to_string() }).collect();
+            let kinds = info.iter().map(|c| col_kind(c.oracle_type())).collect();
+            return Ok(Executed::Rows(Box::new(OraCursor { rs, columns, kinds })));
+        }
+        stmt.execute(&[]).map_err(|e| OraErr::from(&e))?;
+        let n = stmt.row_count().unwrap_or(0);
+        self.conn.commit().map_err(|e| OraErr::from(&e))?;
+        Ok(Executed::Affected(n))
+    }
+
+    /// Prima i proprietari con la colonna `ORACLE_MAINTAINED` (12.1+); se manca (ORA-00904) senza.
+    fn objects(&mut self) -> Result<Vec<(String, String, bool)>, OraErr> {
+        let read = |sql: String| -> Result<Vec<(String, String, bool)>, OraErr> {
+            let rows = self.conn.query(&sql, &[]).map_err(|e| OraErr::from(&e))?;
+            let mut out = Vec::new();
+            for r in rows {
+                let r = r.map_err(|e| OraErr::from(&e))?;
+                let (owner, name, kind): (String, String, String) = (r.get(0).map_err(|e| OraErr::from(&e))?, r.get(1).map_err(|e| OraErr::from(&e))?, r.get(2).map_err(|e| OraErr::from(&e))?);
+                out.push((owner, name, kind == "view"));
+            }
+            Ok(out)
+        };
+        match read(tree_sql(true)) {
+            Err(e) if e.ora == Some(904) => read(tree_sql(false)),
+            other => other,
+        }
+    }
+
+    fn columns(&mut self, owner: &str, table: &str) -> Result<Vec<OraColumn>, OraErr> {
+        let rows = self.conn.query(COLUMNS_SQL, &[&owner, &table]).map_err(|e| OraErr::from(&e))?;
+        let e = |e: oracle::Error| OraErr::from(&e);
+        let mut out = Vec::new();
+        for r in rows {
+            let r = r.map_err(e)?;
+            let name: String = r.get(0).map_err(e)?;
+            let data_type: String = r.get(1).map_err(e)?;
+            let (dlen, clen): (Option<i64>, Option<i64>) = (r.get(2).map_err(e)?, r.get(3).map_err(e)?);
+            let used: Option<String> = r.get(4).map_err(e)?;
+            let (prec, scale): (Option<i64>, Option<i64>) = (r.get(5).map_err(e)?, r.get(6).map_err(e)?);
+            let nullable: String = r.get(7).map_err(e)?;
+            let pk: i64 = r.get(8).map_err(e)?;
+            out.push(OraColumn { name, type_name: display_type(&data_type, dlen, clen, used.as_deref(), prec, scale), data_type, nullable: nullable == "Y", is_pk: pk == 1 });
+        }
+        Ok(out)
+    }
+
+    fn resolve(&mut self, owner: Option<&str>, table: &str) -> Result<Option<EditableTable>, OraErr> {
+        let owner = owner.map(str::to_string);
+        let row = self.conn.query_row(RESOLVE_SQL, &[&owner, &table]);
+        match row {
+            Ok(r) => Ok(Some(EditableTable { schema: r.get(0).map_err(|e| OraErr::from(&e))?, table: r.get(1).map_err(|e| OraErr::from(&e))? })),
+            Err(e) if e.kind() == oracle::ErrorKind::NoDataFound => Ok(None),
+            Err(e) => Err(OraErr::from(&e)),
+        }
+    }
+
+    fn exec(&mut self, sql: &str, params: &[Option<String>]) -> Result<u64, OraErr> {
+        let mut stmt = self.conn.statement(sql).build().map_err(|e| OraErr::from(&e))?;
+        let refs: Vec<&dyn oracle::sql_type::ToSql> = params.iter().map(|p| p as &dyn oracle::sql_type::ToSql).collect();
+        stmt.execute(&refs).map_err(|e| OraErr::from(&e))?;
+        stmt.row_count().map_err(|e| OraErr::from(&e))
+    }
+
+    fn commit(&mut self) -> Result<(), OraErr> {
+        self.conn.commit().map_err(|e| OraErr::from(&e))
+    }
+
+    fn rollback(&mut self) -> Result<(), OraErr> {
+        self.conn.rollback().map_err(|e| OraErr::from(&e))
     }
 }
 
@@ -421,11 +598,14 @@ pub struct OraSessions {
     map: Mutex<HashMap<String, Session>>,
     next: AtomicU64,
     emit: Emitter,
+    /// Id dei risultati aperti → connessione (per `db_query_more`/`close`/`db_export`); uno per connessione.
+    results: Mutex<HashMap<u64, String>>,
+    next_result: AtomicU64,
 }
 
 impl OraSessions {
     pub fn new(conns: Arc<Connections>, emit: Emitter) -> Self {
-        OraSessions { conns, map: Mutex::new(HashMap::new()), next: AtomicU64::new(1), emit }
+        OraSessions { conns, map: Mutex::new(HashMap::new()), next: AtomicU64::new(1), emit, results: Mutex::new(HashMap::new()), next_result: AtomicU64::new(super::ora_query::ID_BASE) }
     }
 
     pub fn states(&self) -> Vec<StateEvent> {
@@ -438,6 +618,28 @@ impl OraSessions {
             Some(Session { state: ConnState::Connected, actor: Some(a), .. }) => Ok(a.clone()),
             _ => Err(NOT_CONNECTED.into()),
         }
+    }
+
+    /// Un nuovo id di risultato per la connessione: il precedente (se c'era) non è più valido (l'attore lo scarta).
+    pub fn new_result(&self, conn: &str) -> u64 {
+        let rid = self.next_result.fetch_add(1, Ordering::Relaxed);
+        let mut m = lock(&self.results);
+        m.retain(|_, c| c != conn);
+        m.insert(rid, conn.to_string());
+        rid
+    }
+
+    pub fn forget_result(&self, rid: u64) {
+        lock(&self.results).remove(&rid);
+    }
+
+    /// L'attore della connessione che tiene il risultato `rid`; sconosciuto o sessione chiusa = «risultato scaduto».
+    pub fn result_actor(&self, rid: u64) -> Result<Arc<Actor>, String> {
+        let conn = lock(&self.results).get(&rid).cloned().ok_or(super::pg_query::EXPIRED)?;
+        self.actor(&conn).map_err(|_| {
+            self.forget_result(rid);
+            super::pg_query::EXPIRED.to_string()
+        })
     }
 
     /// Annulla la query in corso sulla connessione (`break_execution`, da un altro thread).
@@ -611,6 +813,7 @@ impl OraSessions {
         if old.is_none() {
             return;
         }
+        lock(&self.results).retain(|_, c| c != id);
         self.teardown(old);
         lock(&self.map).insert(
             id.to_string(),
@@ -621,6 +824,7 @@ impl OraSessions {
 
     /// Uscita dall'app: chiude le sessioni e toglie gli inoltri (prima di `Connections::close_all`).
     pub fn close_all(&self) {
+        lock(&self.results).clear();
         let all: Vec<Session> = lock(&self.map).drain().map(|(_, s)| s).collect();
         for s in all {
             self.teardown(Some(s));
@@ -631,6 +835,7 @@ impl OraSessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::pg_query::{CANCELLED, EXPIRED, IDLE_CLOSED};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn params() -> OraParams {
@@ -774,7 +979,7 @@ mod tests {
     fn start(probe: &Arc<Probe>, ping_results: Vec<Result<(), OraErr>>, every: Duration) -> (Arc<Actor>, mpsc::Receiver<String>) {
         let (end_tx, end_rx) = mpsc::channel();
         let p = probe.clone();
-        let pending = spawn(move || Ok(Fake { probe: p, ping_results }), Timing { ping_every: every }, move |r| {
+        let pending = spawn(move || Ok(Fake { probe: p, ping_results }), Timing { ping_every: every, ..Timing::default() }, move |r| {
             let _ = end_tx.send(r);
         });
         (pending.ready_blocking().unwrap(), end_rx)
@@ -904,5 +1109,302 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
+    }
+
+    // ---- protocollo con un finto database: query, pagine, chiusura, modifiche ----
+
+    use crate::db::ora_query::{Fetched, RowCursor};
+    use crate::db::pg_edit::Kind;
+
+    /// Un insieme di righe finto (`n` righe a una colonna): conta quanti cursori sono stati rilasciati.
+    struct FakeCursor {
+        n: usize,
+        pos: usize,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl RowCursor for FakeCursor {
+        fn columns(&self) -> Vec<QueryColumn> {
+            vec![QueryColumn { name: "N".into() }]
+        }
+        fn fetch(&mut self, max: usize) -> Result<Fetched, OraErr> {
+            let take = max.min(self.n - self.pos);
+            let rows = (self.pos..self.pos + take).map(|i| vec![Some(i.to_string())]).collect();
+            self.pos += take;
+            Ok(Fetched { rows, truncated: vec![], done: take < max })
+        }
+    }
+    impl Drop for FakeCursor {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `select N` = N righe; `slow` aspetta l'annullamento; `dml` = 1 riga toccata; altro = ORA-00942.
+    struct FakeDb {
+        dropped: Arc<AtomicUsize>,
+        broken: Arc<AtomicBool>,
+        started: mpsc::Sender<()>,
+        log: Arc<Mutex<Vec<String>>>,
+        exec_counts: Vec<Result<u64, OraErr>>,
+        lost_on: Option<&'static str>,
+    }
+    impl Backend for FakeDb {
+        fn ping(&mut self) -> Result<(), OraErr> {
+            Ok(())
+        }
+        fn breaker(&self) -> Breaker {
+            let b = self.broken.clone();
+            Arc::new(move || {
+                b.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+        fn run(&mut self, sql: &str) -> Result<Executed, OraErr> {
+            self.log.lock().unwrap().push(format!("run {sql}"));
+            if self.lost_on == Some(sql) {
+                return Err(OraErr { ora: Some(3113), dpi: None, message: "ORA-03113".into() });
+            }
+            if let Some(n) = sql.strip_prefix("select ") {
+                return Ok(Executed::Rows(Box::new(FakeCursor { n: n.parse().unwrap(), pos: 0, dropped: self.dropped.clone() })));
+            }
+            match sql {
+                "slow" => {
+                    let _ = self.started.send(());
+                    while !self.broken.swap(false, Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(OraErr { ora: Some(1013), dpi: None, message: "ORA-01013: user requested cancel of current operation".into() })
+                }
+                "dml" => Ok(Executed::Affected(1)),
+                _ => Err(OraErr { ora: Some(942), dpi: None, message: "ORA-00942: table or view does not exist".into() }),
+            }
+        }
+        fn exec(&mut self, sql: &str, params: &[Option<String>]) -> Result<u64, OraErr> {
+            self.log.lock().unwrap().push(format!("exec {sql} {}", params.len()));
+            self.exec_counts.remove(0)
+        }
+        fn commit(&mut self) -> Result<(), OraErr> {
+            self.log.lock().unwrap().push("commit".into());
+            Ok(())
+        }
+        fn rollback(&mut self) -> Result<(), OraErr> {
+            self.log.lock().unwrap().push("rollback".into());
+            Ok(())
+        }
+    }
+
+    struct Db {
+        actor: Arc<Actor>,
+        dropped: Arc<AtomicUsize>,
+        log: Arc<Mutex<Vec<String>>>,
+        end: mpsc::Receiver<String>,
+        started: mpsc::Receiver<()>,
+    }
+
+    fn db(idle: Duration, exec_counts: Vec<Result<u64, OraErr>>, lost_on: Option<&'static str>) -> Db {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started) = mpsc::channel();
+        let (end_tx, end) = mpsc::channel();
+        let fake = FakeDb { dropped: dropped.clone(), broken: Arc::new(AtomicBool::new(false)), started: started_tx, log: log.clone(), exec_counts, lost_on };
+        let pending = spawn(move || Ok(fake), Timing { ping_every: Duration::from_secs(3600), idle }, move |r| {
+            let _ = end_tx.send(r);
+        });
+        Db { actor: pending.ready_blocking().unwrap(), dropped, log, end, started }
+    }
+
+    fn query(db: &Db, rid: u64, stmts: &[&str]) -> Result<QueryResult, String> {
+        let stmts = stmts.iter().map(|s| s.to_string()).collect();
+        db.actor.request_blocking(|reply| Request::Query { rid, stmts, reply })
+    }
+    fn more(db: &Db, rid: u64) -> Result<QueryPage, String> {
+        db.actor.request_blocking(|reply| Request::More { rid, reply })
+    }
+
+    #[test]
+    fn the_cursor_lives_in_the_thread_between_pages() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        let r = query(&d, 7, &["select 1200"]).unwrap();
+        assert_eq!((r.result_id, r.rows.len(), r.has_more, r.affected.is_none()), (Some(7), 500, true, true));
+        assert_eq!(r.rows[0], vec![Some("0".to_string())]);
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 0);
+        let p = more(&d, 7).unwrap();
+        assert_eq!((p.rows.len(), p.has_more, p.rows[0][0].clone()), (500, true, Some("500".to_string())));
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 0);
+        let p = more(&d, 7).unwrap();
+        assert_eq!((p.rows.len(), p.has_more, p.rows[0][0].clone()), (200, false, Some("1000".to_string())));
+        // finito: il cursore è rilasciato, la copia resta per l'esportazione, altre pagine sono vuote
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 1);
+        assert!(more(&d, 7).unwrap().rows.is_empty());
+        let (cols, rows) = d.actor.request_blocking(|reply| Request::Drain { rid: 7, reply }).unwrap();
+        assert_eq!((cols.len(), rows.len()), (1, 1200));
+        assert_eq!(more(&d, 99).unwrap_err(), EXPIRED);
+    }
+
+    #[test]
+    fn small_results_are_kept_for_export_and_a_new_query_replaces_them() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        let r = query(&d, 1, &["select 3"]).unwrap();
+        assert_eq!((r.rows.len(), r.has_more, r.result_id), (3, false, Some(1)));
+        let (_, rows) = d.actor.request_blocking(|reply| Request::Drain { rid: 1, reply }).unwrap();
+        assert_eq!(rows.len(), 3);
+        // una nuova query della connessione sostituisce il risultato
+        query(&d, 2, &["dml"]).unwrap();
+        assert_eq!(more(&d, 1).unwrap_err(), EXPIRED);
+        // un risultato con cursore aperto è rilasciato dalla nuova query
+        query(&d, 3, &["select 900"]).unwrap();
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 1);
+        query(&d, 4, &["dml"]).unwrap();
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 2);
+        assert_eq!(more(&d, 3).unwrap_err(), EXPIRED);
+    }
+
+    #[test]
+    fn close_releases_the_cursor() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        query(&d, 5, &["select 900"]).unwrap();
+        d.actor.request_blocking(|reply| Request::CloseResult { rid: 5, reply }).unwrap();
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(more(&d, 5).unwrap_err(), EXPIRED);
+        // chiudere due volte non fa nulla
+        d.actor.request_blocking(|reply| Request::CloseResult { rid: 5, reply }).unwrap();
+    }
+
+    #[test]
+    fn several_statements_report_counts_and_show_the_last_rows() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        let r = query(&d, 1, &["dml", "select 5", "dml", "select 600"]).unwrap();
+        assert_eq!(r.affected, Some(vec![1, 5, 1, 500]));
+        assert_eq!((r.rows.len(), r.has_more, r.result_id), (500, true, Some(1)));
+        // il cursore dell'istruzione intermedia è stato lasciato; resta solo l'ultimo
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(more(&d, 1).unwrap().rows.len(), 100);
+        // solo istruzioni senza righe: nessun risultato
+        let r = query(&d, 2, &["dml", "dml"]).unwrap();
+        assert_eq!((r.affected, r.result_id, r.columns.len()), (Some(vec![1, 1]), None, 0));
+        // un errore in mezzo: le precedenti restano eseguite (autocommit), il messaggio dice quale
+        let e = query(&d, 3, &["dml", "nope", "dml"]).unwrap_err();
+        assert!(e.starts_with("Istruzione 2 di 3: ORA-00942"), "{e}");
+        assert_eq!(d.log.lock().unwrap().iter().filter(|l| *l == "run dml").count(), 5);
+        // un'istruzione sola: il messaggio del server così com'è
+        assert_eq!(query(&d, 4, &["nope"]).unwrap_err(), "ORA-00942: table or view does not exist");
+    }
+
+    #[test]
+    fn idle_results_are_closed_without_any_request() {
+        let d = db(Duration::from_millis(60), vec![], None);
+        query(&d, 1, &["select 900"]).unwrap();
+        let start = Instant::now();
+        while d.dropped.load(Ordering::SeqCst) == 0 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 1, "cursore non chiuso a riposo");
+        assert_eq!(more(&d, 1).unwrap_err(), IDLE_CLOSED);
+        assert_eq!(d.actor.request_blocking(|reply| Request::Drain { rid: 1, reply }).unwrap_err(), IDLE_CLOSED);
+        // la sessione resta viva e una nuova query funziona
+        assert_eq!(query(&d, 2, &["select 2"]).unwrap().rows.len(), 2);
+        // un risultato già finito non scade: resta esportabile
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(d.actor.request_blocking(|reply| Request::Drain { rid: 2, reply }).unwrap().1.len(), 2);
+        assert!(d.end.try_recv().is_err());
+    }
+
+    #[test]
+    fn paging_keeps_a_cursor_alive_past_the_idle_time() {
+        let d = db(Duration::from_millis(120), vec![], None);
+        query(&d, 1, &["select 2000"]).unwrap();
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(60));
+            more(&d, 1).unwrap();
+        }
+        assert_eq!(d.dropped.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn break_cancels_a_running_query_and_the_session_survives() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        let a = d.actor.clone();
+        let worker = std::thread::spawn(move || {
+            let stmts = vec!["slow".to_string()];
+            a.request_blocking(|reply| Request::Query { rid: 1, stmts, reply })
+        });
+        d.started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!worker.is_finished());
+        d.actor.break_execution().unwrap();
+        assert_eq!(worker.join().unwrap().unwrap_err(), CANCELLED);
+        // il risultato precedente non esiste più e la connessione risponde
+        assert_eq!(more(&d, 1).unwrap_err(), EXPIRED);
+        assert_eq!(query(&d, 2, &["select 1"]).unwrap().rows.len(), 1);
+        assert!(d.end.try_recv().is_err());
+    }
+
+    #[test]
+    fn connection_lost_during_a_query_ends_the_session() {
+        let d = db(Duration::from_secs(90), vec![], Some("lost"));
+        assert_eq!(query(&d, 1, &["lost"]).unwrap_err(), LOST);
+        assert_eq!(d.end.recv_timeout(Duration::from_secs(5)).unwrap(), "ORA-03113");
+    }
+
+    fn stmt(kind: Kind, n: &str) -> Statement {
+        Statement { kind, sql: format!("sql {n}"), params: vec![Some("a".into()), None], preview: format!("anteprima {n}") }
+    }
+    fn apply(d: &Db, stmts: Vec<Statement>) -> Result<u64, String> {
+        d.actor.request_blocking(|reply| Request::Apply { stmts, reply })
+    }
+
+    #[test]
+    fn apply_commits_only_when_every_statement_touches_exactly_one_row() {
+        let d = db(Duration::from_secs(90), vec![Ok(1), Ok(1), Ok(1)], None);
+        assert_eq!(apply(&d, vec![stmt(Kind::Update, "1"), stmt(Kind::Insert, "2"), stmt(Kind::Delete, "3")]).unwrap(), 3);
+        assert_eq!(*d.log.lock().unwrap(), ["exec sql 1 2", "exec sql 2 2", "exec sql 3 2", "commit"]);
+
+        let d = db(Duration::from_secs(90), vec![Ok(1), Ok(0), Ok(1)], None);
+        let e = apply(&d, vec![stmt(Kind::Update, "1"), stmt(Kind::Update, "2"), stmt(Kind::Delete, "3")]).unwrap_err();
+        assert!(e.contains("Nessuna modifica applicata") && e.contains("anteprima 2"), "{e}");
+        assert_eq!(*d.log.lock().unwrap(), ["exec sql 1 2", "exec sql 2 2", "rollback"]);
+
+        let d = db(Duration::from_secs(90), vec![Ok(2)], None);
+        let e = apply(&d, vec![stmt(Kind::Delete, "1")]).unwrap_err();
+        assert!(e.contains("una sola riga"), "{e}");
+        let d = db(Duration::from_secs(90), vec![Ok(0)], None);
+        assert!(apply(&d, vec![stmt(Kind::Insert, "1")]).unwrap_err().contains("non ha inserito una riga"));
+
+        let d = db(Duration::from_secs(90), vec![Err(OraErr { ora: Some(1), dpi: None, message: "ORA-00001: unique constraint violated".into() })], None);
+        let e = apply(&d, vec![stmt(Kind::Insert, "1")]).unwrap_err();
+        assert!(e.starts_with("Errore del database: ORA-00001") && e.contains("anteprima 1"), "{e}");
+        assert_eq!(*d.log.lock().unwrap(), ["exec sql 1 2", "rollback"]);
+        // dopo l'errore la sessione serve ancora
+        assert_eq!(query(&d, 1, &["select 1"]).unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn apply_with_a_lost_connection_ends_the_session() {
+        let d = db(Duration::from_secs(90), vec![Err(OraErr { ora: Some(3114), dpi: None, message: "ORA-03114".into() })], None);
+        assert_eq!(apply(&d, vec![stmt(Kind::Update, "1")]).unwrap_err(), LOST);
+        assert_eq!(d.end.recv_timeout(Duration::from_secs(5)).unwrap(), "ORA-03114");
+    }
+
+    #[test]
+    fn long_results_stop_at_the_total_limit() {
+        let d = db(Duration::from_secs(90), vec![], None);
+        query(&d, 1, &["select 150000"]).unwrap();
+        let (_, rows) = d.actor.request_blocking(|reply| Request::Drain { rid: 1, reply }).unwrap();
+        assert_eq!(rows.len(), crate::db::pg_query::MAX_TOTAL);
+    }
+
+    #[test]
+    fn session_registry_hands_out_ids_in_the_oracle_range() {
+        let conns = Arc::new(Connections::new(crate::ssh::conn::SshPaths::new(std::env::temp_dir().join("ora-test-ssh2")), Arc::new(|_| {})));
+        let s = OraSessions::new(conns, Arc::new(|_| {}));
+        let a = s.new_result("c1");
+        let b = s.new_result("c1");
+        let c = s.new_result("c2");
+        assert!(crate::db::ora_query::is_ora_result(a) && b > a && c > b);
+        // un solo risultato per connessione: il vecchio non risolve più
+        assert_eq!(s.result_actor(a).err().unwrap(), EXPIRED);
+        // sessione non connessa: scaduto, e l'id viene dimenticato
+        assert_eq!(s.result_actor(b).err().unwrap(), EXPIRED);
+        assert_eq!(s.result_actor(c).err().unwrap(), EXPIRED);
+        s.disconnect("c2");
     }
 }

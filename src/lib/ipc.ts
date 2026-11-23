@@ -218,6 +218,14 @@ export const dbPgPreviewEdits = (id: string, schema: string, table: string, edit
 export const dbPgApplyEdits = (id: string, schema: string, table: string, edits: PgRowEdit[]) =>
   invoke<{ affected: number }>('db_pg_apply_edits', { id, schema, table, edits })
 /** MongoDB: filtro, ordinamento, proiezione e pipeline sono testo JSON esteso, analizzato nel core. */
+// Oracle: stesse forme di Postgres (`schemas` = proprietari); `owner`/`table` come nel catalogo (maiuscole comprese)
+export const dbOraTree = (id: string) => invoke<PgTree>('db_ora_tree', { id })
+export const dbOraColumns = (id: string, owner: string, table: string) => invoke<PgColumn[]>('db_ora_columns', { id, owner, table })
+export const dbOraPreviewEdits = (id: string, owner: string, table: string, edits: PgRowEdit[]) =>
+  invoke<string[]>('db_ora_preview_edits', { id, owner, table, edits })
+export const dbOraApplyEdits = (id: string, owner: string, table: string, edits: PgRowEdit[]) =>
+  invoke<{ affected: number }>('db_ora_apply_edits', { id, owner, table, edits })
+
 export const dbMongoTree = (id: string) => invoke<MongoDb[]>('db_mongo_tree', { id })
 export const dbMongoFind = (id: string, db: string, coll: string, filter: string, sort: string, projection: string) =>
   invoke<DbQueryResult>('db_mongo_find', { id, db, coll, filter, sort, projection })
