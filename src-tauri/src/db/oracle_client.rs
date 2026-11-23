@@ -79,8 +79,12 @@ pub fn translate_load_error(msg: &str, dir: &Path) -> String {
     let d = dir.display();
     if low.contains("incompatible architecture") || low.contains("mach-o") || low.contains("wrong architecture") {
         "Instant Client per un'architettura diversa: scarica la versione ARM64 (o quella adatta al tuo Mac)".into()
-    } else if low.contains("quarantine") || low.contains("not verified") || low.contains("code signature") {
-        format!("macOS ha messo in quarantena la libreria: esegui `xattr -dr com.apple.quarantine \"{d}\"` nel Terminale e riprova")
+    } else if low.contains("team id") || low.contains("library validation") || low.contains("code signature") {
+        // l'app installata ha l'hardened runtime: macOS rifiuta librerie firmate da un altro sviluppatore (Oracle);
+        // il quarantena qui non c'entra e `xattr` non servirebbe. Decisione rimandata (docs/verifica-tappa-4b.md).
+        "macOS non permette all'app installata di caricare Instant Client (firmato da Oracle): Oracle non è ancora utilizzabile da Code Art installata".into()
+    } else if low.contains("quarantine") || low.contains("not verified") {
+        format!("macOS ha messo in quarantena la libreria: esegui `xattr -dr com.apple.quarantine '{d}'` nel Terminale e riprova")
     } else if low.contains("dpi-1047") {
         "Libreria di Instant Client non trovata nella cartella".into()
     } else {
@@ -230,8 +234,11 @@ mod tests {
         let d = Path::new("/x/ic");
         assert!(translate_load_error("DPI-1047: Cannot locate a 64-bit Oracle Client library: \"dlopen(...)\"", d).contains("non trovata"));
         assert!(translate_load_error("dlopen: (mach-o file, but is an incompatible architecture (have 'x86_64', need 'arm64'))", d).contains("ARM64"));
-        let q = translate_load_error("code signature in ... not valid: library not verified", d);
-        assert!(q.contains("xattr -dr com.apple.quarantine \"/x/ic\""));
+        let q = translate_load_error("library load disallowed: quarantine attribute, not verified", d);
+        assert!(q.contains("xattr -dr com.apple.quarantine '/x/ic'"));
+        // hardened runtime: firma di un altro sviluppatore, xattr non serve
+        let t = translate_load_error("code signature in <…/libclntsh.dylib> not valid for use in process: mapping process and mapped file (non-platform) have different Team IDs", d);
+        assert!(t.contains("non è ancora utilizzabile") && !t.contains("xattr"));
         assert!(!translate_load_error("boh", d).contains("boh"));
     }
 

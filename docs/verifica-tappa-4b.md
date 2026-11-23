@@ -1,5 +1,12 @@
 # Verifica della tappa 4b — Oracle
 
+> **Stato: rimandato (decisione dell'utente, 2026-11-23).** L'app installata (`Code Art.app`, firma ad-hoc con hardened
+> runtime) non può caricare Instant Client, firmato da Oracle con un altro Team ID: macOS lo rifiuta ("different Team
+> IDs"). Funziona solo da sviluppo (`pnpm tauri dev`, `cargo test`), che non ha l'hardened runtime. Strade possibili, da
+> decidere: il permesso `com.apple.security.cs.disable-library-validation` con caricamento solo da una cartella scelta col
+> selettore nativo, oppure Oracle in un processo separato senza hardened runtime. L'app installata mostra un messaggio
+> che lo dice chiaramente invece del rimedio sbagliato (`xattr`).
+
 Test automatici: `pnpm typecheck`, `pnpm test`, `cargo test`, `cargo clippy --all-targets`. **Nessuna prova contro un
 server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui sotto sono la prima volta.
 
@@ -39,3 +46,19 @@ server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui
 - Una connessione che non risponde entro 10 s viene abbandonata, ma il tentativo resta in sospeso nel driver fino al
   timeout del sistema.
 - TIMESTAMP WITH LOCAL TIME ZONE in sola lettura in griglia finché non è verificato con un server vero.
+
+## Punti aperti dalla revisione finale (da sistemare quando si riprende Oracle)
+
+- Una connessione Oracle caduta tiene bloccata per circa 3 s la mappa delle sessioni Oracle (`ora.rs`, `ended()` lascia
+  cadere l'attore sotto il lucchetto).
+- Errore di battitura in `RESOLVE_SQL` (`SYS_CONTEXT('USERDENV', …)` invece di `'USERENV'`): una `SELECT * FROM t` senza
+  proprietario non risulta mai modificabile (le schede aperte dall'albero non ne sono toccate).
+- TIMESTAMP WITH LOCAL TIME ZONE: il core lo permette ancora (`ora_edit.rs`), lo blocca solo l'interfaccia; serve un flag
+  `editable` per colonna condiviso fra core e interfaccia (anche per INTERVAL, ROWID, BFILE, XMLTYPE, JSON; chiavi RAW con
+  `HEXTORAW`).
+- Connessione senza password salvata: ORA-01005 non è tradotto in `auth`, quindi la richiesta di password non compare.
+- Le cartelle `instantclient*` trovate in `~/Downloads` o `~` si possono caricare con una sola chiamata dalla pagina:
+  prima di allentare la protezione di macOS, richiedere il selettore nativo (o controllare proprietario e quarantena).
+- Il ping di controllo non ha un tempo massimo: su una connessione TCP mezza aperta la sessione resta appesa.
+- Il controllo delle istruzioni distruttive non vede `FORALL … DELETE` senza `WHERE`.
+- Modificare un TIMESTAMP WITH TIME ZONE riscrive un fuso con nome come scostamento fisso (stesso istante).
