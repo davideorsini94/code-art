@@ -16,6 +16,12 @@ vi.mock('../../lib/ipc', () => ({
   dbConnect: vi.fn(async () => {}),
   dbPgTree: vi.fn(async () => ({ schemas: [] })),
   dbMongoTree: vi.fn(async () => []),
+  dbPgColumns: vi.fn(),
+  dbPgPreviewEdits: vi.fn(),
+  dbPgApplyEdits: vi.fn(),
+  dbMongoReplace: vi.fn(async () => {}),
+  dbMongoInsert: vi.fn(async () => 'x'),
+  dbMongoDelete: vi.fn(async () => {}),
 }))
 const cmds = vi.hoisted(() => ({ list: [] as (() => void)[], eds: [] as { setValue: (v: string) => void; getValue: () => string }[] }))
 vi.mock('../../lib/monaco', () => ({
@@ -156,7 +162,8 @@ describe('QueryTab', () => {
     expect((csv as HTMLButtonElement).disabled).toBe(false)
     await fireEvent.click(csv)
     await waitFor(() => expect(screen.getByText(/Esportate 1\.234 righe in \/tmp\/r\.csv/)).toBeTruthy())
-    expect((csv as HTMLButtonElement).disabled).toBe(true)
+    // il risultato resta: si può riesportare
+    expect((csv as HTMLButtonElement).disabled).toBe(false)
     expect(screen.getByRole('button', { name: /JSON/ })).toBeTruthy()
   })
 
@@ -204,5 +211,123 @@ describe('QueryTab', () => {
     await waitFor(() => expect(cmds.eds.length).toBeGreaterThan(0))
     await fireEvent.click(screen.getByRole('button', { name: /Esegui/ }))
     await waitFor(() => expect(ipc.dbMongoAggregate).toHaveBeenCalledWith('m1', 'app', 'users', '[\n  \n]'))
+  })
+
+  describe('modifica in griglia', () => {
+    const pkCols = [{ name: 'id', type: 'int4', nullable: false, isPk: true }, { name: 'name', type: 'text', nullable: true, isPk: false }]
+    const two = () => ({ resultId: 7, columns: [{ name: 'id' }, { name: 'name' }], rows: [['1', 'Ada'], ['2', 'Bea']], hasMore: false })
+    async function openEditable() {
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two() as never)
+      vi.mocked(ipc.dbPgColumns).mockResolvedValue(pkCols as never)
+      render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 'u' }) })
+      await screen.findByText('Ada')
+      await waitFor(() => expect(ipc.dbPgColumns).toHaveBeenCalledWith('c1', 'public', 'u'))
+    }
+    const cell = (t: string) => screen.getByText(t).closest('[role=gridcell]') as HTMLElement
+
+    it('doppio clic, nuovo valore, barra con anteprima e applica che riesegue', async () => {
+      await openEditable()
+      await fireEvent.dblClick(cell('Ada'))
+      const inp = screen.getByLabelText('Valore della cella') as HTMLInputElement
+      await fireEvent.input(inp, { target: { value: 'Zoe' } })
+      await fireEvent.keyDown(inp, { key: 'Enter' })
+      expect(cell('Zoe').classList.contains('chg')).toBe(true)
+      expect(screen.getByText('1 modifica')).toBeTruthy()
+      vi.mocked(ipc.dbPgPreviewEdits).mockResolvedValue(['UPDATE "public"."u" SET "name" = $1 WHERE "id" = $2'])
+      await fireEvent.click(screen.getByRole('button', { name: 'Anteprima' }))
+      expect(ipc.dbPgPreviewEdits).toHaveBeenCalledWith('c1', 'public', 'u', [{ kind: 'update', pk: [['id', '1']], set: [['name', 'Zoe']] }])
+      await screen.findByText(/UPDATE "public"/)
+      vi.mocked(ipc.dbPgApplyEdits).mockResolvedValue({ affected: 1 })
+      vi.mocked(ipc.dbQuery).mockClear()
+      await fireEvent.click(screen.getByRole('button', { name: 'Applica' }))
+      await waitFor(() => expect(ipc.dbQuery).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.queryByText('1 modifica')).toBeNull())
+    })
+
+    it('errore in applicazione: le modifiche restano e il messaggio è nella barra', async () => {
+      await openEditable()
+      await fireEvent.dblClick(cell('Ada'))
+      await fireEvent.keyDown(screen.getByLabelText('Valore della cella'), { key: 'Backspace', metaKey: true })
+      vi.mocked(ipc.dbPgApplyEdits).mockRejectedValue('violazione vincolo')
+      await fireEvent.click(screen.getByRole('button', { name: 'Applica' }))
+      await screen.findByText('violazione vincolo')
+      expect(screen.getByText('1 modifica')).toBeTruthy()
+    })
+
+    it('Annulla tutto scarta le modifiche', async () => {
+      await openEditable()
+      await fireEvent.click(screen.getByText('Bea').closest('[role=gridcell]')!)
+      await fireEvent.keyDown(screen.getByRole('grid'), { key: 'Delete' })
+      expect(screen.getByText('1 modifica')).toBeTruthy()
+      await fireEvent.click(screen.getByRole('button', { name: 'Annulla tutto' }))
+      expect(screen.queryByText('1 modifica')).toBeNull()
+    })
+
+    it('tabella senza chiave primaria: sola lettura con il motivo', async () => {
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two() as never)
+      vi.mocked(ipc.dbPgColumns).mockResolvedValue(pkCols.map((c) => ({ ...c, isPk: false })) as never)
+      render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres', schema: 'public', table: 'u' }) })
+      await screen.findByText(/Sola lettura: tabella senza chiave primaria/)
+      await fireEvent.dblClick(cell('Ada'))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+    })
+
+    it('query libera: sola lettura', async () => {
+      vi.mocked(ipc.dbQuery).mockResolvedValue(two() as never)
+      render(QueryTab, { tab: open({ connectionId: 'c1', kind: 'postgres' }) })
+      await waitFor(() => expect(cmds.eds.length).toBe(1))
+      cmds.eds[0].setValue('select 1')
+      cmds.list[0]()
+      await screen.findByText(/Sola lettura: risultato di una query/)
+    })
+  })
+
+  describe('documenti MongoDB', () => {
+    const doc = '{\n  "_id": {"$oid": "65a"},\n  "n": 1\n}'
+    async function openDocs() {
+      vi.mocked(ipc.dbMongoFind).mockResolvedValue({ resultId: 3, columns: [{ name: '_id' }, { name: 'n' }], rows: [['65a', '1']], docs: [doc], hasMore: false } as never)
+      render(QueryTab, { tab: open({ connectionId: 'm1', kind: 'mongo', database: 'app', collection: 'users' }) })
+      await screen.findByText('65a')
+    }
+    it('doppio clic apre l\'editor; salva chiama replace con _id e riesegue', async () => {
+      await openDocs()
+      await fireEvent.dblClick(screen.getByText('65a').closest('[role=gridcell]')!)
+      await screen.findByRole('dialog', { name: 'Modifica documento' })
+      await waitFor(() => expect(cmds.eds.at(-1)?.getValue()).toBe(doc))
+      vi.mocked(ipc.dbMongoFind).mockClear()
+      await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+      await waitFor(() => expect(ipc.dbMongoReplace).toHaveBeenCalledWith('m1', 'app', 'users', '{"$oid":"65a"}', doc))
+      await waitFor(() => expect(ipc.dbMongoFind).toHaveBeenCalledTimes(1))
+    })
+    it('JSON non valido blocca il salvataggio', async () => {
+      await openDocs()
+      await fireEvent.dblClick(screen.getByText('65a').closest('[role=gridcell]')!)
+      await waitFor(() => expect(cmds.eds.some((e) => e.getValue() === doc)).toBe(true))
+      cmds.eds.find((e) => e.getValue() === doc)!.setValue('{ rotto')
+      await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+      await screen.findByText(/JSON non valido/)
+      expect(ipc.dbMongoReplace).not.toHaveBeenCalled()
+    })
+    it('Nuovo documento inserisce; Elimina documento elimina', async () => {
+      await openDocs()
+      await fireEvent.click(screen.getByRole('button', { name: 'Nuovo documento' }))
+      await screen.findByRole('dialog', { name: 'Nuovo documento' })
+      await waitFor(() => expect(cmds.eds.some((e) => e.getValue() === '{\n  \n}')).toBe(true))
+      cmds.eds.find((e) => e.getValue() === '{\n  \n}')!.setValue('{"a": 1}')
+      await fireEvent.click(screen.getByRole('button', { name: 'Salva' }))
+      await waitFor(() => expect(ipc.dbMongoInsert).toHaveBeenCalledWith('m1', 'app', 'users', '{"a": 1}'))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await fireEvent.dblClick(screen.getByText('65a').closest('[role=gridcell]')!)
+      await fireEvent.click(await screen.findByRole('button', { name: 'Elimina documento' }))
+      await waitFor(() => expect(ipc.dbMongoDelete).toHaveBeenCalledWith('m1', 'app', 'users', '{"$oid":"65a"}'))
+    })
+    it('conferma rifiutata: resta aperto senza errore', async () => {
+      await openDocs()
+      await fireEvent.dblClick(screen.getByText('65a').closest('[role=gridcell]')!)
+      vi.mocked(ipc.dbMongoReplace).mockRejectedValueOnce('annullato')
+      await fireEvent.click(await screen.findByRole('button', { name: 'Salva' }))
+      await screen.findByText('Operazione annullata')
+      expect(screen.getByRole('dialog')).toBeTruthy()
+    })
   })
 })

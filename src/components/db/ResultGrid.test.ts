@@ -89,4 +89,50 @@ describe('ResultGrid', () => {
     await fireEvent.pointerMove(grip, { clientX: -500, pointerId: 1 })
     expect(parseInt(head().style.width)).toBe(60)
   })
+
+  describe('modifica', () => {
+    const pkProps = () => ({ columns: ['id', 'name'], rows: [['1', 'Ada'], ['2', null]], pk: [0] })
+    it('Esc annulla, ∅ imposta NULL, celle e righe segnate', async () => {
+      const onedit = vi.fn()
+      const { container } = render(ResultGrid, { ...pkProps(), onedit })
+      const cells = () => [...container.querySelectorAll('[role=gridcell]')] as HTMLElement[]
+      await fireEvent.dblClick(cells()[1])
+      const inp = screen.getByLabelText('Valore della cella') as HTMLInputElement
+      expect(inp.value).toBe('Ada')
+      await fireEvent.input(inp, { target: { value: 'X' } })
+      await fireEvent.keyDown(inp, { key: 'Escape' })
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      expect(onedit).not.toHaveBeenCalled()
+      await fireEvent.dblClick(cells()[1])
+      await fireEvent.click(screen.getByRole('button', { name: 'Imposta NULL' }))
+      expect(onedit).toHaveBeenCalledTimes(1)
+      const next = onedit.mock.calls[0][0]
+      expect(next.updates.size).toBe(1)
+      expect([...next.updates.values()][0].changes.get(1)).toBeNull()
+    })
+    it('evidenzia modifica, riga nuova ed eliminata', async () => {
+      const edits = {
+        updates: new Map([['["1"]', { original: ['1', 'Ada'], changes: new Map([[1, 'Zoe']]) }]]),
+        inserts: [[undefined, 'Nuovo']],
+        deletes: new Map([['["2"]', ['2', null]]]),
+      }
+      const { container } = render(ResultGrid, { ...pkProps(), edits, onedit: vi.fn() })
+      expect(container.querySelectorAll('.cell.chg')).toHaveLength(1)
+      expect(container.querySelectorAll('.row.ins')).toHaveLength(1)
+      expect(container.querySelectorAll('.row.del')).toHaveLength(1)
+      expect(screen.getByText('Zoe')).toBeTruthy()
+    })
+    it('＋ Riga aggiunge una riga nuova', async () => {
+      const onedit = vi.fn()
+      render(ResultGrid, { ...pkProps(), onedit })
+      await fireEvent.click(screen.getByRole('button', { name: '＋ Riga' }))
+      expect(onedit.mock.calls[0][0].inserts).toHaveLength(1)
+    })
+    it('senza pk non si modifica e la nota è visibile', async () => {
+      render(ResultGrid, { columns: ['a'], rows: [['1']], note: 'Sola lettura: vista' })
+      await fireEvent.dblClick(screen.getByText('1', { selector: '.txt' }))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
+      expect(screen.getByText(/Sola lettura: vista/)).toBeTruthy()
+    })
+  })
 })

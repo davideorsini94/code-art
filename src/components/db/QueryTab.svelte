@@ -2,13 +2,16 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import Icon from '../Icon.svelte'
   import ResultGrid from './ResultGrid.svelte'
+  import EditBar from './EditBar.svelte'
+  import DocEditor from './DocEditor.svelte'
   import { tooltip } from '../../lib/tooltip'
   import { errorText } from '../../lib/errors'
   import * as ipc from '../../lib/ipc'
   import { db } from '../../lib/stores/db.svelte'
   import { editor, type Tab } from '../../lib/stores/editor.svelte'
-  import { appendPage, emptyGrid, fmtInt, selectAllSql, type GridData } from '../../lib/db/grid'
-  import type { DbHistoryEntry, DbQueryResult } from '../../lib/types'
+  import { appendPage, emptyGrid, fmtInt, quoteIdent, selectAllSql, type GridData } from '../../lib/db/grid'
+  import { editCount, emptyEdits, toRowEdits, type PendingEdits } from '../../lib/db/edits'
+  import type { DbHistoryEntry, DbQueryResult, PgColumn } from '../../lib/types'
 
   type Monaco = typeof import('monaco-editor')
   type ICode = import('monaco-editor').editor.IStandaloneCodeEditor
@@ -110,6 +113,57 @@
   let hasGrid = $state(false)
   let runSeq = 0
 
+  // ---- modifica in griglia (Postgres) ----
+  let edits = $state.raw<PendingEdits>(emptyEdits())
+  let pgCols = $state.raw<PgColumn[] | null>(null)
+  // il testo eseguito legge davvero la tabella della scheda (`SELECT * FROM "s"."t"` senza JOIN)
+  let ranTable = $state(false)
+  const editSchema = q.schema ?? 'public'
+  const editInfo = $derived.by((): { pk?: number[]; note?: string } => {
+    if (!isPg || !hasGrid) return {}
+    if (q.table === undefined || !ranTable) return { note: 'Sola lettura: risultato di una query' }
+    const t = db.trees[connId]
+    const kind = t?.kind === 'postgres' ? t.tree.schemas.find((x) => x.name === editSchema)?.tables.find((x) => x.name === q.table)?.kind : undefined
+    if (kind === 'view') return { note: 'Sola lettura: vista' }
+    if (!pgCols) return {}
+    const names = pgCols.filter((c) => c.isPk).map((c) => c.name)
+    if (names.length === 0) return { note: 'Sola lettura: tabella senza chiave primaria' }
+    const idx = names.map((n) => grid.columns.indexOf(n))
+    if (idx.includes(-1)) return { note: 'Sola lettura: il risultato non contiene la chiave primaria' }
+    return { pk: idx }
+  })
+  const pendingCount = $derived(editCount(edits))
+  const rowEdits = $derived(editInfo.pk ? toRowEdits(edits, grid.columns, editInfo.pk) : [])
+  onMount(() => {
+    if (!isPg || q.table === undefined) return
+    void Promise.resolve()
+      .then(() => ipc.dbPgColumns(connId, editSchema, q.table!))
+      .then((c) => (pgCols = c))
+      .catch(() => {})
+  })
+
+  // ---- documenti MongoDB ----
+  let docs = $state.raw<string[]>([])
+  let target = $state({ database: '', collection: '', find: false })
+  let docEdit = $state<{ doc: string | null; database: string; collection: string } | null>(null)
+  const canOpenDoc = $derived(!isPg && target.find && hasGrid)
+  function openDoc(r: number) {
+    if (docs[r] !== undefined) docEdit = { doc: docs[r], database: target.database, collection: target.collection }
+  }
+  function newDoc() {
+    if (mg.collection) docEdit = { doc: null, database: mg.database, collection: mg.collection }
+  }
+  function docDone() {
+    docEdit = null
+    void run()
+  }
+  async function applied() {
+    edits = emptyEdits()
+    await run()
+  }
+  const normSql = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase()
+  const isTableRead = (t: string) => q.table !== undefined && normSql(t).startsWith(normSql(`select * from ${quoteIdent(editSchema)}.${quoteIdent(q.table)}`)) && !/\bjoin\b/.test(normSql(t))
+
   const offline = $derived(db.stateOf(connId) !== 'connected')
   const showClosed = $derived(attempted && offline)
 
@@ -125,6 +179,8 @@
     hasGrid = hasRows
     grid = hasRows ? appendPage(emptyGrid(), res, !isPg) : emptyGrid()
     resultKey++
+    edits = emptyEdits()
+    docs = res.docs ?? []
     resultId = res.resultId
     editor.setQueryResult(tab.key, res.resultId)
     hasMore = res.hasMore
@@ -161,7 +217,11 @@
           ? await ipc.dbMongoFind(connId, mg.database, mg.collection, mg.filter, mg.sort, mg.projection)
           : await ipc.dbMongoAggregate(connId, mg.database, mg.collection, mg.pipeline)
       void Promise.resolve(ipc.dbHistoryAdd(connId, text)).catch(() => {})
-      if (seq === runSeq) setResult(res)
+      if (seq === runSeq) {
+        ranTable = isPg && isTableRead(text)
+        target = { database: mg.database, collection: mg.collection, find: !isPg && mg.mode === 'find' }
+        setResult(res)
+      }
     } catch (e) {
       const msg = errorText(e)
       // "annullato": l'utente ha rifiutato la conferma o ha annullato la query: niente di allarmante
@@ -188,6 +248,7 @@
       const page = await ipc.dbQueryMore(id)
       if (id !== resultId) return
       grid = appendPage(grid, page, !isPg)
+      if (page.docs) docs = docs.concat(page.docs)
       hasMore = page.hasMore
       if (page.notices?.length) notices = [...notices, ...page.notices]
     } catch (e) {
@@ -202,10 +263,9 @@
     try {
       const out = await ipc.dbExport(resultId, format)
       if (!out) return
-      info = `Esportate ${fmtInt(out.rows)} righe in ${out.path}. Il risultato è stato chiuso: riesegui per rileggerlo.`
-      resultId = undefined
+      // il core ha letto fino in fondo per esportare ma tiene il risultato: si può riesportare, non sfogliare oltre
+      info = `Esportate ${fmtInt(out.rows)} righe in ${out.path}. Il risultato è stato letto fino in fondo: per vedere altre righe nella griglia riesegui la query.`
       hasMore = false
-      editor.setQueryResult(tab.key, undefined)
     } catch (e) {
       error = errorText(e)
     }
@@ -299,6 +359,7 @@
     {/if}
     <span class="grow"></span>
     <span class="dim cn">{conn?.name ?? 'Connessione'}</span>
+    {#if !isPg}<button disabled={!mg.collection || mg.mode !== 'find'} use:tooltip={'Inserisce un nuovo documento nella collezione scelta'} onclick={newDoc}>Nuovo documento</button>{/if}
     <button class:on={histOpen} aria-expanded={histOpen} use:tooltip={'Ultime 200 query eseguite su questa connessione'} onclick={() => void toggleHistory()}><Icon name="history" size={13} /> Cronologia</button>
     <button disabled={resultId === undefined} use:tooltip={'Esporta il risultato in CSV (tutte le righe, anche non caricate)'} onclick={() => void doExport('csv')}><Icon name="download" size={13} /> CSV</button>
     <button disabled={resultId === undefined} use:tooltip={'Esporta il risultato in JSON (tutte le righe, anche non caricate)'} onclick={() => void doExport('json')}><Icon name="download" size={13} /> JSON</button>
@@ -358,8 +419,11 @@
     {#if info}<div class="msg" role="status">{info}</div>{/if}
     {#each notices as n}<div class="msg note" role="status">{n}</div>{/each}
     {#if hasGrid}
+      {#if isPg && editInfo.pk && pendingCount > 0}
+        <EditBar {connId} schema={editSchema} table={q.table!} edits={rowEdits} count={pendingCount} onapplied={() => void applied()} onclear={() => (edits = emptyEdits())} />
+      {/if}
       {#key resultKey}
-        <ResultGrid columns={grid.columns} rows={grid.rows} truncated={grid.truncated} {hasMore} loading={paging} onmore={() => void more()} />
+        <ResultGrid columns={grid.columns} rows={grid.rows} truncated={grid.truncated} {hasMore} loading={paging} onmore={() => void more()} pk={editInfo.pk} {edits} onedit={(e) => (edits = e)} note={editInfo.note} onopen={canOpenDoc ? openDoc : undefined} />
       {/key}
     {:else if affected}
       <ul class="aff">
@@ -370,6 +434,9 @@
       <p class="dim pad">Esegui una query per vedere i risultati</p>
     {/if}
   </div>
+  {#if docEdit}
+    <DocEditor {connId} database={docEdit.database} collection={docEdit.collection} doc={docEdit.doc} onclose={() => (docEdit = null)} ondone={docDone} />
+  {/if}
 </div>
 
 <style>

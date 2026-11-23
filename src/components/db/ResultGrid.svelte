@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import { tooltip } from '../../lib/tooltip'
-  import { MAX_ROWS, PAGE, ROWNUM_W, ROW_H, cellKey, cellValue, clampWidth, estimateWidth, fmtInt, nearEnd, visibleColumns, visibleRows, type Cell } from '../../lib/db/grid'
+  import { addInsert, currentValue, isChanged, isDeleted, removeInsert, setCell, setInsertCell, toggleDelete, emptyEdits, type PendingEdits } from '../../lib/db/edits'
+  import { MAX_ROWS, PAGE, ROWNUM_W, ROW_H, cellKey, clampWidth, estimateWidth, fmtInt, nearEnd, visibleColumns, visibleRows, type Cell } from '../../lib/db/grid'
 
   let {
     columns,
@@ -10,7 +11,83 @@
     hasMore = false,
     loading = false,
     onmore,
-  }: { columns: string[]; rows: Cell[][]; truncated?: Set<string>; hasMore?: boolean; loading?: boolean; onmore?: () => void } = $props()
+    pk,
+    edits = emptyEdits(),
+    onedit,
+    note,
+    onopen,
+    openLabel = 'Modifica documento',
+  }: {
+    columns: string[]
+    rows: Cell[][]
+    truncated?: Set<string>
+    hasMore?: boolean
+    loading?: boolean
+    onmore?: () => void
+    /** Indici delle colonne della chiave primaria: presente = griglia modificabile. */
+    pk?: number[]
+    edits?: PendingEdits
+    onedit?: (e: PendingEdits) => void
+    /** Motivo della sola lettura, mostrato in fondo. */
+    note?: string
+    /** Apre la riga (indice tra le righe lette) in un editor (MongoDB). */
+    onopen?: (row: number) => void
+    openLabel?: string
+  } = $props()
+
+  const canEdit = $derived(pk !== undefined && pk.length > 0 && !!onedit)
+  const ni = $derived(canEdit ? edits.inserts.length : 0)
+  const total = $derived(ni + rows.length)
+  let editing = $state<{ r: number; c: number; text: string } | null>(null)
+  let menu = $state<{ x: number; y: number; r: number } | null>(null)
+
+  /** Valore mostrato (`undefined` = valore predefinito di una riga nuova). */
+  function val(r: number, c: number): Cell | undefined {
+    if (r < ni) return edits.inserts[r][c]
+    const row = rows[r - ni]
+    return canEdit ? currentValue(edits, row, pk!, c) : (row?.[c] ?? null)
+  }
+  const rowState = (r: number) => (!canEdit ? '' : r < ni ? 'ins' : isDeleted(edits, rows[r - ni], pk!) ? 'del' : '')
+  const changed = (r: number, c: number) => canEdit && r >= ni && isChanged(edits, rows[r - ni], pk!, c)
+
+  function startEdit(r: number, c: number) {
+    if (!canEdit || rowState(r) === 'del') return
+    sel = { r, c }
+    editing = { r, c, text: val(r, c) ?? '' }
+  }
+  function commit(value: string | null) {
+    const ed = editing
+    if (!ed || !canEdit) return
+    editing = null
+    onedit!(ed.r < ni ? setInsertCell(edits, ed.r, ed.c, value) : setCell(edits, rows[ed.r - ni], pk!, ed.c, value))
+  }
+  function delRow(r: number) {
+    if (!canEdit) return
+    onedit!(r < ni ? removeInsert(edits, r) : toggleDelete(edits, rows[r - ni], pk!))
+  }
+  function editKey(e: KeyboardEvent) {
+    e.stopPropagation()
+    if (!editing) return
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      commit(editing.text)
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      editing = null
+    } else if (e.key === 'Tab') {
+      e.preventDefault()
+      const { r, c } = editing
+      commit(editing.text)
+      if (c + 1 < columns.length) startEdit(r, c + 1)
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
+      e.preventDefault()
+      commit(null)
+    }
+  }
+  const focusInput = (n: HTMLInputElement) => {
+    n.focus()
+    n.select()
+  }
 
   let viewport = $state<HTMLDivElement>()
   let scrollTop = $state(0)
@@ -36,7 +113,7 @@
   )
   const H = $derived(vh || 400)
   const W = $derived(vw || 800)
-  const win = $derived(visibleRows(scrollTop, H, rows.length))
+  const win = $derived(visibleRows(scrollTop, H, total))
   const cols = $derived(visibleColumns(scrollLeft, Math.max(0, W - ROWNUM_W), widths))
   const atLimit = $derived(rows.length >= MAX_ROWS)
 
@@ -44,7 +121,7 @@
   let requestedAt = -1
   function maybeMore() {
     if (!hasMore || loading || atLimit || !onmore) return
-    if (!nearEnd(visibleRows(scrollTop, H, rows.length, 0).end, rows.length)) return
+    if (!nearEnd(visibleRows(scrollTop, H, total, 0).end, total)) return
     if (requestedAt === rows.length) return
     requestedAt = rows.length
     onmore()
@@ -87,10 +164,32 @@
 
   async function onkey(e: KeyboardEvent) {
     if (!sel) return
+    if (canEdit) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
+        e.preventDefault()
+        startEdit(sel.r, sel.c)
+        commit(null)
+        return
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        delRow(sel.r)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'F2') {
+        e.preventDefault()
+        startEdit(sel.r, sel.c)
+        return
+      }
+    } else if (onopen && e.key === 'Enter' && sel.r < rows.length) {
+      e.preventDefault()
+      onopen(sel.r)
+      return
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
       e.preventDefault()
       try {
-        await navigator.clipboard.writeText(cellValue(rows, sel.r, sel.c) ?? '')
+        await navigator.clipboard.writeText(val(sel.r, sel.c) ?? '')
       } catch {
         /* appunti non disponibili */
       }
@@ -99,7 +198,7 @@
     const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key]
     if (!d) return
     e.preventDefault()
-    const r = Math.min(rows.length - 1, Math.max(0, sel.r + d[0]))
+    const r = Math.min(total - 1, Math.max(0, sel.r + d[0]))
     const c = Math.min(columns.length - 1, Math.max(0, sel.c + d[1]))
     sel = { r, c }
     await tick()
@@ -123,7 +222,7 @@
   const rowIdx = $derived(Array.from({ length: win.end - win.start }, (_, k) => win.start + k))
 </script>
 
-<div class="grid" role="grid" data-no-tooltip="tabella: i controlli sono nelle celle" aria-rowcount={rows.length + 1} aria-colcount={columns.length} tabindex="0" onkeydown={onkey}>
+<div class="grid" role="grid" data-no-tooltip="tabella: i controlli sono nelle celle" aria-rowcount={total + 1} aria-colcount={columns.length} tabindex="0" onkeydown={onkey}>
   <div class="viewport" bind:this={viewport} {onscroll} use:sizeObs>
     <div class="inner" style="width: {ROWNUM_W + cols.total}px">
       <div class="head" role="row" style="height: {ROW_H}px">
@@ -136,16 +235,23 @@
           </div>
         {/each}
       </div>
-      <div class="body" style="height: {rows.length * ROW_H}px">
+      <div class="body" style="height: {total * ROW_H}px">
         {#each rowIdx as r (r)}
-          <div class="row" role="row" style="top: {r * ROW_H}px; height: {ROW_H}px">
+          {@const rs = rowState(r)}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="row" class:ins={rs === 'ins'} class:del={rs === 'del'} role="row" tabindex="-1" data-no-tooltip="riga: il menu contestuale ha le azioni" oncontextmenu={(e) => { if (canEdit || (onopen && r >= ni)) { e.preventDefault(); sel = { r, c: sel?.c ?? 0 }; menu = { x: e.clientX, y: e.clientY, r } } }} style="top: {r * ROW_H}px; height: {ROW_H}px">
             <div class="num" role="rowheader">{r + 1}</div>
             {#each visibleIdx as c (c)}
-              {@const v = cellValue(rows, r, c)}
+              {@const v = val(r, c)}
+              {@const isEd = editing?.r === r && editing?.c === c}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <div class="cell" data-no-tooltip="cella selezionabile" class:sel={sel?.r === r && sel?.c === c} role="gridcell" tabindex="-1" aria-selected={sel?.r === r && sel?.c === c} style="left: {ROWNUM_W + cols.offsets[c]}px; width: {widths[c]}px" onclick={() => (sel = { r, c })}>
-                {#if v === null}<span class="null">NULL</span>{:else}<span class="txt">{v}</span>{/if}
-                {#if truncated.has(cellKey(r, c))}<span class="trunc" role="img" aria-label="Valore troncato a 64 KB" use:tooltip={'Valore troncato a 64 KB'}>…</span>{/if}
+              <div class="cell" data-no-tooltip="cella selezionabile" class:sel={sel?.r === r && sel?.c === c} class:chg={changed(r, c)} role="gridcell" tabindex="-1" aria-selected={sel?.r === r && sel?.c === c} style="left: {ROWNUM_W + cols.offsets[c]}px; width: {widths[c]}px" onclick={() => (sel = { r, c })} ondblclick={() => (canEdit ? startEdit(r, c) : onopen && r >= ni ? onopen(r - ni) : undefined)}>
+                {#if isEd}
+                  <input class="inp" aria-label="Valore della cella" bind:value={editing!.text} use:focusInput onkeydown={editKey} onblur={() => commit(editing?.text ?? null)} />
+                  <button class="nullbtn" aria-label="Imposta NULL" use:tooltip={{ text: 'Imposta NULL', shortcut: '⌘⌫' }} onmousedown={(e) => e.preventDefault()} onclick={() => commit(null)}>∅</button>
+                {:else if v === undefined}<span class="null">DEFAULT</span>
+                {:else if v === null}<span class="null">NULL</span>{:else}<span class="txt">{v}</span>{/if}
+                {#if r >= ni && truncated.has(cellKey(r - ni, c))}<span class="trunc" role="img" aria-label="Valore troncato a 64 KB" use:tooltip={'Valore troncato a 64 KB'}>…</span>{/if}
               </div>
             {/each}
           </div>
@@ -155,6 +261,8 @@
   </div>
   <div class="foot" role="status">
     <span>{fmtInt(rows.length)} {rows.length === 1 ? 'riga' : 'righe'}</span>
+    {#if canEdit}<button class="more addrow" use:tooltip={'Aggiunge una riga nuova in cima'} onclick={() => { onedit!(addInsert(edits, columns.length)); sel = { r: 0, c: 0 } }}>＋ Riga</button>{/if}
+    {#if note}<span class="note" data-no-tooltip="nota">· {note}</span>{/if}
     {#if atLimit}
       <span class="note">· Limite di {fmtInt(MAX_ROWS)} righe raggiunto</span>
     {:else if hasMore}
@@ -162,7 +270,17 @@
       <button class="more" disabled={loading} use:tooltip={'Legge la pagina successiva del risultato'} onclick={ask}>{loading ? 'Caricamento…' : `Carica altre ${PAGE}`}</button>
     {/if}
   </div>
+  {#if menu}
+    <div class="menu" role="menu" style="left: {menu.x}px; top: {menu.y}px">
+      {#if canEdit}
+        <button role="menuitem" use:tooltip={'Segna la riga come eliminata (si applica con «Applica»)'} onclick={() => { delRow(menu!.r); menu = null }}>{rowState(menu.r) === 'del' ? 'Ripristina riga' : 'Elimina riga'}</button>
+      {:else if onopen}
+        <button role="menuitem" use:tooltip={'Apre il documento in un editor'} onclick={() => { onopen(menu!.r); menu = null }}>{openLabel}</button>
+      {/if}
+    </div>
+  {/if}
 </div>
+<svelte:window onclick={() => (menu = null)} />
 
 <style>
   .grid { display: flex; flex-direction: column; min-height: 0; height: 100%; font-size: 12px; outline: none; }
@@ -178,6 +296,15 @@
   .txt { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .cell { border-right: 1px solid var(--edge-soft); font-family: ui-monospace, Menlo, monospace; }
   .cell.sel { outline: 1px solid var(--accent, #6aa9ff); outline-offset: -1px; background: color-mix(in srgb, var(--accent, #6aa9ff) 14%, transparent); }
+  .row.ins { background: color-mix(in srgb, #4ade80 14%, transparent); }
+  .row.del { background: color-mix(in srgb, #f87171 16%, transparent); text-decoration: line-through; color: var(--dim); }
+  .cell.chg { background: color-mix(in srgb, #fbbf24 22%, transparent); }
+  .inp { flex: 1; min-width: 0; height: 20px; box-sizing: border-box; font: inherit; color: inherit; background: var(--panel, #1e1e22); border: 1px solid var(--accent, #6aa9ff); border-radius: 4px; padding: 0 4px; }
+  .nullbtn { flex: none; font-size: 11px; line-height: 16px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--edge-soft); background: transparent; color: inherit; cursor: pointer; }
+  .menu { position: fixed; z-index: 50; min-width: 150px; background: var(--panel, #1e1e22); border: 1px solid var(--edge-soft); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); padding: 4px; }
+  .menu button { display: block; width: 100%; text-align: left; font-size: 12px; padding: 5px 10px; background: transparent; border: 0; border-radius: 5px; color: inherit; cursor: pointer; }
+  .menu button:hover { background: var(--edge-soft); }
+  .more.addrow { margin-left: 8px; }
   .null { color: var(--faint); font-style: italic; }
   .trunc { flex: none; padding: 0 4px; border-radius: 4px; background: var(--edge-soft); color: var(--dim); line-height: 14px; }
   .grip { position: absolute; right: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 4; }
