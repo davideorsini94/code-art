@@ -2,6 +2,7 @@ import * as ipc from '../ipc'
 import { listenProject, listenSshState } from '../events'
 import { errorText } from '../errors'
 import { projectStore } from './project.svelte'
+import { terminals } from './terminals.svelte'
 import type { Server, ServerInput, SshConnState, SshStateEvent, TransferEvent } from '../types'
 
 /** Trasferimento mostrato nel pannello: l'ultimo evento ricevuto più la destinazione (per aggiornare l'elenco a fine). */
@@ -174,6 +175,9 @@ export class SshStore {
     try {
       await ipc.sshConnect(id)
       if (this.passwordFor === id) this.passwordFor = null
+      // connessi: si apre subito un terminale sul server, nella cartella iniziale (altrimenti la home)
+      const server = this.servers.find((s) => s.id === id)
+      terminals.openRemote(id, server?.startDir?.trim() || '~')
     } catch (e) {
       if (String(e) === 'auth') {
         this.states[id] = { state: 'disconnected' }

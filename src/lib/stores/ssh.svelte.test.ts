@@ -25,11 +25,14 @@ vi.mock('./project.svelte', () => ({ projectStore: { project: { folders: ['/User
 
 import * as ipc from '../ipc'
 import { SshStore, resolveRoot } from './ssh.svelte'
+import { terminals } from './terminals.svelte'
 
 let s: SshStore
 beforeEach(() => {
   vi.clearAllMocks()
   s = new SshStore()
+  terminals.requests = []
+  terminals.visible = false
 })
 
 describe('SshStore', () => {
@@ -54,6 +57,29 @@ describe('SshStore', () => {
     expect(ipc.sshPasswordSet).toHaveBeenCalledWith('a', 'x')
     expect(ipc.sshConnect).toHaveBeenCalledTimes(2)
     expect(s.passwordFor).toBeNull()
+  })
+
+  it('a successful connection opens a terminal on the server, in its start folder or home', async () => {
+    await s.init()
+    await s.connect('a')
+    expect(terminals.visible).toBe(true)
+    expect(terminals.requests).toMatchObject([{ kind: 'remote', serverId: 'a', dir: '~' }])
+    terminals.requests = []
+    s.servers[0].startDir = ' /srv/app '
+    await s.connect('a')
+    expect(terminals.requests).toMatchObject([{ kind: 'remote', serverId: 'a', dir: '/srv/app' }])
+  })
+
+  it('a failed or cancelled connection opens no terminal', async () => {
+    await s.init()
+    vi.mocked(ipc.sshConnect).mockRejectedValueOnce('auth')
+    await s.connect('a')
+    vi.mocked(ipc.sshConnect).mockRejectedValueOnce('Connessione annullata')
+    await s.connect('a')
+    vi.mocked(ipc.sshConnect).mockRejectedValueOnce('rifiutato')
+    await s.connect('a')
+    expect(terminals.requests).toEqual([])
+    expect(terminals.visible).toBe(false)
   })
 
   it('records other connection errors', async () => {
