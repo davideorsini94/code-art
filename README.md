@@ -25,7 +25,7 @@ All of it in a dark "liquid glass" theme, with editor, file previews, terminal, 
 | 3a. Terminals | Open a terminal in any folder or repository of the project (file tree, Git view, folder picker), tabs titled with folder and branch, rename and reorder | done |
 | 3b. SSH | Servers from `~/.ssh/config` or saved (password in the macOS Keychain), host key confirmation, remote folders in the sidebar, remote files in the editor, drag and drop between Mac and server with progress, remote terminal — built on the system `ssh` | done |
 | 4a. Databases | PostgreSQL and MongoDB (direct or through an SSH server, TLS, password in the Keychain): schema tree, query editor with history, paginated result grid with CSV/JSON export, grid edits previewed and applied in a transaction, MongoDB document editor | done |
-| 4b. Oracle | Oracle via Instant Client | planned |
+| 4b. Oracle | Oracle via Instant Client (installation guided by the app): schema tree, paginated queries, export, grid edits in a transaction — TCP only (use an SSH tunnel for encryption) | done |
 
 The full design is in [`docs/superpowers/specs`](docs/superpowers/specs/2026-11-11-code-art-ide-design.md) and the stage 1 plan in [`docs/superpowers/plans`](docs/superpowers/plans/2026-11-11-code-art-tappa-1-il-cuore.md) (both in Italian).
 
