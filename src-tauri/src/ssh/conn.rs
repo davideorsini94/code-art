@@ -201,9 +201,11 @@ fn args_with(server: &Server, paths: &SshPaths, mode: Mode, extra: &[&str]) -> V
 }
 
 /// Argomenti del master: in sottofondo dopo l'autenticazione (`-N` con `ControlPersist`), si chiude da solo dopo
-/// 10 minuti senza client (anche se l'app termina male).
+/// 10 minuti senza client (anche se l'app termina male). Master con `ControlMaster=yes` (in `args_with`), MAI anche
+/// `-M`: OpenSSH conta i due come una doppia richiesta e passa a `ask`, cioè una conferma via SSH_ASKPASS per ogni
+/// sessione, che l'askpass dell'app rifiuta ("Master refused session request: Permission denied").
 pub fn master_args(server: &Server, paths: &SshPaths) -> Vec<String> {
-    args_with(server, paths, Mode::Master, &["-M", "-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10"])
+    args_with(server, paths, Mode::Master, &["-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10"])
 }
 
 /// `ssh -O <op>` sul socket del server (`check`, `exit`).
@@ -1190,14 +1192,29 @@ mod tests {
         }
     }
 
+    /// OpenSSH vero: il master deve risultare `controlmaster true`, non `ask` (con `ask` ogni sessione sul socket
+    /// chiede conferma via SSH_ASKPASS e viene rifiutata: "Master refused session request: Permission denied").
+    #[test]
+    fn master_is_a_plain_master_for_openssh() {
+        if !std::path::Path::new("/usr/bin/ssh").exists() {
+            return;
+        }
+        let m = master_args(&saved("id-1"), &paths("/home/dev/data"));
+        let out = std::process::Command::new("/usr/bin/ssh").arg("-G").args(&m).output().unwrap();
+        let cfg = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        assert!(cfg.lines().any(|l| l == "controlmaster true"), "{cfg}");
+    }
+
     #[test]
     fn master_control_and_run_args() {
         let p = paths("/home/dev/data");
         let s = saved("id-1");
         let m = master_args(&s, &p);
         assert!(m.contains(&"ControlMaster=yes".to_string()) && !m.contains(&"ControlMaster=no".to_string()));
-        assert_eq!(&m[m.len() - 7..], ["-M", "-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10", "example.test"].map(String::from));
-        assert_eq!(m[m.len() - 8], "/home/dev/.ssh/id_dev");
+        // niente `-M`: insieme a `ControlMaster=yes` diventa `ask` e il master rifiuta ogni sessione
+        assert!(!m.contains(&"-M".to_string()));
+        assert_eq!(&m[m.len() - 6..], ["-N", "-o", "ControlPersist=600", "-o", "ConnectTimeout=10", "example.test"].map(String::from));
+        assert_eq!(m[m.len() - 7], "/home/dev/.ssh/id_dev");
         let c = control_args(&s, &p, "check");
         assert_eq!(&c[c.len() - 3..], ["-O", "check", "example.test"].map(String::from));
         let r = run_args(&s, &p, "cat -- \"$1\"", &["/home/dev/a b"]);
