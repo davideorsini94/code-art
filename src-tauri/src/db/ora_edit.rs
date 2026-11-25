@@ -18,8 +18,11 @@ pub fn bind_expr(data_type: &str, n: usize) -> Option<String> {
         "NUMBER" | "FLOAT" | "BINARY_FLOAT" | "BINARY_DOUBLE" => Some(format!("TO_NUMBER(:{n})")),
         "DATE" => Some(format!("TO_DATE(:{n},'YYYY-MM-DD HH24:MI:SS')")),
         "CHAR" | "VARCHAR2" | "NCHAR" | "NVARCHAR2" => Some(format!(":{n}")),
+        // WITH LOCAL TIME ZONE: il testo mostrato è nel fuso della sessione e non si riscrive identico (finché non è
+        // verificato con un server vero resta in sola lettura)
+        _ if t.starts_with("TIMESTAMP") && t.contains("WITH LOCAL TIME ZONE") => None,
         _ if t.starts_with("TIMESTAMP") => {
-            if t.contains("WITH TIME ZONE") || t.contains("WITH LOCAL TIME ZONE") {
+            if t.contains("WITH TIME ZONE") {
                 Some(format!("TO_TIMESTAMP_TZ(:{n},'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')"))
             } else {
                 Some(format!("TO_TIMESTAMP(:{n},'YYYY-MM-DD HH24:MI:SS.FF')"))
@@ -217,7 +220,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str, ty: &str, pk: bool) -> OraColumn {
-        OraColumn { name: name.into(), type_name: ty.into(), data_type: ty.into(), nullable: !pk, is_pk: pk }
+        OraColumn { name: name.into(), type_name: ty.into(), data_type: ty.into(), nullable: !pk, is_pk: pk, editable: bind_expr(ty, 1).is_some() }
     }
     fn cell(n: &str, v: Option<&str>) -> Cell {
         (n.into(), v.map(str::to_string))
@@ -235,11 +238,10 @@ mod tests {
         assert_eq!(bind_expr("DATE", 1).unwrap(), "TO_DATE(:1,'YYYY-MM-DD HH24:MI:SS')");
         assert_eq!(bind_expr("TIMESTAMP(6)", 1).unwrap(), "TO_TIMESTAMP(:1,'YYYY-MM-DD HH24:MI:SS.FF')");
         assert_eq!(bind_expr("TIMESTAMP(3) WITH TIME ZONE", 1).unwrap(), "TO_TIMESTAMP_TZ(:1,'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')");
-        assert_eq!(bind_expr("TIMESTAMP(9) WITH LOCAL TIME ZONE", 1).unwrap(), "TO_TIMESTAMP_TZ(:1,'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')");
         for t in ["CHAR", "VARCHAR2", "NCHAR", "NVARCHAR2"] {
             assert_eq!(bind_expr(t, 4).unwrap(), ":4");
         }
-        for t in ["CLOB", "NCLOB", "BLOB", "RAW", "LONG", "LONG RAW", "XMLTYPE", "ROWID", "INTERVAL DAY(2) TO SECOND(6)", "BFILE", "SDO_GEOMETRY"] {
+        for t in ["CLOB", "NCLOB", "BLOB", "RAW", "LONG", "LONG RAW", "XMLTYPE", "ROWID", "INTERVAL DAY(2) TO SECOND(6)", "BFILE", "SDO_GEOMETRY", "TIMESTAMP(9) WITH LOCAL TIME ZONE", "JSON", "UROWID"] {
             assert!(bind_expr(t, 1).is_none(), "{t}");
         }
     }

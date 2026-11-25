@@ -6,7 +6,6 @@ vi.mock('../../lib/events', () => ({ listenDbState: vi.fn(async () => () => {}),
 vi.mock('../../lib/ipc', () => ({
   dbOracleClientStatus: vi.fn(),
   dbOracleClientPick: vi.fn(),
-  dbOracleClientUse: vi.fn(),
   dbConnect: vi.fn(async () => {}),
   dbOraTree: vi.fn(async () => ({ schemas: [] })),
 }))
@@ -44,6 +43,7 @@ describe('OracleClientGuide', () => {
     vi.mocked(ipc.dbOracleClientPick).mockResolvedValue(st({ dir: '/ic', loaded: true }))
     render(OracleClientGuide, { modal: true })
     await fireEvent.click(screen.getByRole('button', { name: 'Scegli la cartella…' }))
+    expect(ipc.dbOracleClientPick).toHaveBeenCalledWith(undefined)
     await waitFor(() => expect(ipc.dbConnect).toHaveBeenCalledWith('o1'))
     expect(db.guideFor).toBeNull()
     expect(screen.getByText('Caricato')).toBeTruthy()
@@ -58,12 +58,12 @@ describe('OracleClientGuide', () => {
     expect(ipc.dbConnect).not.toHaveBeenCalled()
   })
 
-  it('le cartelle trovate sono pulsanti che usano dbOracleClientUse', async () => {
+  it('una cartella trovata apre il selettore partendo da lì', async () => {
     db.oracleClient = st({ detected: ['/opt/oracle/ic'] })
-    vi.mocked(ipc.dbOracleClientUse).mockResolvedValue(st({ dir: '/opt/oracle/ic', detected: ['/opt/oracle/ic'] }))
+    vi.mocked(ipc.dbOracleClientPick).mockResolvedValue(st({ dir: '/opt/oracle/ic', detected: ['/opt/oracle/ic'] }))
     render(OracleClientGuide)
     await fireEvent.click(screen.getByRole('button', { name: '/opt/oracle/ic' }))
-    expect(ipc.dbOracleClientUse).toHaveBeenCalledWith('/opt/oracle/ic')
+    expect(ipc.dbOracleClientPick).toHaveBeenCalledWith('/opt/oracle/ic')
     await screen.findByText('Trovato')
   })
 

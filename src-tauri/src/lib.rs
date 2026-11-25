@@ -171,7 +171,6 @@ pub fn run() {
             db::db_history_add,
             db::oracle_client::db_oracle_client_status,
             db::oracle_client::db_oracle_client_pick,
-            db::oracle_client::db_oracle_client_use,
             db::db_connect,
             db::db_disconnect,
             db::db_states,

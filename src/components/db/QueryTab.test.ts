@@ -377,10 +377,10 @@ describe('QueryTab', () => {
 
   describe('Oracle', () => {
     const cols = [
-      { name: 'ID', type: 'NUMBER', nullable: false, isPk: true },
-      { name: 'NOME', type: 'VARCHAR2', nullable: true, isPk: false },
-      { name: 'NOTE', type: 'CLOB', nullable: true, isPk: false },
-      { name: 'QUANDO', type: 'TIMESTAMP(6) WITH LOCAL TIME ZONE', nullable: true, isPk: false },
+      { name: 'ID', type: 'NUMBER', nullable: false, isPk: true, editable: true },
+      { name: 'NOME', type: 'VARCHAR2', nullable: true, isPk: false, editable: true },
+      { name: 'NOTE', type: 'CLOB', nullable: true, isPk: false, editable: false },
+      { name: 'QUANDO', type: 'TIMESTAMP(6) WITH LOCAL TIME ZONE', nullable: true, isPk: false, editable: false },
     ]
     const res = { resultId: 9, columns: [{ name: 'ID' }, { name: 'NOME' }, { name: 'NOTE' }, { name: 'QUANDO' }], rows: [['1', 'Ada', 'lungo', '2020-01-01 10:00:00.0']], hasMore: false, editableTable: { schema: 'HR', table: 'EMP"X' } }
     async function openOra() {
@@ -415,7 +415,7 @@ describe('QueryTab', () => {
       expect(ipc.dbPgApplyEdits).not.toHaveBeenCalled()
     })
 
-    it('colonne LOB e TIMESTAMP LOCAL TIME ZONE sono in sola lettura', async () => {
+    it('le colonne che il core segna non modificabili sono in sola lettura', async () => {
       await openOra()
       await fireEvent.dblClick(cell('lungo'))
       expect(screen.queryByLabelText('Valore della cella')).toBeNull()
@@ -423,6 +423,15 @@ describe('QueryTab', () => {
       expect(screen.queryByLabelText('Valore della cella')).toBeNull()
       await fireEvent.dblClick(cell('Ada'))
       expect(screen.getByLabelText('Valore della cella')).toBeTruthy()
+    })
+
+    it('una chiave primaria di un tipo non modificabile rende la tabella in sola lettura', async () => {
+      vi.mocked(ipc.dbQuery).mockResolvedValue(res as never)
+      vi.mocked(ipc.dbOraColumns).mockResolvedValue([{ ...cols[0], type: 'RAW(16)', editable: false }, ...cols.slice(1)] as never)
+      render(QueryTab, { tab: open({ connectionId: 'o1', kind: 'oracle', schema: 'HR', table: 'EMP"X' }) })
+      await screen.findByText(/Sola lettura: chiave primaria di un tipo non modificabile/)
+      await fireEvent.dblClick(cell('Ada'))
+      expect(screen.queryByLabelText('Valore della cella')).toBeNull()
     })
   })
 

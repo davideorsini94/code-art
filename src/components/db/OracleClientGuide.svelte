@@ -35,12 +35,12 @@
       busy = false
     }
   }
-  const pick = () =>
+  // anche una cartella trovata passa dal selettore di macOS: la libreria si carica solo da una scelta confermata
+  const pick = (start?: string) =>
     run(async () => {
-      const st = await ipc.dbOracleClientPick()
+      const st = await ipc.dbOracleClientPick(start)
       if (st) await db.applyClientStatus(st)
     })
-  const use = (dir: string) => run(async () => db.applyClientStatus(await ipc.dbOracleClientUse(dir)))
 
   async function copy(cmd: string) {
     try {
@@ -67,9 +67,9 @@
   </ol>
   {#if detected.length}
     <div class="det">
-      <span class="dim">Cartelle trovate:</span>
+      <span class="dim">Cartelle trovate (si apre il selettore su quella cartella, conferma con «Apri»):</span>
       {#each detected as d (d)}
-        <button class="path" disabled={busy} use:tooltip={'Usa questa cartella'} onclick={() => void use(d)}>{d}</button>
+        <button class="path" disabled={busy} use:tooltip={'Apre il selettore su questa cartella'} onclick={() => void pick(d)}>{d}</button>
       {/each}
     </div>
   {/if}

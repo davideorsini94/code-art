@@ -124,8 +124,6 @@ export const selectAllSql = (schema: string, table: string) => `SELECT * FROM ${
 /** Oracle: senza `;` finale (ORA-00911) e con i nomi esatti del catalogo. */
 export const selectAllOracle = (owner: string, table: string) => `SELECT * FROM ${quoteIdent(owner)}.${quoteIdent(table)}`
 
-/** Colonne Oracle non modificabili dalla griglia: LOB, RAW/LONG e TIMESTAMP WITH LOCAL TIME ZONE (il valore testuale non si riscrive identico). */
-export const oracleReadOnlyType = (type: string) => /LOB|RAW|LONG|LOCAL TIME ZONE/i.test(type)
 
 /** Numero con separatore delle migliaia all'italiana (senza dipendere dalla lingua del sistema). */
 export const fmtInt = (n: number) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.')

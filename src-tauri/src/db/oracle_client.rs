@@ -80,9 +80,9 @@ pub fn translate_load_error(msg: &str, dir: &Path) -> String {
     if low.contains("incompatible architecture") || low.contains("mach-o") || low.contains("wrong architecture") {
         "Instant Client per un'architettura diversa: scarica la versione ARM64 (o quella adatta al tuo Mac)".into()
     } else if low.contains("team id") || low.contains("library validation") || low.contains("code signature") {
-        // l'app installata ha l'hardened runtime: macOS rifiuta librerie firmate da un altro sviluppatore (Oracle);
-        // il quarantena qui non c'entra e `xattr` non servirebbe. Decisione rimandata (docs/verifica-tappa-4b.md).
-        "macOS non permette all'app installata di caricare Instant Client (firmato da Oracle): Oracle non è ancora utilizzabile da Code Art installata".into()
+        // hardened runtime senza il permesso disable-library-validation (Entitlements.plist): una build firmata
+        // senza quel file. La quarantena qui non c'entra e `xattr` non servirebbe.
+        "macOS ha rifiutato la firma di Instant Client: questa build di Code Art non ha il permesso di caricare librerie di altri sviluppatori (ricostruiscila con Entitlements.plist)".into()
     } else if low.contains("quarantine") || low.contains("not verified") {
         format!("macOS ha messo in quarantena la libreria: esegui `xattr -dr com.apple.quarantine '{d}'` nel Terminale e riprova")
     } else if low.contains("dpi-1047") {
@@ -131,12 +131,10 @@ fn use_dir(store: &Store, dir: &Path) -> Result<(), String> {
     store.setting_set(CLIENT_DIR_KEY, &canon.to_string_lossy())
 }
 
-fn use_detected(store: &Store, dir: &str, detected: &[PathBuf]) -> Result<(), String> {
-    let canon = validate_client_dir(Path::new(dir))?;
-    if !detected.contains(&canon) {
-        return Err("cartella non fra quelle rilevate: usa il selettore".into());
-    }
-    use_dir(store, &canon)
+/// Cartella da cui aprire il selettore: un suggerimento della pagina vale solo se è fra le cartelle rilevate ora,
+/// altrimenti la cartella salvata. È solo il punto di partenza: la scelta resta all'utente nel selettore nativo.
+fn picker_start(hint: Option<&str>, detected: &[PathBuf], saved: Option<String>) -> Option<PathBuf> {
+    hint.and_then(|h| validate_client_dir(Path::new(h)).ok()).filter(|c| detected.contains(c)).or_else(|| saved.map(PathBuf::from))
 }
 
 #[tauri::command]
@@ -146,9 +144,12 @@ pub async fn db_oracle_client_status(app: AppHandle, window: WebviewWindow) -> R
 }
 
 #[tauri::command]
-pub async fn db_oracle_client_pick(app: AppHandle, window: WebviewWindow) -> Result<Option<OracleClientStatus>, String> {
+pub async fn db_oracle_client_pick(app: AppHandle, window: WebviewWindow, start: Option<String>) -> Result<Option<OracleClientStatus>, String> {
     let store = ssh::trusted_store(&app, &window)?;
-    let start = store.setting_get(CLIENT_DIR_KEY).ok().flatten().map(PathBuf::from);
+    // la libreria si carica solo da una cartella confermata nel selettore nativo: con il permesso
+    // disable-library-validation la pagina non deve poter caricare una cartella da sola
+    let st0 = store.clone();
+    let start = crate::projects::off_main(move || Ok(picker_start(start.as_deref(), &detect(), st0.setting_get(CLIENT_DIR_KEY).ok().flatten()))).await?;
     let Some(picked) = crate::projects::pick_folder_in(&app, &window, "Scegli la cartella di Oracle Instant Client", start).await? else {
         return Ok(None);
     };
@@ -156,17 +157,6 @@ pub async fn db_oracle_client_pick(app: AppHandle, window: WebviewWindow) -> Res
     crate::projects::off_main(move || {
         use_dir(&st, Path::new(&picked))?;
         Ok(Some(status_with(&st, detect())))
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn db_oracle_client_use(app: AppHandle, window: WebviewWindow, dir: String) -> Result<OracleClientStatus, String> {
-    let store = ssh::trusted_store(&app, &window)?;
-    crate::projects::off_main(move || {
-        let detected = detect();
-        use_detected(&store, &dir, &detected)?;
-        Ok(status_with(&store, detected))
     })
     .await
 }
@@ -238,21 +228,35 @@ mod tests {
         assert!(q.contains("xattr -dr com.apple.quarantine '/x/ic'"));
         // hardened runtime: firma di un altro sviluppatore, xattr non serve
         let t = translate_load_error("code signature in <…/libclntsh.dylib> not valid for use in process: mapping process and mapped file (non-platform) have different Team IDs", d);
-        assert!(t.contains("non è ancora utilizzabile") && !t.contains("xattr"));
+        assert!(t.contains("Entitlements.plist") && !t.contains("xattr"));
         assert!(!translate_load_error("boh", d).contains("boh"));
     }
 
     #[test]
-    fn use_detected_only_accepts_detected() {
+    fn use_dir_saves_the_canonical_folder() {
         let t = td();
         let store = Store::open(&t.path().join("s.db")).unwrap();
+        assert!(use_dir(&store, &t.path().join("manca")).is_err());
+        assert_eq!(store.setting_get(CLIENT_DIR_KEY).unwrap(), None);
+        let a = t.path().join("a");
+        fake_client(&a);
+        use_dir(&store, &a).unwrap();
+        assert_eq!(store.setting_get(CLIENT_DIR_KEY).unwrap().unwrap(), std::fs::canonicalize(&a).unwrap().to_string_lossy());
+    }
+
+    #[test]
+    fn picker_start_trusts_only_detected_hints() {
+        let t = td();
         let a = t.path().join("a");
         fake_client(&a);
         let ca = std::fs::canonicalize(&a).unwrap();
-        assert!(use_detected(&store, a.to_str().unwrap(), &[]).is_err());
-        assert_eq!(store.setting_get(CLIENT_DIR_KEY).unwrap(), None);
-        use_detected(&store, a.to_str().unwrap(), std::slice::from_ref(&ca)).unwrap();
-        assert_eq!(store.setting_get(CLIENT_DIR_KEY).unwrap().unwrap(), ca.to_string_lossy());
+        let saved = Some("/salvata".to_string());
+        // suggerimento rilevato: il selettore parte da lì
+        assert_eq!(picker_start(a.to_str(), std::slice::from_ref(&ca), saved.clone()), Some(ca.clone()));
+        // non rilevato o inesistente: cartella salvata, poi nessuna
+        assert_eq!(picker_start(a.to_str(), &[], saved.clone()), Some(PathBuf::from("/salvata")));
+        assert_eq!(picker_start(Some("/non/esiste"), std::slice::from_ref(&ca), None), None);
+        assert_eq!(picker_start(None, std::slice::from_ref(&ca), None), None);
     }
 
     #[test]

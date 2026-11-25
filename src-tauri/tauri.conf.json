@@ -37,7 +37,8 @@
     "longDescription": "Code Art è un IDE personale per Mac: conversazioni con Claude Code, editor, terminale e diff in finestre per progetto.",
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "./Entitlements.plist"
     }
   }
 }

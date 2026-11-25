@@ -43,6 +43,8 @@ pub const PING_EVERY: Duration = Duration::from_secs(30);
 pub const PING_FAILURES: u32 = 2;
 /// Attesa massima della chiusura del thread (poi lo si abbandona: finirà da solo).
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Tempo massimo del `ping` di controllo: su una connessione TCP mezza aperta non deve restare appeso.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Impostazioni di sessione subito dopo la connessione: i valori mostrati come testo si riscrivono identici.
 pub const NLS_SETTINGS: [(&str, &str); 4] = [
@@ -138,9 +140,10 @@ impl From<&oracle::Error> for OraErr {
     }
 }
 
-/// ORA-03113/03114/03135 (fine file sul canale, non connesso, connessione persa) e DPI-1080 (connessione chiusa).
+/// ORA-03113/03114/03135 (fine file sul canale, non connesso, connessione persa), DPI-1080 (connessione chiusa) e
+/// DPI-1067 (tempo massimo della chiamata superato: dopo, la connessione non è più utilizzabile).
 pub fn is_connection_lost(ora: Option<i32>, dpi: Option<i32>) -> bool {
-    matches!(ora, Some(3113 | 3114 | 3135)) || dpi == Some(1080)
+    matches!(ora, Some(3113 | 3114 | 3135)) || matches!(dpi, Some(1080 | 1067))
 }
 
 /// Toglie password e descrittori di connessione dal testo di un errore.
@@ -155,7 +158,8 @@ fn clean(text: &str, password: Option<&str>) -> String {
 /// Messaggio mostrato (o `auth`) per un errore. Il testo originale entra solo ripulito.
 pub fn map_error(e: &OraErr, password: Option<&str>) -> String {
     match e.ora {
-        Some(1017) => AUTH.into(),
+        // ORA-01005: nessuna password (connessione salvata senza password) = chiedila
+        Some(1017 | 1005) => AUTH.into(),
         Some(12541 | 12545 | 12170 | 12543) => UNREACHABLE.into(),
         Some(12514) => UNKNOWN_SERVICE.into(),
         Some(28000) => ACCOUNT_LOCKED.into(),
@@ -441,6 +445,11 @@ impl Actor {
     pub fn shutdown(&self) {
         let join = lock(&self.join).take();
         let Some(join) = join else { return };
+        // dal thread della sessione stesso (la sessione è caduta e `on_end` lascia l'attore): il thread sta già
+        // uscendo, attendersi da soli costerebbe solo `JOIN_TIMEOUT`
+        if join.thread().id() == std::thread::current().id() {
+            return;
+        }
         let _ = (self.breaker)();
         let _ = self.tx.send(Request::Close);
         let start = Instant::now();
@@ -484,6 +493,14 @@ impl OracleBackend {
     }
 }
 
+/// Le istruzioni dell'utente non hanno tempo massimo: se il ping ne avesse lasciato uno, qui sparisce
+/// (impostazione locale del client, nessun giro sul server).
+fn no_call_timeout(conn: &oracle::Connection) {
+    if conn.call_timeout().ok().flatten().is_some() {
+        let _ = conn.set_call_timeout(None);
+    }
+}
+
 /// Il `Statement` pronto: righe da leggere a 500 per volta, LOB come localizzatori (si leggono solo i primi byte).
 fn prepare(conn: &oracle::Connection, sql: &str) -> Result<oracle::Statement, OraErr> {
     conn.statement(sql).fetch_array_size(PAGE as u32).lob_locator().build().map_err(|e| OraErr::from(&e))
@@ -491,7 +508,15 @@ fn prepare(conn: &oracle::Connection, sql: &str) -> Result<oracle::Statement, Or
 
 impl Backend for OracleBackend {
     fn ping(&mut self) -> Result<(), OraErr> {
-        self.conn.ping().map_err(|e| OraErr::from(&e))
+        // tempo massimo solo per il ping: le query dell'utente possono durare quanto vogliono (c'è «Annulla»).
+        // Un client anteriore alla 18 non lo supporta (DPI-1050): ping senza tempo massimo, come prima.
+        let timed = self.conn.set_call_timeout(Some(PING_TIMEOUT)).is_ok();
+        let r = self.conn.ping().map_err(|e| OraErr::from(&e));
+        if timed {
+            // tolto sempre, anche dopo un ping fallito (la sessione può restare aperta); `run`/`exec` lo ritolgono
+            let _ = self.conn.set_call_timeout(None);
+        }
+        r
     }
     fn breaker(&self) -> Breaker {
         let conn = self.conn.clone();
@@ -502,6 +527,7 @@ impl Backend for OracleBackend {
     /// `Send`): il cursore sta nel thread della sessione fra una pagina e l'altra, senza prestiti da tenere. Un'istruzione
     /// che non legge righe è conclusa da `COMMIT` (autocommit emulato: la connessione ha l'autocommit del driver spento).
     fn run(&mut self, sql: &str) -> Result<Executed, OraErr> {
+        no_call_timeout(&self.conn);
         let mut stmt = prepare(&self.conn, sql)?;
         if stmt.is_query() {
             let rs = stmt.into_result_set::<oracle::Row>(&[]).map_err(|e| OraErr::from(&e))?;
@@ -547,7 +573,8 @@ impl Backend for OracleBackend {
             let (prec, scale): (Option<i64>, Option<i64>) = (r.get(5).map_err(e)?, r.get(6).map_err(e)?);
             let nullable: String = r.get(7).map_err(e)?;
             let pk: i64 = r.get(8).map_err(e)?;
-            out.push(OraColumn { name, type_name: display_type(&data_type, dlen, clen, used.as_deref(), prec, scale), data_type, nullable: nullable == "Y", is_pk: pk == 1 });
+            let editable = ora_edit::bind_expr(&data_type, 1).is_some();
+            out.push(OraColumn { name, type_name: display_type(&data_type, dlen, clen, used.as_deref(), prec, scale), data_type, nullable: nullable == "Y", is_pk: pk == 1, editable });
         }
         Ok(out)
     }
@@ -563,6 +590,7 @@ impl Backend for OracleBackend {
     }
 
     fn exec(&mut self, sql: &str, params: &[Option<String>]) -> Result<u64, OraErr> {
+        no_call_timeout(&self.conn);
         let mut stmt = self.conn.statement(sql).build().map_err(|e| OraErr::from(&e))?;
         let refs: Vec<&dyn oracle::sql_type::ToSql> = params.iter().map(|p| p as &dyn oracle::sql_type::ToSql).collect();
         stmt.execute(&refs).map_err(|e| OraErr::from(&e))?;
@@ -775,16 +803,14 @@ impl OraSessions {
 
     /// La connessione è caduta (server, rete, tunnel). Se non è stata l'utente → `disconnected`.
     fn ended(self: &Arc<Self>, id: &str, generation: u64, reason: &str) {
-        let (tunnel, message) = {
+        let (tunnel, message, actor) = {
             let mut map = lock(&self.map);
             match map.get_mut(id) {
                 Some(s) if s.generation == generation && s.state == ConnState::Connected => {
                     s.state = ConnState::Disconnected;
                     let message = format!("{LOST}: {}", clean(reason, None));
                     s.message = Some(message.clone());
-                    // l'attore è già uscito da solo: niente attesa
-                    s.actor = None;
-                    (s.tunnel.take(), message)
+                    (s.tunnel.take(), message, s.actor.take())
                 }
                 _ => return,
             }
@@ -794,6 +820,9 @@ impl OraSessions {
             let conns = self.conns.clone();
             tauri::async_runtime::spawn_blocking(move || tunnel::close(&conns, &t));
         }
+        // l'attore per ultimo e fuori dal lucchetto: chiudere la connessione può attendere la rete, e siamo nel thread
+        // della sessione (`shutdown` non attende sé stesso)
+        drop(actor);
     }
 
     fn teardown(&self, old: Option<Session>) {
@@ -905,6 +934,8 @@ mod tests {
             assert!(ora(c, "x").is_connection_lost());
         }
         assert!(OraErr { ora: None, dpi: Some(1080), message: "DPI-1080".into() }.is_connection_lost());
+        assert!(OraErr { ora: None, dpi: Some(1067), message: "DPI-1067: call timeout".into() }.is_connection_lost());
+        assert_eq!(map_error(&ora(1005, "ORA-01005: null password given; logon denied"), None), AUTH);
         assert!(!ora(942, "ORA-00942").is_connection_lost());
         assert_eq!(map_error(&ora(942, "ORA-00942: table or view does not exist"), None), "ORA-00942: table or view does not exist");
     }
@@ -1063,6 +1094,24 @@ mod tests {
         assert_eq!(reason, "rete");
         // ok, errore, errore = 3 ping; un successo azzera il conto
         assert_eq!(probe.pings.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_session_thread_can_drop_its_own_actor_without_waiting() {
+        let probe = Arc::new(Probe::default());
+        let slot: Arc<Mutex<Option<Arc<Actor>>>> = Arc::new(Mutex::new(None));
+        let (done_tx, done_rx) = mpsc::channel();
+        let (p, sl) = (probe.clone(), slot.clone());
+        let lost = OraErr { ora: Some(3113), dpi: None, message: "ORA-03113".into() };
+        let pending = spawn(move || Ok(Fake { probe: p, ping_results: vec![Err(lost)] }), Timing { ping_every: Duration::from_millis(10), ..Timing::default() }, move |_| {
+            // come `OraSessions::ended`: l'ultimo riferimento all'attore cade nel thread della sessione
+            let t = Instant::now();
+            drop(sl.lock().unwrap().take());
+            let _ = done_tx.send(t.elapsed());
+        });
+        *slot.lock().unwrap() = Some(pending.ready_blocking().unwrap());
+        let took = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(took < Duration::from_millis(500), "{took:?}");
     }
 
     #[test]

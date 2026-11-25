@@ -328,7 +328,7 @@ const TRUST_GATED: &[&str] = &[
     "ssh_connect", "ssh_disconnect", "ssh_states", "ssh_home", "ssh_list", "ssh_read", "ssh_write", "ssh_mkdir", "ssh_rename",
     "ssh_delete", "ssh_upload", "ssh_download", "pty_spawn_ssh", "db_connections", "db_connection_save", "db_connection_delete",
     "db_password_set", "db_password_clear", "db_history", "db_history_add",
-    "db_oracle_client_status", "db_oracle_client_pick", "db_oracle_client_use", "db_connect", "db_disconnect", "db_states", "db_pg_tree", "db_pg_columns", "db_pg_preview_edits", "db_pg_apply_edits", "db_ora_tree", "db_ora_columns", "db_ora_preview_edits", "db_ora_apply_edits", "db_mongo_tree", "db_mongo_find", "db_mongo_aggregate", "db_mongo_replace", "db_mongo_insert", "db_mongo_delete", "db_query", "db_query_more", "db_query_close", "db_query_cancel", "db_export",
+    "db_oracle_client_status", "db_oracle_client_pick", "db_connect", "db_disconnect", "db_states", "db_pg_tree", "db_pg_columns", "db_pg_preview_edits", "db_pg_apply_edits", "db_ora_tree", "db_ora_columns", "db_ora_preview_edits", "db_ora_apply_edits", "db_mongo_tree", "db_mongo_find", "db_mongo_aggregate", "db_mongo_replace", "db_mongo_insert", "db_mongo_delete", "db_query", "db_query_more", "db_query_close", "db_query_cancel", "db_export",
 ];
 /// Eccezioni volute: dalla finestra di benvenuto, senza eseguire codice di un progetto; `git_cancel`, `lsp_stop` e `ssh_transfer_cancel`
 /// fermano soltanto processi già avviati dalla finestra stessa.

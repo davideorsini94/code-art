@@ -9,7 +9,7 @@
   import * as ipc from '../../lib/ipc'
   import { db } from '../../lib/stores/db.svelte'
   import { editor, type Tab } from '../../lib/stores/editor.svelte'
-  import { appendPage, emptyGrid, fmtInt, oracleReadOnlyType, selectAllOracle, selectAllSql, type GridData } from '../../lib/db/grid'
+  import { appendPage, emptyGrid, fmtInt, selectAllOracle, selectAllSql, type GridData } from '../../lib/db/grid'
   import { editCount, emptyEdits, toRowEdits, type PendingEdits } from '../../lib/db/edits'
   import type { DbEditableTable, DbHistoryEntry, DbQueryResult, PgColumn } from '../../lib/types'
 
@@ -143,9 +143,11 @@
     if (names.length === 0) return { note: 'Sola lettura: tabella senza chiave primaria' }
     const idx = names.map((n) => grid.columns.indexOf(n))
     if (idx.includes(-1)) return { note: 'Sola lettura: il risultato non contiene la chiave primaria' }
-    // Oracle: LOB, RAW/LONG e TIMESTAMP WITH LOCAL TIME ZONE restano in sola lettura
+    // Oracle: le colonne che il core non sa riscrivere (LOB, RAW, LONG, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE…)
+    // restano in sola lettura; una chiave di quei tipi rende la tabella non modificabile
+    if (isOra && pgCols.some((c) => c.isPk && c.editable === false)) return { note: 'Sola lettura: chiave primaria di un tipo non modificabile' }
     const ro = new Set<number>()
-    if (isOra) for (const c of pgCols) if (oracleReadOnlyType(c.type)) ro.add(grid.columns.indexOf(c.name))
+    if (isOra) for (const c of pgCols) if (c.editable === false) ro.add(grid.columns.indexOf(c.name))
     return { pk: idx, ro }
   })
   const pendingCount = $derived(editCount(edits))

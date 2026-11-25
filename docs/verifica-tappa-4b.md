@@ -1,11 +1,11 @@
 # Verifica della tappa 4b — Oracle
 
-> **Stato: rimandato (decisione dell'utente, 2026-11-23).** L'app installata (`Code Art.app`, firma ad-hoc con hardened
-> runtime) non può caricare Instant Client, firmato da Oracle con un altro Team ID: macOS lo rifiuta ("different Team
-> IDs"). Funziona solo da sviluppo (`pnpm tauri dev`, `cargo test`), che non ha l'hardened runtime. Strade possibili, da
-> decidere: il permesso `com.apple.security.cs.disable-library-validation` con caricamento solo da una cartella scelta col
-> selettore nativo, oppure Oracle in un processo separato senza hardened runtime. L'app installata mostra un messaggio
-> che lo dice chiaramente invece del rimedio sbagliato (`xattr`).
+> **Stato: ripreso il 2026-11-25.** L'app installata (firma ad-hoc con hardened runtime) rifiutava Instant Client,
+> firmato da Oracle con un altro Team ID ("different Team IDs"). Scelta dell'utente: il permesso
+> `com.apple.security.cs.disable-library-validation` (`src-tauri/Entitlements.plist`) e Instant Client caricato solo da
+> una cartella confermata nel selettore nativo (anche le cartelle trovate aprono il selettore su quella cartella). Da
+> verificare a vista nell'app installata: `codesign -d --entitlements - "/Applications/Code Art.app"` deve mostrare il
+> permesso.
 
 Test automatici: `pnpm typecheck`, `pnpm test`, `cargo test`, `cargo clippy --all-targets`. **Nessuna prova contro un
 server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui sotto sono la prima volta.
@@ -22,7 +22,7 @@ server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui
 ## Da verificare a vista
 
 - [ ] **Guida**: con una connessione Oracle e Instant Client non configurato compare la guida; "Scegli la cartella…" o
-  una cartella trovata la carica; con la cartella sbagliata il messaggio dice cosa fare; se macOS blocca la libreria la
+  una cartella trovata apre il selettore e, confermata con «Apri», la carica **nell'app installata** (non solo da sviluppo); con la cartella sbagliata il messaggio dice cosa fare; se macOS blocca la libreria la
   guida mostra il comando `xattr -dr com.apple.quarantine "<cartella>"` da copiare.
 - [ ] **Connessione**: tipo Oracle, porta 1521, servizio; password sbagliata → richiesta di password ("auth"); servizio
   sbagliato → "Servizio sconosciuto sul server"; tunnel SSH funzionante.
@@ -31,9 +31,12 @@ server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui
   TIMESTAMP (anche WITH TIME ZONE), CLOB e BLOB resi come testo; Annulla durante `BEGIN DBMS_SESSION.SLEEP(30); END;` (blocco
   PL/SQL terminato da una riga con `/`); più istruzioni separate da `;`.
 - [ ] **Modifiche in griglia**: tabella con chiave primaria, modifica di NUMBER, DATE e VARCHAR2, riga nuova e riga
-  eliminata; anteprima; Applica tutto o niente; colonne LOB, RAW, LONG e TIMESTAMP WITH LOCAL TIME ZONE in sola lettura.
+  eliminata; anteprima; Applica tutto o niente; colonne LOB, RAW, LONG, INTERVAL e TIMESTAMP WITH LOCAL TIME ZONE in sola
+  lettura; tabella con chiave RAW in sola lettura; `SELECT * FROM tabella` senza proprietario modificabile.
+- [ ] **Connessione senza password salvata** → richiesta di password.
 - [ ] **Esporta** CSV/JSON di un risultato Oracle.
-- [ ] **Connessione caduta**: ferma il server → "disconnesso" entro un minuto circa (controllo ogni 30 s), "Riconnetti".
+- [ ] **Connessione caduta**: ferma il server → "disconnesso" entro un minuto circa (controllo ogni 30 s, al più 10 s
+  per controllo anche su una connessione mezza aperta), "Riconnetti".
 
 ## Limiti noti
 
@@ -47,18 +50,22 @@ server Oracle né con Instant Client installato**: qui non ci sono. Le prove qui
   timeout del sistema.
 - TIMESTAMP WITH LOCAL TIME ZONE in sola lettura in griglia finché non è verificato con un server vero.
 
-## Punti aperti dalla revisione finale (da sistemare quando si riprende Oracle)
+## Punti della revisione finale
 
-- Una connessione Oracle caduta tiene bloccata per circa 3 s la mappa delle sessioni Oracle (`ora.rs`, `ended()` lascia
-  cadere l'attore sotto il lucchetto).
-- Errore di battitura in `RESOLVE_SQL` (`SYS_CONTEXT('USERDENV', …)` invece di `'USERENV'`): una `SELECT * FROM t` senza
-  proprietario non risulta mai modificabile (le schede aperte dall'albero non ne sono toccate).
-- TIMESTAMP WITH LOCAL TIME ZONE: il core lo permette ancora (`ora_edit.rs`), lo blocca solo l'interfaccia; serve un flag
-  `editable` per colonna condiviso fra core e interfaccia (anche per INTERVAL, ROWID, BFILE, XMLTYPE, JSON; chiavi RAW con
-  `HEXTORAW`).
-- Connessione senza password salvata: ORA-01005 non è tradotto in `auth`, quindi la richiesta di password non compare.
-- Le cartelle `instantclient*` trovate in `~/Downloads` o `~` si possono caricare con una sola chiamata dalla pagina:
-  prima di allentare la protezione di macOS, richiedere il selettore nativo (o controllare proprietario e quarantena).
-- Il ping di controllo non ha un tempo massimo: su una connessione TCP mezza aperta la sessione resta appesa.
-- Il controllo delle istruzioni distruttive non vede `FORALL … DELETE` senza `WHERE`.
+Sistemati il 2026-11-25:
+
+- Una connessione caduta non blocca più per 3 s la mappa delle sessioni: l'attore si lascia fuori dal lucchetto e
+  `shutdown` dal thread della sessione stesso non attende.
+- `RESOLVE_SQL` usa `SYS_CONTEXT('USERENV', …)`: una `SELECT * FROM t` senza proprietario è modificabile.
+- Flag `editable` per colonna deciso dal core (`ora_edit::bind_expr`) e usato dall'interfaccia: TIMESTAMP WITH LOCAL TIME
+  ZONE, INTERVAL, ROWID, BFILE, XMLTYPE, JSON in sola lettura in entrambi; una chiave primaria di questi tipi (anche RAW)
+  rende la tabella in sola lettura.
+- ORA-01005 (nessuna password) è tradotto in `auth`: compare la richiesta di password.
+- Instant Client si carica solo da una cartella confermata nel selettore nativo (`db_oracle_client_use` tolto).
+- Il ping di controllo ha un tempo massimo di 10 s (`set_call_timeout`); DPI-1067 conta come connessione persa.
+- Il controllo delle istruzioni distruttive vede `FORALL … DELETE|UPDATE` senza `WHERE`.
+
+Ancora aperto:
+
 - Modificare un TIMESTAMP WITH TIME ZONE riscrive un fuso con nome come scostamento fisso (stesso istante).
+- Chiavi RAW modificabili con `HEXTORAW` (oggi la tabella è in sola lettura).

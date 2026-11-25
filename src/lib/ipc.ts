@@ -198,10 +198,10 @@ export const dbHistory = (id: string) => invoke<DbHistoryEntry[]>('db_history', 
 /** Testo ≤ 100 KB; uguale alla voce più recente = non ripetuto. */
 export const dbHistoryAdd = (id: string, text: string) => invoke<void>('db_history_add', { id, text })
 
-/** Oracle Instant Client: stato (prova a caricare la cartella impostata), selettore nativo (`null` = annullato), uso di una cartella rilevata. */
+/** Oracle Instant Client: stato (prova a caricare la cartella impostata), selettore nativo (`null` = annullato), unico modo di scegliere la cartella. */
 export const dbOracleClientStatus = () => invoke<OracleClientStatus>('db_oracle_client_status')
-export const dbOracleClientPick = () => invoke<OracleClientStatus | null>('db_oracle_client_pick')
-export const dbOracleClientUse = (dir: string) => invoke<OracleClientStatus>('db_oracle_client_use', { dir })
+/** Selettore nativo; `start` (una delle cartelle rilevate) è solo il punto di partenza: la scelta la conferma l'utente. */
+export const dbOracleClientPick = (start?: string) => invoke<OracleClientStatus | null>('db_oracle_client_pick', { start: start ?? null })
 
 // ---- Database: sessioni (evento `db:state` a tutte le finestre; `Err('auth')` = serve la password) ----
 export const dbConnect = (id: string) => invoke<void>('db_connect', { id })

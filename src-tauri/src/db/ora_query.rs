@@ -353,7 +353,16 @@ fn analyze(sql: &str, st: &Stmt) -> Option<&'static str> {
         }
         Block::Anonymous => {}
     }
+    // dentro `FORALL … ;` l'UPDATE/DELETE segue i limiti (`1..n`, `INDICES OF c`, `SAVE EXCEPTIONS`): è l'istruzione
+    let mut forall = false;
     for (i, tk) in t.iter().enumerate() {
+        if st.block == Block::Anonymous {
+            if is_word(tk, "FORALL") {
+                forall = true;
+            } else if semi(tk) {
+                forall = false;
+            }
+        }
         let reason = if is_word(tk, "UPDATE") {
             "UPDATE senza WHERE"
         } else if is_word(tk, "DELETE") {
@@ -364,6 +373,7 @@ fn analyze(sql: &str, st: &Stmt) -> Option<&'static str> {
         // un'istruzione, non `FOR UPDATE`, `AFTER DELETE`, `THEN UPDATE` di un MERGE…: all'inizio, dopo una parentesi o
         // (nei blocchi) dopo `;`, `BEGIN`, `THEN`, `ELSE`, `LOOP`
         let starts = i == 0
+            || forall
             || matches!(t[i - 1].k, K::Open | K::Close)
             || (st.block == Block::Anonymous && (semi(&t[i - 1]) || ["BEGIN", "THEN", "ELSE", "LOOP"].iter().any(|w| is_word(&t[i - 1], w))));
         if !starts {
@@ -840,7 +850,7 @@ pub const COLUMNS_SQL: &str = "SELECT c.column_name, c.data_type, c.data_length,
      WHERE k.constraint_type = 'P' AND k.owner = c.owner AND k.table_name = c.table_name AND cc.column_name = c.column_name) THEN 1 ELSE 0 END \
      FROM all_tab_columns c WHERE c.owner = :1 AND c.table_name = :2 ORDER BY c.column_id";
 
-pub const RESOLVE_SQL: &str = "SELECT owner, table_name FROM all_tables WHERE owner = NVL(:1, SYS_CONTEXT('USERDENV', 'CURRENT_SCHEMA')) AND table_name = :2";
+pub const RESOLVE_SQL: &str = "SELECT owner, table_name FROM all_tables WHERE owner = NVL(:1, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')) AND table_name = :2";
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -854,6 +864,9 @@ pub struct OraColumn {
     pub data_type: String,
     pub nullable: bool,
     pub is_pk: bool,
+    /// Si modifica in griglia (`ora_edit::bind_expr` ha una conversione per il tipo): lo stesso criterio decide
+    /// l'interfaccia (celle in sola lettura) e il core (rifiuto delle modifiche).
+    pub editable: bool,
 }
 
 /// Il tipo come lo scrive il catalogo, con lunghezza, precisione e scala.
@@ -1045,6 +1058,11 @@ mod tests {
         assert!(reasons("begin delete from t where a = 1; update u set b = 2 where c = 3; end;").is_empty());
         assert_eq!(reasons("begin update u set b = 2; end;"), ["UPDATE senza WHERE"]);
         assert!(reasons("create or replace procedure p is begin delete from t; end;").is_empty());
+        // FORALL: l'istruzione segue i limiti
+        assert_eq!(reasons("begin forall i in 1..n delete from t; end;"), ["DELETE senza WHERE"]);
+        assert_eq!(reasons("declare type a is table of number; v a; begin forall i in indices of v save exceptions update t set x = v(i); end;"), ["UPDATE senza WHERE"]);
+        assert!(reasons("begin forall i in 1..n delete from t where id = v(i); end;").is_empty());
+        assert!(reasons("begin forall i in 1..n delete from t where id = v(i); select 1 into x from dual for update; end;").is_empty());
         assert!(reasons("create trigger tr after delete on t begin null; end;").is_empty());
         let f = destructive("select 1 from dual; delete from t");
         assert_eq!(f[0].text, "delete from t");
@@ -1193,6 +1211,7 @@ mod tests {
             assert!(!s.contains(':'), "nessun parametro nel testo dell'albero");
         }
         assert!(COLUMNS_SQL.contains(":1") && COLUMNS_SQL.contains(":2") && RESOLVE_SQL.contains(":2"));
+        assert!(RESOLVE_SQL.contains("'USERENV'"), "{RESOLVE_SQL}");
     }
 
     #[test]
