@@ -4,7 +4,7 @@
   import type { Conversation } from '../lib/types'
   import { relativeTime } from '../lib/conv/time'
   import { tooltip } from '../lib/tooltip'
-  import { STATUS_TIP } from '../lib/conv/labels'
+  import { STATUS_TIP, convTitle } from '../lib/conv/labels'
 
   type Props = {
     conv: Conversation
@@ -55,7 +55,7 @@
   class:on={active}
   role="button"
   tabindex="0"
-  use:tooltip={conv.title}
+  use:tooltip={convTitle(conv.title)}
   aria-pressed={active}
   data-status={conv.status}
   onclick={() => onselect?.()}
@@ -85,7 +85,7 @@
         }}
       />
     {:else}
-      <span class="title" role="presentation" data-no-tooltip="il tooltip della scheda (genitore) mostra già il titolo completo" ondblclick={(e) => { e.stopPropagation(); onstartrename?.() }}>{conv.title}</span>
+      <span class="title" role="presentation" data-no-tooltip="il tooltip della scheda (genitore) mostra già il titolo completo" ondblclick={(e) => { e.stopPropagation(); onstartrename?.() }}>{convTitle(conv.title)}</span>
     {/if}
     {#if conv.titleLocked}
       <button class="lock" use:tooltip={'Titolo bloccato: clic per sbloccare'} aria-label="Sblocca il titolo" onclick={(e) => { e.stopPropagation(); onunlock?.() }}>🔒</button>

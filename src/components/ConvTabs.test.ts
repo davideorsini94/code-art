@@ -46,4 +46,13 @@ describe('ConvTabs', () => {
     await fireEvent(screen.getByRole('tab'), new MouseEvent('auxclick', { button: 1, bubbles: true }))
     expect(conversations.tabs).toEqual([])
   })
+
+  it('una conversazione ancora senza titolo mostra «Nuova conversazione»', () => {
+    conversations.all = [mk('a', ''), mk('b', '   ')]
+    conversations.tabs = ['a', 'b']
+    conversations.activeId = 'a'
+    render(ConvTabs)
+    expect(screen.getAllByRole('tab').map((t) => t.textContent?.trim())).toEqual(['Nuova conversazione', 'Nuova conversazione'])
+    expect(screen.getAllByLabelText('Chiudi Nuova conversazione')).toHaveLength(2)
+  })
 })

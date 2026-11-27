@@ -111,18 +111,44 @@ pub fn parse_title_reply(reply: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(&reply[a..=b]).ok()?;
     let title = v.get("title")?.as_str()?.trim();
     let summary = v.get("summary")?.as_str()?;
-    if title.is_empty()
-        || title.chars().count() > TITLE_MAX_CHARS
-        || title.split_whitespace().count() > TITLE_MAX_WORDS
-        || title.chars().any(bad_char)
-    {
+    // caratteri pericolosi = risposta scartata; troppo lunga = accorciata (i modelli sforano spesso il limite, e
+    // scartarla lascerebbe la conversazione senza titolo riprovando ogni 5 minuti)
+    if title.chars().any(bad_char) || summary.chars().any(|c| bad_char(c) && !c.is_whitespace()) {
+        return None;
+    }
+    let title = shorten_title(title);
+    if title.is_empty() {
         return None;
     }
     let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
-    if summary.chars().count() > SUMMARY_MAX_CHARS || summary.chars().any(bad_char) {
-        return None;
+    Some((title, shorten_summary(&summary)))
+}
+
+/// Al più `TITLE_MAX_WORDS` parole intere e `TITLE_MAX_CHARS` caratteri (una sola parola più lunga è tagliata),
+/// senza la punteggiatura rimasta in fondo.
+fn shorten_title(t: &str) -> String {
+    let mut out = String::new();
+    for w in t.split_whitespace().take(TITLE_MAX_WORDS) {
+        let next = if out.is_empty() { w.to_string() } else { format!("{out} {w}") };
+        if next.chars().count() > TITLE_MAX_CHARS {
+            if out.is_empty() {
+                out = truncate_chars(w, TITLE_MAX_CHARS);
+            }
+            break;
+        }
+        out = next;
     }
-    Some((title.to_string(), summary))
+    out.trim_end_matches(['.', ',', ';', ':', '!', '?', '-', '–', '—']).trim_end().to_string()
+}
+
+/// Al più `SUMMARY_MAX_CHARS` caratteri: oltre, tagliato a una parola intera con `…`.
+fn shorten_summary(s: &str) -> String {
+    if s.chars().count() <= SUMMARY_MAX_CHARS {
+        return s.to_string();
+    }
+    let head = truncate_chars(s, SUMMARY_MAX_CHARS - 1);
+    let cut = head.rfind(' ').filter(|&i| i > 0).map_or(head.as_str(), |i| &head[..i]);
+    format!("{}…", cut.trim_end_matches(['.', ',', ';', ':']))
 }
 
 /// Se il titolo è uguale aggiorna solo il riassunto; se diverso sposta l'attuale in `prev_title` e imposta
@@ -527,6 +553,7 @@ mod tests {
             model: None,
             permission_mode: "default".into(),
             context_used_pct: None,
+            effort: None,
             maybe_open_elsewhere: false,
         }
     }
@@ -552,9 +579,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_title_reply_rejects_more_than_six_words() {
-        assert!(parse_title_reply(r#"{"title":"uno due tre quattro cinque sei sette","summary":"s"}"#).is_none());
-        assert!(parse_title_reply(r#"{"title":"uno due tre quattro cinque sei","summary":"s"}"#).is_some());
+    fn parse_title_reply_shortens_titles_over_six_words() {
+        // i modelli recenti sforano spesso il limite: si accorcia invece di scartare (e riprovare all'infinito)
+        let r = parse_title_reply(r#"{"title": "Arduino R4 Ethernet con API REST e RabbitMQ", "summary": "Spiegato il NAT."}"#).unwrap();
+        assert_eq!(r.0, "Arduino R4 Ethernet con API REST");
+        assert_eq!(parse_title_reply(r#"{"title":"uno due tre quattro cinque sei","summary":"s"}"#).unwrap().0, "uno due tre quattro cinque sei");
+        // la punteggiatura finale lasciata dal taglio va via
+        assert_eq!(parse_title_reply(r#"{"title":"uno due tre quattro cinque sei: sette otto","summary":"s"}"#).unwrap().0, "uno due tre quattro cinque sei");
+        assert_eq!(parse_title_reply(r#"{"title":"Bug del login.","summary":"s"}"#).unwrap().0, "Bug del login");
+    }
+
+    #[test]
+    fn parse_title_reply_shortens_long_titles_and_summaries() {
+        // una parola sola oltre 60 caratteri: tagliata a 60
+        let one = format!(r#"{{"title":"{}","summary":"s"}}"#, "a".repeat(61));
+        assert_eq!(parse_title_reply(&one).unwrap().0.chars().count(), 60);
+        // più parole oltre 60 caratteri: tagliate a una parola intera
+        let words = format!(r#"{{"title":"{} {} {}","summary":"s"}}"#, "a".repeat(30), "b".repeat(30), "c".repeat(5));
+        assert_eq!(parse_title_reply(&words).unwrap().0, "a".repeat(30));
+        let summary = format!(r#"{{"title":"ok","summary":"{}"}}"#, "parola ".repeat(40));
+        let s = parse_title_reply(&summary).unwrap().1;
+        assert!(s.chars().count() <= 160 && s.ends_with('…'), "{s}");
     }
 
     #[test]
@@ -565,8 +610,6 @@ mod tests {
 
     #[test]
     fn parse_title_reply_rejects_invalid_values() {
-        let long_title = format!(r#"{{"title":"{}","summary":"s"}}"#, "a".repeat(61));
-        let long_summary = format!(r#"{{"title":"ok","summary":"{}"}}"#, "a".repeat(161));
         for bad in [
             "non json",
             "",
@@ -577,8 +620,6 @@ mod tests {
             r#"{"title":"ok\u0007","summary":"s"}"#,
             r#"{"title":"ok\u202e","summary":"s"}"#,
             r#"{"title":"ok","summary":"x\u0000y"}"#,
-            long_title.as_str(),
-            long_summary.as_str(),
         ] {
             assert!(parse_title_reply(bad).is_none(), "{bad}");
         }
@@ -1055,3 +1096,4 @@ mod tests {
         assert!(gone, "il discendente è stato ucciso");
     }
 }
+

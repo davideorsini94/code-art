@@ -3,7 +3,7 @@
   import { tick } from 'svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
-  import { STATUS_TIP, UNTRUSTED_HINT } from '../lib/conv/labels'
+  import { STATUS_TIP, UNTRUSTED_HINT, convTitle } from '../lib/conv/labels'
   import { tooltip } from '../lib/tooltip'
 
   const untrusted = $derived(projectStore.untrusted.length > 0)
@@ -30,7 +30,7 @@
       role="tab"
       aria-selected={on}
       tabindex="0"
-      use:tooltip={c.title}
+      use:tooltip={convTitle(c.title)}
       onclick={() => void conversations.select(c.sessionId)}
       onkeydown={(e) => e.key === 'Enter' && void conversations.select(c.sessionId)}
       onauxclick={(e) => {
@@ -41,10 +41,10 @@
       }}
     >
       <span class="dot {c.status}" class:pulse={c.status === 'working'} role="img" aria-label={STATUS_TIP[c.status]} use:tooltip={STATUS_TIP[c.status]}></span>
-      <span class="name">{c.title}</span>
+      <span class="name">{convTitle(c.title)}</span>
       <button
         class="x"
-        aria-label="Chiudi {c.title}"
+        aria-label="Chiudi {convTitle(c.title)}"
         use:tooltip={'Chiudi la scheda (la conversazione resta nell\'elenco)'}
         onclick={(e) => {
           e.stopPropagation()

@@ -19,6 +19,8 @@ export type Conversation = {
   model: string | null
   permissionMode: string
   contextUsedPct: number | null
+  /** Livello di thinking scelto (`--effort`); assente/null = quello predefinito di claude. */
+  effort?: string | null
   maybeOpenElsewhere: boolean
 }
 export type FsError = { code: 'conflict' | 'forbidden' | 'too_large' | 'not_text' | 'io'; message: string }

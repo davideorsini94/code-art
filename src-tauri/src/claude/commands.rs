@@ -57,6 +57,11 @@ pub async fn conv_set_model(app: AppHandle, window: WebviewWindow, session_id: S
 }
 
 #[tauri::command]
+pub async fn conv_set_effort(app: AppHandle, window: WebviewWindow, session_id: String, effort: String) -> Result<()> {
+    with_engine(app, window, move |e, pid| e.set_effort(pid, &session_id, &effort)).await
+}
+
+#[tauri::command]
 pub async fn conv_set_permission_mode(app: AppHandle, window: WebviewWindow, session_id: String, mode: String) -> Result<()> {
     with_engine(app, window, move |e, pid| e.set_permission_mode(pid, &session_id, &mode)).await
 }

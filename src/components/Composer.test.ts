@@ -7,6 +7,7 @@ vi.mock('../lib/ipc', () => ({
   convSend: vi.fn(async () => {}),
   convInterrupt: vi.fn(async () => {}),
   convSetModel: vi.fn(async () => {}),
+  convSetEffort: vi.fn(async () => {}),
   convSetPermissionMode: vi.fn(async () => {}),
   convSaveImage: vi.fn(async () => '/tmp/CodeArt/images/x.png'),
   convHistory: vi.fn(async () => []),
@@ -91,6 +92,23 @@ describe('Composer', () => {
     expect(ipc.convSetPermissionMode).toHaveBeenCalledWith('sm', 'plan')
     await fireEvent.change(screen.getByLabelText('Modello'), { target: { value: 'opus' } })
     expect(ipc.convSetModel).toHaveBeenCalledWith('sm', 'opus')
+  })
+
+  it('thinking level: default shown until chosen, then saved; a failure restores the previous value', async () => {
+    render(Composer, { conv: { ...base, sessionId: 'st' } })
+    const sel = screen.getByLabelText('Livello di thinking') as HTMLSelectElement
+    expect(sel.selectedOptions[0].textContent).toBe('Thinking: predefinito')
+    await fireEvent.change(sel, { target: { value: 'max' } })
+    expect(ipc.convSetEffort).toHaveBeenCalledWith('st', 'max')
+    cleanup()
+    vi.mocked(ipc.convSetEffort).mockRejectedValueOnce('livello di thinking non valido: x')
+    render(Composer, { conv: { ...base, sessionId: 'st2', effort: 'high' } })
+    const sel2 = screen.getByLabelText('Livello di thinking') as HTMLSelectElement
+    expect(sel2.value).toBe('high')
+    expect([...sel2.options].map((o) => o.textContent)).not.toContain('Thinking: predefinito')
+    await fireEvent.change(sel2, { target: { value: 'low' } })
+    await screen.findByText(/livello di thinking non valido/)
+    expect(sel2.value).toBe('high')
   })
 
   it('offers built-in commands, then the ones from init; selecting inserts the command', async () => {

@@ -82,6 +82,13 @@ pub fn valid_model(m: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '[' | ']'))
 }
 
+/// Livelli di thinking accettati da `claude --effort`.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+pub fn valid_effort(e: &str) -> bool {
+    EFFORTS.contains(&e)
+}
+
 pub fn valid_permission_mode(m: &str) -> bool {
     PERMISSION_MODES.contains(&m)
 }
@@ -453,6 +460,18 @@ impl Engine {
         self.control(session_id, json!({"subtype": "set_model", "model": model}))
     }
 
+    /// Livello di thinking: salvato (vale ai prossimi avvii con `--effort`) e applicato subito al processo vivo
+    /// (`apply_flag_settings`, vale dal turno successivo).
+    pub fn set_effort(&self, project_id: &str, session_id: &str, effort: &str) -> Result<()> {
+        self.owned_conv(project_id, session_id)?;
+        if !valid_effort(effort) {
+            return Err(format!("livello di thinking non valido: {effort}"));
+        }
+        self.0.store.set_conversation_effort(session_id, effort)?;
+        self.emit_upsert(session_id);
+        self.control(session_id, json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": effort}}))
+    }
+
     pub fn set_permission_mode(&self, project_id: &str, session_id: &str, mode: &str) -> Result<()> {
         self.owned_conv(project_id, session_id)?;
         if !valid_permission_mode(mode) {
@@ -738,6 +757,9 @@ impl Engine {
         args.push(mode);
         if let Some(m) = row.model.as_deref().filter(|m| valid_model(m)) {
             args.extend(["--model".into(), m.to_string()]);
+        }
+        if let Some(e) = row.effort.as_deref().filter(|e| valid_effort(e)) {
+            args.extend(["--effort".into(), e.to_string()]);
         }
         // una sessione mai usata non ha ancora il file: `--resume` fallirebbe
         let flag = if self.session_file_exists(&row.cwd, session_id) { "--resume" } else { "--session-id" };
@@ -1585,6 +1607,27 @@ mod tests {
                 && l.iter().any(|l| l["request"] == json!({"subtype": "set_permission_mode", "mode": "acceptEdits"}))
         });
         assert!(env.engine.set_model("p2", &sid, "opus").is_err());
+    }
+
+    #[test]
+    fn effort_is_validated_persisted_sent_live_and_used_at_the_next_start() {
+        let env = setup(&[]);
+        let sid = env.engine.start("p1", StartOpts::default()).unwrap();
+        wait_until("argomenti", || read(&env.out.join(format!("{sid}.cwd"))).ends_with('\n'));
+        assert!(!read(&env.out.join(format!("{sid}.args"))).contains("--effort"));
+        for bad in ["", "medio", "--max", "high\n"] {
+            assert!(env.engine.set_effort("p1", &sid, bad).is_err(), "{bad:?}");
+        }
+        env.engine.set_effort("p1", &sid, "xhigh").unwrap();
+        assert_eq!(env.store.get_conversation(&sid).unwrap().unwrap().effort.as_deref(), Some("xhigh"));
+        wait_until("controllo su stdin", || {
+            stdin_lines(&env, &sid).iter().any(|l| l["request"] == json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "xhigh"}}))
+        });
+        assert!(env.engine.set_effort("p2", &sid, "high").is_err());
+        env.engine.stop_owned("p1", &sid).unwrap();
+        wait_until("processo fermo", || env.engine.running("p1").is_empty());
+        env.engine.resume("p1", &sid).unwrap();
+        wait_until("argomenti con --effort", || read(&env.out.join(format!("{sid}.args"))).contains("--effort\nxhigh\n"));
     }
 
     fn spawns(env: &Env, sid: &str) -> usize {

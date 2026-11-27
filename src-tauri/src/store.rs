@@ -103,7 +103,10 @@ CREATE TABLE db_history (
 CREATE INDEX idx_db_history_connection ON db_history(connection_id, id);
 ";
 
-const MIGRATIONS: &[&str] = &[SCHEMA, SSH_SERVERS, DB_CONNECTIONS];
+/// Livello di thinking per conversazione (`None` = predefinito di claude).
+const CONV_EFFORT: &str = "ALTER TABLE conversations ADD COLUMN effort TEXT;";
+
+const MIGRATIONS: &[&str] = &[SCHEMA, SSH_SERVERS, DB_CONNECTIONS, CONV_EFFORT];
 
 /// Applica le migrazioni mancanti, ciascuna in una transazione insieme al nuovo `user_version`. Un database di una
 /// versione più recente (app tornata indietro) resta com'è.
@@ -126,7 +129,7 @@ fn now_ms() -> i64 {
 }
 
 const CONV_SELECT: &str = "SELECT session_id, project_id, cwd, title, prev_title, title_changed_at, title_locked, summary,
-  status, owned, archived, last_activity, turn_count, model, permission_mode, context_used_pct FROM conversations";
+  status, owned, archived, last_activity, turn_count, model, permission_mode, context_used_pct, effort FROM conversations";
 
 fn row_to_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
@@ -146,6 +149,7 @@ fn row_to_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         model: r.get(13)?,
         permission_mode: r.get(14)?,
         context_used_pct: r.get(15)?,
+        effort: r.get(16)?,
         maybe_open_elsewhere: false,
     })
 }
@@ -368,6 +372,13 @@ impl Store {
     pub fn set_conversation_model(&self, session_id: &str, model: &str) -> Result<()> {
         self.conn()
             .execute("UPDATE conversations SET model = ?2 WHERE session_id = ?1", params![session_id, model])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    pub fn set_conversation_effort(&self, session_id: &str, effort: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE conversations SET effort = ?2 WHERE session_id = ?1", params![session_id, effort])
             .map_err(err)?;
         Ok(())
     }

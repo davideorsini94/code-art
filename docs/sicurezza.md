@@ -218,6 +218,7 @@ Effetti: F = file, P = processi, R = rete (nessun comando fa richieste di rete p
 | `conv_answer` | `sessionId`, `requestId`, `choice` | del progetto; richiesta ancora aperta; scelta ammessa per il tipo (domande: testo per una domanda, oppure oggetto JSON con una risposta per ogni domanda e nessuna domanda sconosciuta) | finestra | P (stdin di `claude`) |
 | `conv_interrupt` | `sessionId` | del progetto | finestra | P |
 | `conv_set_model` | `sessionId`, `model` | del progetto; `valid_model` | finestra | P |
+| `conv_set_effort` | `sessionId`, `effort` | del progetto; `valid_effort` (`low`, `medium`, `high`, `xhigh`, `max`): salvato e mandato al processo vivo come `apply_flag_settings` `{effortLevel}`; ai prossimi avvii `--effort` | finestra | P |
 | `conv_set_permission_mode` | `sessionId`, `mode` | del progetto; whitelist | finestra | P |
 | `conv_mark_viewed` | `sessionId` | del progetto | finestra | — |
 | `conv_archive` | `sessionId`, `archived` | del progetto | finestra | — |

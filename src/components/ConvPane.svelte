@@ -13,7 +13,7 @@
   import { variableRange } from '../lib/conv/window'
   import { shouldStick } from '../lib/conv/stick'
   import { tooltip } from '../lib/tooltip'
-  import { STATUS_TIP } from '../lib/conv/labels'
+  import { STATUS_TIP, convTitle } from '../lib/conv/labels'
 
   /** Altezza stimata di una riga non ancora misurata. */
   const ESTIMATE = 72
@@ -136,7 +136,7 @@
     <header>
       <div class="chatH">
         <span class="dot {dotClass}" aria-hidden="true" use:tooltip={STATUS_TIP[conv.status]}></span>
-        <span class="title" use:tooltip={conv.title}>{conv.title}</span>
+        <span class="title" use:tooltip={convTitle(conv.title)}>{convTitle(conv.title)}</span>
       </div>
       {#if conv.prevTitle}
         <div class="was">

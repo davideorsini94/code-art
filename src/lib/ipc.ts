@@ -68,6 +68,7 @@ export const convAnswer = (sessionId: string, requestId: string, choice: string)
   invoke<void>('conv_answer', { sessionId, requestId, choice })
 export const convInterrupt = (sessionId: string) => invoke<void>('conv_interrupt', { sessionId })
 export const convSetModel = (sessionId: string, model: string) => invoke<void>('conv_set_model', { sessionId, model })
+export const convSetEffort = (sessionId: string, effort: string) => invoke<void>('conv_set_effort', { sessionId, effort })
 export const convSetPermissionMode = (sessionId: string, mode: string) =>
   invoke<void>('conv_set_permission_mode', { sessionId, mode })
 export const convMarkViewed = (sessionId: string) => invoke<void>('conv_mark_viewed', { sessionId })

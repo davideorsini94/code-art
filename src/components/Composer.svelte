@@ -9,14 +9,14 @@
   import { chat } from '../lib/stores/chat.svelte'
   import { conversations } from '../lib/stores/conversations.svelte'
   import { projectStore } from '../lib/stores/project.svelte'
-  import { convInterrupt, convSaveImage, convSend, convSetModel, convSetPermissionMode } from '../lib/ipc'
+  import { convInterrupt, convSaveImage, convSend, convSetEffort, convSetModel, convSetPermissionMode } from '../lib/ipc'
   import { errorText } from '../lib/errors'
   import { BUILTIN_COMMANDS, completeSlash, slashMatches } from '../lib/conv/slash'
   import { displayedModel, modelLabel, modelOptions } from '../lib/conv/model'
   import { tooltip } from '../lib/tooltip'
   import { clearDraft, loadDraft, saveDraft } from '../lib/conv/draft'
   import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, PATH_DRAG_TYPE, imageExt, mentionFor } from '../lib/conv/paths'
-  import { PERMISSION_MODES as MODES, UNTRUSTED_HINT } from '../lib/conv/labels'
+  import { EFFORTS, PERMISSION_MODES as MODES, UNTRUSTED_HINT } from '../lib/conv/labels'
   import type { Conversation } from '../lib/types'
 
   let { conv }: { conv: Conversation } = $props()
@@ -31,6 +31,8 @@
   const currentModel = $derived(displayedModel({ convModel: conv.model, initModel: init?.model ?? null, lastSetAt: modelSetAt[sessionId] ?? null, initAt: init?.at ?? null }))
   const models = $derived(modelOptions(currentModel))
   const modes = $derived(MODES.some(([m]) => m === conv.permissionMode) ? MODES : [...MODES, [conv.permissionMode, conv.permissionMode] as [string, string]])
+  const effort = $derived(conv.effort ?? '')
+  const effortLabel = $derived(EFFORTS.find(([e]) => e === effort)?.[1] ?? 'predefinito')
   const pct = $derived(conv.contextUsedPct == null ? null : Math.max(0, Math.min(100, Math.round(conv.contextUsedPct))))
 
   // un compositore per conversazione (ConvPane lo monta dentro `{#key}`): la bozza si legge una volta
@@ -196,6 +198,7 @@
       await convSetModel(sessionId, el.value)
       modelSetAt = { ...modelSetAt, [sessionId]: Date.now() }
     })
+  const setEffort = (el: HTMLSelectElement) => guarded(el, effort, () => convSetEffort(sessionId, el.value))
   const setMode = (el: HTMLSelectElement) => guarded(el, conv.permissionMode, () => convSetPermissionMode(sessionId, el.value))
 
   function onkeydown(ev: KeyboardEvent) {
@@ -287,6 +290,13 @@
       <select value={currentModel} use:tooltip={`Modello: ${currentModel ? modelLabel(currentModel) : 'nessuno'}`} onchange={(e) => setModel(e.currentTarget)}>
         {#if !currentModel}<option value="" disabled>Modello</option>{/if}
         {#each models as m (m)}<option value={m}>{modelLabel(m)}</option>{/each}
+      </select>
+    </label>
+    <label class="chip">
+      <span class="sr">Livello di thinking</span>
+      <select value={effort} use:tooltip={`Livello di thinking: ${effortLabel} (vale dal prossimo messaggio)`} onchange={(e) => setEffort(e.currentTarget)}>
+        {#if !effort}<option value="" disabled>Thinking: predefinito</option>{/if}
+        {#each EFFORTS as [e, label] (e)}<option value={e}>Thinking: {label}</option>{/each}
       </select>
     </label>
     <span class="grow"></span>

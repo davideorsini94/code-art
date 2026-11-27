@@ -59,6 +59,8 @@ pub struct Conversation {
     pub model: Option<String>,
     pub permission_mode: String,
     pub context_used_pct: Option<f64>,
+    /// Livello di thinking scelto (`--effort`: low, medium, high, xhigh, max); `None` = quello predefinito di claude.
+    pub effort: Option<String>,
     /// Calcolato (non salvato): sessione non pilotata da noi, scritta da meno di 60 s.
     pub maybe_open_elsewhere: bool,
 }

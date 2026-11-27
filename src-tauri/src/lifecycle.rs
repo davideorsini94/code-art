@@ -784,6 +784,7 @@ mod tests {
             model: None,
             permission_mode: "default".into(),
             context_used_pct: None,
+            effort: None,
             maybe_open_elsewhere: false,
         }
     }

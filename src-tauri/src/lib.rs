@@ -154,6 +154,7 @@ pub fn run() {
             claude::commands::conv_answer,
             claude::commands::conv_interrupt,
             claude::commands::conv_set_model,
+            claude::commands::conv_set_effort,
             claude::commands::conv_set_permission_mode,
             claude::commands::conv_mark_viewed,
             claude::commands::conv_archive,
